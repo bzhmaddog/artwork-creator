@@ -9,7 +9,7 @@
   "units": "inch",
   "placement": {
     "rotation": 90,
-    "flip_x": false,
+    "flip_x": true,
     "flip_y": true,
     "offset_mm": [0.0, 0.0]
   }

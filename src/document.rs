@@ -361,6 +361,9 @@ pub struct Layer {
     /// Placement on the page.
     pub transform: Transform,
 
+    /// The image file's original bytes, saved into project archives as they are.
+    #[serde(skip)]
+    pub data: Option<Arc<Vec<u8>>>,
     /// Full-resolution pixels, premultiplied, used for export.
     #[serde(skip)]
     pub pixmap: Option<Arc<tiny_skia::Pixmap>>,
@@ -387,6 +390,7 @@ impl Layer {
             locked: false,
             opacity: 1.0,
             transform: Transform::default(),
+            data: None,
             pixmap: None,
             preview: None,
             texture: None,
@@ -837,14 +841,13 @@ impl Document {
             ))
     }
 
-    /// Writes the project as JSON. Image paths inside the project folder are stored
-    /// relative.
-    pub fn save(&self, path: &Path) -> Result<(), String> {
-        let base = path.parent().unwrap_or(Path::new(""));
+    /// The project as JSON for the linked format. Image paths under `base` (the project
+    /// file's folder) are written relative, with forward slashes, so the project and its
+    /// images can move together and open on both Windows and Linux.
+    pub fn to_json_relative(&self, base: &Path) -> Result<String, String> {
         let mut doc = self.clone();
         doc.for_each_layer_mut(|layer| {
             if let Ok(rel) = layer.source.strip_prefix(base) {
-                // Forward slashes so the project opens on both Windows and Linux.
                 let parts: Vec<String> = rel
                     .components()
                     .map(|c| c.as_os_str().to_string_lossy().into_owned())
@@ -852,26 +855,32 @@ impl Document {
                 layer.source = PathBuf::from(parts.join("/"));
             }
         });
-        let json = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
-        std::fs::write(path, json).map_err(|e| format!("Cannot write {}: {e}", path.display()))
+        serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())
     }
 
-    /// Reads a project. Image paths come back absolute; images are not loaded yet.
+    /// Reads a linked JSON project. Image paths come back absolute; images are not
+    /// loaded yet.
     pub fn load(path: &Path) -> Result<Self, String> {
         let text = std::fs::read_to_string(path)
             .map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
-        let mut doc: Document =
-            serde_json::from_str(&text).map_err(|e| format!("Invalid project file: {e}"))?;
+        let mut doc = Self::from_json(&text)?;
         let base = path.parent().unwrap_or(Path::new(""));
-        let mut max_id = 0;
-        for n in &mut doc.layers {
-            n.for_each_node_mut(&mut |n| max_id = max_id.max(n.id()));
-        }
         doc.for_each_layer_mut(|layer| {
             if layer.source.is_relative() {
                 layer.source = base.join(&layer.source);
             }
         });
+        Ok(doc)
+    }
+
+    /// Parses a project description, making sure new ids won't clash with saved ones.
+    pub fn from_json(text: &str) -> Result<Self, String> {
+        let mut doc: Document =
+            serde_json::from_str(text).map_err(|e| format!("Invalid project file: {e}"))?;
+        let mut max_id = 0;
+        for n in &mut doc.layers {
+            n.for_each_node_mut(&mut |n| max_id = max_id.max(n.id()));
+        }
         doc.next_id = doc.next_id.max(max_id + 1);
         Ok(doc)
     }
@@ -1009,7 +1018,7 @@ mod tests {
             expanded: true,
             children: vec![Node::Layer(inner)],
         }));
-        d.save(&project).unwrap();
+        std::fs::write(&project, d.to_json_relative(&dir).unwrap()).unwrap();
         let text = std::fs::read_to_string(&project).unwrap();
         assert!(
             !text.contains(dir.to_str().unwrap()),

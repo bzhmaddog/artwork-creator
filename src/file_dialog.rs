@@ -15,6 +15,39 @@ pub enum Purpose {
     Export,
 }
 
+/// A file type offered by a dialog.
+#[derive(Clone, Copy, Debug)]
+pub struct Filter {
+    /// Label, e.g. "Images".
+    pub name: &'static str,
+    /// Lower-case extensions without dots. Empty means any file.
+    pub extensions: &'static [&'static str],
+}
+
+impl Filter {
+    pub const fn new(name: &'static str, extensions: &'static [&'static str]) -> Self {
+        Self { name, extensions }
+    }
+
+    /// The path's extension is one of this filter's (any path if it has none).
+    fn matches(&self, path: &Path) -> bool {
+        self.extensions.is_empty()
+            || path.extension().is_some_and(|x| {
+                self.extensions
+                    .contains(&x.to_string_lossy().to_lowercase().as_str())
+            })
+    }
+
+    /// Label with its extensions, e.g. "Images (*.png, *.jpg)".
+    fn label(&self) -> String {
+        if self.extensions.is_empty() {
+            format!("{} (all files)", self.name)
+        } else {
+            format!("{} (*.{})", self.name, self.extensions.join(", *."))
+        }
+    }
+}
+
 /// What to ask the user for; used by both the native and the built-in dialog.
 pub struct Request {
     /// Passed back with the result.
@@ -25,10 +58,10 @@ pub struct Request {
     pub save: bool,
     /// Allow picking several files.
     pub multiple: bool,
-    /// Label of the file type filter.
-    pub filter_name: &'static str,
-    /// Lower-case extensions without dots. Empty means any file.
-    pub extensions: &'static [&'static str],
+    /// File types to choose from, the default first. When saving, the chosen file gets
+    /// the extension of the selected type in the built-in browser; native dialogs may
+    /// leave it out, so check the extension of the result.
+    pub filters: &'static [Filter],
     /// Suggested file name when saving.
     pub default_name: String,
 }
@@ -68,8 +101,8 @@ pub fn native_available() -> bool {
 /// Shows a native dialog and returns the result immediately.
 pub fn native(req: &Request) -> Vec<PathBuf> {
     let mut d = rfd::FileDialog::new().set_title(req.title);
-    if !req.extensions.is_empty() {
-        d = d.add_filter(req.filter_name, req.extensions);
+    for f in req.filters.iter().filter(|f| !f.extensions.is_empty()) {
+        d = d.add_filter(f.name, f.extensions);
     }
     if req.save {
         d.set_file_name(&req.default_name)
@@ -98,6 +131,8 @@ pub struct FileBrowser {
     entries: Vec<Entry>,
     selected: Vec<PathBuf>,
     file_name: String,
+    /// Index of the selected file type in the request's filters.
+    filter: usize,
     error: Option<String>,
 }
 
@@ -114,6 +149,7 @@ impl Default for FileBrowser {
             entries: Vec::new(),
             selected: Vec::new(),
             file_name: String::new(),
+            filter: 0,
             error: None,
         }
     }
@@ -164,16 +200,65 @@ impl FileBrowser {
     /// Shows the browser for a request, in the last folder visited.
     pub fn open(&mut self, req: Request) {
         self.file_name = req.default_name.clone();
+        // The type of the suggested name, or the first one.
+        let suggested = Path::new(&req.default_name);
+        self.filter = req
+            .filters
+            .iter()
+            .position(|f| !f.extensions.is_empty() && f.matches(suggested))
+            .unwrap_or(0);
         self.selected.clear();
         self.request = Some(req);
         let dir = self.dir.clone();
         self.navigate(dir);
     }
 
+    /// The selected file type, if the request has any.
+    fn current_filter(&self) -> Option<Filter> {
+        let filters = self.request.as_ref()?.filters;
+        filters.get(self.filter).or(filters.first()).copied()
+    }
+
+    /// Switches the file type; when saving, the file name's extension follows.
+    fn set_filter(&mut self, index: usize) {
+        self.filter = index;
+        if let (Some(f), Some(req)) = (self.current_filter(), &self.request)
+            && req.save
+            && let Some(ext) = f.extensions.first()
+        {
+            let name = Path::new(self.file_name.trim());
+            // Swap an extension of another offered type, keep any other one.
+            let other = req
+                .filters
+                .iter()
+                .any(|g| !g.extensions.is_empty() && g.matches(name))
+                && !f.matches(name);
+            if other {
+                self.file_name = name.with_extension(ext).to_string_lossy().into_owned();
+            }
+        }
+        let dir = self.dir.clone();
+        self.navigate(dir);
+    }
+
+    /// The path to save to: the typed name, with the selected type's extension added
+    /// unless it already has it.
+    fn save_path(&self) -> PathBuf {
+        let name = self.file_name.trim();
+        let path = self.dir.join(name);
+        match self.current_filter() {
+            Some(f) if !f.matches(&path) => match f.extensions.first() {
+                Some(ext) => self.dir.join(format!("{name}.{ext}")),
+                None => path,
+            },
+            _ => path,
+        }
+    }
+
     /// Lists a folder: subfolders first, then files matching the request's extensions.
     /// Hidden files are skipped.
     fn navigate(&mut self, dir: PathBuf) {
-        let exts = self.request.as_ref().map(|r| r.extensions).unwrap_or(&[]);
+        let filter = self.current_filter();
         match std::fs::read_dir(&dir) {
             Ok(read) => {
                 let mut entries: Vec<Entry> = read
@@ -185,10 +270,7 @@ impl FileBrowser {
                         }
                         let path = e.path();
                         let is_dir = path.is_dir();
-                        let ext_ok = exts.is_empty()
-                            || path.extension().is_some_and(|x| {
-                                exts.contains(&x.to_string_lossy().to_lowercase().as_str())
-                            });
+                        let ext_ok = filter.is_none_or(|f| f.matches(&path));
                         (is_dir || ext_ok).then_some(Entry { name, path, is_dir })
                     })
                     .collect();
@@ -261,11 +343,8 @@ impl FileBrowser {
             return Action::Cancel;
         };
         let (save, multiple) = (req.save, req.multiple);
-        let filter = if req.extensions.is_empty() {
-            "All files".to_owned()
-        } else {
-            format!("{} (*.{})", req.filter_name, req.extensions.join(", *."))
-        };
+        let filters = req.filters;
+        let mut pick_filter = None;
         let mut go_to: Option<PathBuf> = None;
         let mut confirm = false;
         let mut cancel = ui.input(|i| i.key_pressed(Key::Escape));
@@ -316,7 +395,31 @@ impl FileBrowser {
                     }
                 });
             });
-            ui.weak(filter);
+            // File type: a choice when there are several.
+            ui.horizontal(|ui| {
+                ui.label("Type");
+                match filters {
+                    [] => {
+                        ui.weak("All files");
+                    }
+                    [only] => {
+                        ui.weak(only.label());
+                    }
+                    _ => {
+                        let current = filters.get(self.filter).map(Filter::label);
+                        egui::ComboBox::from_id_salt("file_type")
+                            .width(260.0)
+                            .selected_text(current.unwrap_or_default())
+                            .show_ui(ui, |ui| {
+                                for (i, f) in filters.iter().enumerate() {
+                                    if ui.selectable_label(i == self.filter, f.label()).clicked() {
+                                        pick_filter = Some(i);
+                                    }
+                                }
+                            });
+                    }
+                }
+            });
         });
 
         let list_height = ui.available_height().max(80.0);
@@ -376,6 +479,9 @@ impl FileBrowser {
                 });
         });
 
+        if let Some(i) = pick_filter {
+            self.set_filter(i);
+        }
         if let Some(dir) = go_to {
             self.navigate(dir);
         }
@@ -383,7 +489,7 @@ impl FileBrowser {
             Action::Cancel
         } else if confirm {
             Action::Confirm(if save {
-                vec![self.dir.join(self.file_name.trim())]
+                vec![self.save_path()]
             } else {
                 std::mem::take(&mut self.selected)
             })
@@ -404,6 +510,46 @@ enum Action {
 mod tests {
     use super::*;
 
+    const IMAGES: &[Filter] = &[Filter::new("Images", &["png", "jpg"])];
+    const FORMATS: &[Filter] = &[
+        Filter::new("Archive", &["artwork"]),
+        Filter::new("Linked", &["json"]),
+    ];
+
+    fn save_request(default_name: &str) -> Request {
+        Request {
+            purpose: Purpose::SaveProject,
+            title: "t",
+            save: true,
+            multiple: false,
+            filters: FORMATS,
+            default_name: default_name.into(),
+        }
+    }
+
+    #[test]
+    fn save_type_sets_the_extension() {
+        let dir = std::env::temp_dir();
+        let mut fb = FileBrowser {
+            dir: dir.clone(),
+            ..Default::default()
+        };
+        fb.open(save_request("stick.artwork"));
+        assert_eq!(fb.filter, 0);
+        // Switching type swaps the extension of the name.
+        fb.set_filter(1);
+        assert_eq!(fb.file_name, "stick.json");
+        assert_eq!(fb.save_path(), dir.join("stick.json"));
+        // A name typed without extension gets the selected type's.
+        fb.file_name = "new one".into();
+        assert_eq!(fb.save_path(), dir.join("new one.json"));
+        fb.set_filter(0);
+        assert_eq!(fb.save_path(), dir.join("new one.artwork"));
+        // The suggested name's extension picks the starting type.
+        fb.open(save_request("old.json"));
+        assert_eq!(fb.filter, 1);
+    }
+
     #[test]
     fn browser_lists_dirs_first_and_filters_extensions() {
         let dir = std::env::temp_dir().join(format!("artwork-fd-{}", std::process::id()));
@@ -420,8 +566,7 @@ mod tests {
             title: "t",
             save: false,
             multiple: true,
-            filter_name: "Images",
-            extensions: &["png", "jpg"],
+            filters: IMAGES,
             default_name: String::new(),
         });
         let names: Vec<&str> = fb.entries.iter().map(|e| e.name.as_str()).collect();

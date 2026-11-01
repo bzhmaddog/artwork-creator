@@ -7,6 +7,7 @@ mod export;
 mod file_dialog;
 mod history;
 mod layers_ui;
+mod project;
 mod recent;
 mod render;
 mod template;

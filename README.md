@@ -29,7 +29,11 @@ layers panel on the right](doc/capture.png)
   visibility.
 - **Export** PNG and/or PDF at the resolution you choose (72 to 1200 DPI). Choose which
   template lines are printed; in the PDF they stay sharp vector lines.
-- **Projects** are saved as JSON, with image paths stored relative to the project file.
+- **Projects** are saved, by default, as a single `.artwork` file (a zip archive) holding
+  the project and all its images, so it can be moved or shared on its own. **Save As**
+  can also write a linked `.json` project that points to the image files on disk; images
+  that only exist inside an archive are then written to an "*name* images" folder next to
+  it.
   **File > Open Recent** lists the last 10 projects.
 
 ## Building

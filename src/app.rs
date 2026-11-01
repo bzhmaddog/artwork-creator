@@ -8,9 +8,10 @@ use egui::{Color32, ColorImage, Key, KeyboardShortcut, Modifiers, TextureFilter,
 
 use crate::document::{Document, Layer, Node, Orientation, P2, PageSize};
 use crate::export::{self, ExportSettings};
-use crate::file_dialog::{self, FileBrowser, Purpose, Request};
+use crate::file_dialog::{self, FileBrowser, Filter, Purpose, Request};
 use crate::history::History;
 use crate::layers_ui::{self, LayersPanel};
+use crate::project;
 use crate::recent::{self, RecentFiles};
 use crate::render::{self, PlacedElement, Scene};
 use crate::template::{self, ElementKind, Template, TemplateEntry};
@@ -23,7 +24,18 @@ const MAX_PREVIEW_SIDE: u32 = 2048;
 /// Width of the preview in the Export window, in points.
 const EXPORT_PREVIEW_WIDTH: f32 = 360.0;
 const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp", "gif"];
-const PROJECT_EXTENSIONS: &[&str] = &["json"];
+const IMAGE_FILTERS: &[Filter] = &[Filter::new("Images", IMAGE_EXTENSIONS)];
+const EXPORT_FILTERS: &[Filter] = &[Filter::new("PNG / PDF", &["png", "pdf"])];
+/// Projects that can be opened: archives and linked JSON projects.
+const OPEN_PROJECT_FILTERS: &[Filter] = &[Filter::new(
+    "Artwork project",
+    &[project::EXTENSION, "json"],
+)];
+/// The two formats a project can be saved in, the default first.
+const SAVE_PROJECT_FILTERS: &[Filter] = &[
+    Filter::new("Artwork project, images included", &[project::EXTENSION]),
+    Filter::new("Linked JSON project, images as separate files", &["json"]),
+];
 
 const SHORTCUT_NEW: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::N);
 const SHORTCUT_OPEN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::O);
@@ -302,7 +314,18 @@ impl ArtworkApp {
     /// Decodes a layer's image file into its full-size pixmap, preview pixmap and screen
     /// texture.
     fn load_image(ctx: &egui::Context, layer: &mut Layer) -> Result<(), String> {
-        let img = image::open(&layer.source)
+        // The original bytes are kept, to be saved into project archives as they are.
+        let data = match &layer.data {
+            Some(data) => data.clone(),
+            None => {
+                let bytes = std::fs::read(&layer.source)
+                    .map_err(|e| format!("Cannot open {}: {e}", layer.source.display()))?;
+                let data = Arc::new(bytes);
+                layer.data = Some(data.clone());
+                data
+            }
+        };
+        let img = image::load_from_memory(&data)
             .map_err(|e| format!("Cannot open {}: {e}", layer.source.display()))?
             .to_rgba8();
         let invalid = || format!("{} has no pixels", layer.source.display());
@@ -377,9 +400,16 @@ impl ArtworkApp {
             Purpose::AddImages => self.add_images(ctx, paths),
             Purpose::OpenProject => self.open_project_path(ctx, paths.swap_remove(0)),
             Purpose::SaveProject => {
+                // The extension picks the format; without one, it's an archive.
                 let mut path = paths.swap_remove(0);
-                if path.extension().is_none() {
-                    path.set_extension("artwork.json");
+                let json = path
+                    .extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("json"));
+                if !json && !project::is_archive(&path) {
+                    let mut name = path.into_os_string();
+                    name.push(".");
+                    name.push(project::EXTENSION);
+                    path = name.into();
                 }
                 self.save_to(path);
             }
@@ -396,8 +426,7 @@ impl ArtworkApp {
                 title: "Add images",
                 save: false,
                 multiple: true,
-                filter_name: "Images",
-                extensions: IMAGE_EXTENSIONS,
+                filters: IMAGE_FILTERS,
                 default_name: String::new(),
             },
         );
@@ -426,8 +455,7 @@ impl ArtworkApp {
                 title: "Open project",
                 save: false,
                 multiple: false,
-                filter_name: "Artwork project",
-                extensions: PROJECT_EXTENSIONS,
+                filters: OPEN_PROJECT_FILTERS,
                 default_name: String::new(),
             },
         );
@@ -435,7 +463,7 @@ impl ArtworkApp {
 
     /// Loads a project and its images. Missing images are reported and drawn crossed out.
     fn open_project_path(&mut self, ctx: &egui::Context, path: PathBuf) {
-        match Document::load(&path) {
+        match project::load(&path) {
             Ok(doc) => {
                 self.doc = doc;
                 let mut missing = Vec::new();
@@ -468,7 +496,8 @@ impl ArtworkApp {
         }
     }
 
-    /// Saves to the current file, or asks for one (always with `save_as`).
+    /// Saves to the current file in its format, or asks for a file and format (always
+    /// with `save_as`).
     fn save_project(&mut self, ctx: &egui::Context, save_as: bool) {
         match (&self.project_path, save_as) {
             (Some(p), false) => self.save_to(p.clone()),
@@ -479,18 +508,43 @@ impl ArtworkApp {
                     title: "Save project",
                     save: true,
                     multiple: false,
-                    filter_name: "Artwork project",
-                    extensions: PROJECT_EXTENSIONS,
-                    default_name: format!("{}.artwork.json", self.project_name()),
+                    filters: SAVE_PROJECT_FILTERS,
+                    // Suggests the current format.
+                    default_name: format!(
+                        "{}.{}",
+                        self.project_name(),
+                        if self
+                            .project_path
+                            .as_deref()
+                            .is_some_and(|p| !project::is_archive(p))
+                        {
+                            "json"
+                        } else {
+                            project::EXTENSION
+                        }
+                    ),
                 },
             ),
         }
     }
 
-    /// Writes the project to `path` and marks it as saved.
+    /// Writes the project to `path`, as an archive or as linked JSON depending on its
+    /// extension, and marks it as saved.
     fn save_to(&mut self, path: PathBuf) {
-        match self.doc.save(&path) {
-            Ok(()) => {
+        let saved = if project::is_archive(&path) {
+            project::save(&self.doc, &path)
+        } else {
+            project::save_json(&self.doc, &path)
+        };
+        match saved {
+            Ok(missing) => {
+                if !missing.is_empty() {
+                    self.messages.push(format!(
+                        "Saved, but the image files of these layers are missing, so \
+                         the saved project can't show them:\n{}",
+                        missing.join("\n")
+                    ));
+                }
                 self.recent.add(&path);
                 self.project_path = Some(path);
                 self.history.mark_saved(&self.doc);
@@ -571,8 +625,15 @@ impl ArtworkApp {
         let mut open = None;
         for path in self.recent.paths() {
             let exists = path.is_file();
+            // The format, shown on the right like a shortcut.
+            let kind = if project::is_archive(path) {
+                "Artwork"
+            } else {
+                "Linked JSON"
+            };
+            let button = egui::Button::new(recent::label(path)).shortcut_text(kind);
             let r = ui
-                .add_enabled(exists, egui::Button::new(recent::label(path)))
+                .add_enabled(exists, button)
                 .on_hover_text(path.display().to_string())
                 .on_disabled_hover_text(format!("Not found: {}", path.display()));
             if r.clicked() {
@@ -1067,8 +1128,7 @@ impl ArtworkApp {
                     title: "Export artwork",
                     save: true,
                     multiple: false,
-                    filter_name: "PNG / PDF",
-                    extensions: &["png", "pdf"],
+                    filters: EXPORT_FILTERS,
                     default_name: name,
                 },
             );

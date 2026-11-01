@@ -132,8 +132,8 @@ pub struct CanvasState {
     cut_preview: Option<CutPreview>,
     /// Mouse position on the page, for the status bar.
     pub cursor_mm: Option<P2>,
-    /// Corner handles distort the selected layer instead of scaling it (Ctrl does the
-    /// same).
+    /// Corner handles distort the selected layer instead of scaling it. Holding Ctrl
+    /// swaps the two.
     pub distort_mode: bool,
     rect: Rect,
     drag: Option<Drag>,
@@ -314,7 +314,8 @@ pub fn show(
     let cam = state.camera;
     let shift = ui.input(|i| i.modifiers.shift);
     let alt = ui.input(|i| i.modifiers.alt);
-    let distorting = state.distort_mode || ui.input(|i| i.modifiers.command);
+    // Ctrl swaps the corner handles between resizing and distorting while held.
+    let distorting = state.distort_mode != ui.input(|i| i.modifiers.command);
 
     // Which handle (if any) of the selected layer is under a screen point.
     let handle_at = |doc: &Document, sel: Option<u64>, p: Pos2| -> Option<(u64, DragKind)> {
@@ -744,7 +745,7 @@ impl Painting<'_> {
 }
 
 /// Covers what the template cuts away (outside the outline, inside holes) with paper,
-/// slightly see-through so the artwork underneath can still be lined up.
+/// exactly as the export leaves it blank.
 fn paint_cuts(
     ctx: &egui::Context,
     painter: &egui::Painter,
@@ -793,7 +794,7 @@ fn paint_cuts(
         let rgba: Vec<u8> = keep
             .iter()
             .flat_map(|&k| {
-                let a = ((255 - k) as f32 * 0.88) as u8;
+                let a = 255 - k;
                 [a, a, a, a]
             })
             .collect();
@@ -828,7 +829,14 @@ fn paint(
 ) {
     let cam = state.camera;
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 0.0, Color32::from_gray(45));
+    // Surroundings of the page, matched to the light or dark theme.
+    let dark = ui.visuals().dark_mode;
+    let (surround, shadow, dim, border) = if dark {
+        (45, 100, 160, 110)
+    } else {
+        (205, 60, 90, 150)
+    };
+    painter.rect_filled(rect, 0.0, Color32::from_gray(surround));
 
     let page = Rect::from_min_max(
         cam.to_screen(rect, [0.0, 0.0]),
@@ -837,7 +845,7 @@ fn paint(
     painter.rect_filled(
         page.translate(vec2(5.0, 5.0)),
         0.0,
-        Color32::from_black_alpha(100),
+        Color32::from_black_alpha(shadow),
     );
     let [r, g, b] = doc.background;
     painter.rect_filled(page, 0.0, Color32::from_rgb(r, g, b));
@@ -858,7 +866,7 @@ fn paint(
     paint_cuts(ui.ctx(), &painter, doc.page_mm(), elements, state, rect);
 
     // Darken whatever falls outside the page: it will not be printed.
-    let dim = Color32::from_black_alpha(160);
+    let dim = Color32::from_black_alpha(dim);
     for r in [
         Rect::from_min_max(rect.min, pos2(rect.max.x, page.min.y)),
         Rect::from_min_max(pos2(rect.min.x, page.max.y), rect.max),
@@ -872,7 +880,7 @@ fn paint(
     painter.rect_stroke(
         page,
         0.0,
-        Stroke::new(1.0, Color32::from_gray(110)),
+        Stroke::new(1.0, Color32::from_gray(border)),
         StrokeKind::Outside,
     );
 
@@ -1123,8 +1131,22 @@ mod tests {
 
     /// Drags on the canvas from one page point to another, with the layer selected.
     fn canvas_drag(doc: &mut Document, from: P2, to: P2, modifiers: egui::Modifiers) {
+        canvas_drag_in(doc, from, to, modifiers, false);
+    }
+
+    /// `canvas_drag` with the Distort button on or off.
+    fn canvas_drag_in(
+        doc: &mut Document,
+        from: P2,
+        to: P2,
+        modifiers: egui::Modifiers,
+        distort_mode: bool,
+    ) {
         let ctx = egui::Context::default();
-        let mut state = CanvasState::default();
+        let mut state = CanvasState {
+            distort_mode,
+            ..Default::default()
+        };
         let mut selected = Some(1);
         let mut time = 0.0;
         let mut frame = |doc: &mut Document, state: &mut CanvasState, events: Vec<Event>| {
@@ -1212,6 +1234,47 @@ mod tests {
         canvas_drag(&mut doc, [100.0, 125.0], [100.0, 40.0], none);
         let t = doc.layer(1).unwrap().transform;
         assert!((t.scale[1] * 50.0 - MIN_STRETCH_MM).abs() < 1e-4, "{t:?}");
+    }
+
+    #[test]
+    fn ctrl_swaps_resize_and_distort_on_corners() {
+        let doc = || {
+            let mut l = Layer::new(1, "l".into(), "x.png".into());
+            l.size_px = [100, 50];
+            l.transform.center = [100.0, 100.0];
+            Document {
+                layers: vec![Node::Layer(l)],
+                ..Default::default()
+            }
+        };
+        let ctrl = egui::Modifiers::COMMAND;
+        let none = egui::Modifiers::NONE;
+        // Drag the bottom-right corner (150, 125) outwards.
+        let (from, to) = ([150.0, 125.0], [160.0, 135.0]);
+        let distorted = |d: &Document| d.layer(1).unwrap().transform.is_distorted();
+        let scaled = |d: &Document| d.layer(1).unwrap().transform.scale != [1.0, 1.0];
+
+        for (mods, mode, want_distort) in [
+            (none, false, false), // plain drag resizes
+            (ctrl, false, true),  // Ctrl distorts
+            (none, true, true),   // Distort on: plain drag distorts
+            (ctrl, true, false),  // Distort on: Ctrl goes back to resizing
+        ] {
+            let mut d = doc();
+            canvas_drag_in(&mut d, from, to, mods, mode);
+            assert_eq!(
+                distorted(&d),
+                want_distort,
+                "ctrl {} mode {mode}",
+                mods.command
+            );
+            assert_eq!(
+                scaled(&d),
+                !want_distort,
+                "ctrl {} mode {mode}",
+                mods.command
+            );
+        }
     }
 
     #[test]

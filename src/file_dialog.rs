@@ -4,7 +4,7 @@
 
 use std::path::{Path, PathBuf};
 
-use egui::{Color32, Key, RichText};
+use egui::{Key, RichText};
 
 /// What the dialog was opened for; returned with the chosen paths.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -231,20 +231,13 @@ impl FileBrowser {
             if closed { Action::Cancel } else { action }
         });
 
-        // Like a native dialog, block the main window while the browser is open.
+        // Like a native dialog, block the main window while the browser is open: an
+        // invisible modal dims it and catches clicks, which bring the browser to the front.
         if separate {
-            let blocker =
-                egui::Modal::new(egui::Id::unique("file_browser_blocker")).show(ctx, |ui| {
-                    ui.label(format!("{title}: choose in the file dialog."));
-                    ui.add_space(6.0);
-                    ui.button("Cancel").clicked()
-                });
-            if blocker.inner {
-                self.request = None;
-                return None;
-            }
-            // A click on the main window brings the dialog back to the front.
-            if blocker.backdrop_response.clicked() || blocker.response.clicked() {
+            let blocker = egui::Modal::new(egui::Id::unique("file_browser_blocker"))
+                .frame(egui::Frame::NONE)
+                .show(ctx, |_| {});
+            if blocker.backdrop_response.clicked() {
                 ctx.send_viewport_cmd_to(viewport, egui::ViewportCommand::Focus);
             }
         }
@@ -290,7 +283,7 @@ impl FileBrowser {
             }
         });
         if let Some(e) = &self.error {
-            ui.colored_label(Color32::from_rgb(230, 80, 80), e);
+            ui.colored_label(ui.visuals().error_fg_color, e);
         }
         ui.separator();
 

@@ -1,6 +1,7 @@
 //! PNG and PDF writers.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use printpdf::{
     Color, Line, LinePoint, Mm, Op, PdfDocument, PdfPage, PdfSaveOptions, Point, Pt, RawImage,
@@ -36,25 +37,110 @@ impl Default for ExportSettings {
     }
 }
 
+/// Progress of a running export, shared between its thread and the UI.
+#[derive(Clone, Default)]
+pub struct Progress(Arc<Mutex<ProgressState>>);
+
+#[derive(Clone, Default)]
+struct ProgressState {
+    /// 0 to 1.
+    fraction: f32,
+    /// What is being done, e.g. "Rendering".
+    stage: String,
+    cancel: bool,
+}
+
+impl Progress {
+    fn state(&self) -> std::sync::MutexGuard<'_, ProgressState> {
+        // A panic in the export thread must not take the UI down with it.
+        self.0.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    fn set(&self, stage: &str, fraction: f32) {
+        let mut s = self.state();
+        s.stage = stage.to_owned();
+        s.fraction = fraction.clamp(0.0, 1.0);
+    }
+
+    /// Fraction done (0 to 1) and the current stage.
+    pub fn get(&self) -> (f32, String) {
+        let s = self.state();
+        (s.fraction, s.stage.clone())
+    }
+
+    /// Asks the export to stop at the next step.
+    pub fn cancel(&self) {
+        self.state().cancel = true;
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.state().cancel
+    }
+}
+
+/// Share of the progress bar taken by rendering; saving the files takes the rest.
+const RENDER_SHARE: f32 = 0.6;
+
 /// Writes the requested formats next to each other, using `base` with its extension
-/// replaced.
-pub fn run(scene: &Scene, settings: &ExportSettings, base: &Path) -> Result<Vec<PathBuf>, String> {
-    let dpi = settings.dpi.clamp(72, 1200) as f32;
+/// replaced. The page is rendered once and shared by both formats. On cancel, files
+/// already written are removed.
+pub fn run(
+    scene: &Scene,
+    settings: &ExportSettings,
+    base: &Path,
+    progress: &Progress,
+) -> Result<Vec<PathBuf>, String> {
     let mut written = Vec::new();
+    let result = write_all(scene, settings, base, progress, &mut written);
+    if result.is_err() {
+        for path in &written {
+            std::fs::remove_file(path).ok();
+        }
+    }
+    result.map(|()| written)
+}
+
+fn write_all(
+    scene: &Scene,
+    settings: &ExportSettings,
+    base: &Path,
+    progress: &Progress,
+    written: &mut Vec<PathBuf>,
+) -> Result<(), String> {
+    let dpi = settings.dpi.clamp(72, 1200) as f32;
+    progress.set("Rendering", 0.0);
+    let artwork = render::compose_artwork(scene, dpi, &mut |f| {
+        progress.set("Rendering", f * RENDER_SHARE);
+        !progress.is_cancelled()
+    })?;
+    let saves = settings.png as u32 + settings.pdf as u32;
+    let mut done = 0;
+    let mut step = |stage: &str| -> Result<(), String> {
+        if progress.is_cancelled() {
+            return Err(render::CANCELLED.into());
+        }
+        let share = (1.0 - RENDER_SHARE) / saves.max(1) as f32;
+        progress.set(stage, RENDER_SHARE + share * done as f32);
+        done += 1;
+        Ok(())
+    };
     if settings.png {
+        step("Saving PNG")?;
         let path = base.with_extension("png");
-        let pixmap = render::compose(scene, dpi, true)?;
+        let mut pixmap = artwork.clone();
+        render::draw_lines(&mut pixmap, scene, dpi);
+        written.push(path.clone());
         write_png(&pixmap, dpi, &path)?;
-        written.push(path);
     }
     if settings.pdf {
+        step("Saving PDF")?;
         let path = base.with_extension("pdf");
         // Cut lines go in as vectors so they stay sharp at any zoom.
-        let pixmap = render::compose(scene, dpi, false)?;
-        write_pdf(scene, &pixmap, dpi, &path)?;
-        written.push(path);
+        written.push(path.clone());
+        write_pdf(scene, &artwork, dpi, &path)?;
     }
-    Ok(written)
+    progress.set("Done", 1.0);
+    Ok(())
 }
 
 /// Saves an opaque RGB PNG that records its DPI, so it prints at true size.
@@ -181,7 +267,9 @@ mod tests {
             dpi: 100,
             ..Default::default()
         };
-        let out = run(&scene, &settings, &dir.join("art")).unwrap();
+        let progress = Progress::default();
+        let out = run(&scene, &settings, &dir.join("art"), &progress).unwrap();
+        assert_eq!(progress.get(), (1.0, "Done".to_owned()));
         assert_eq!(out.len(), 2);
 
         let png = image::open(&out[0]).unwrap();
@@ -195,6 +283,13 @@ mod tests {
             text.contains("841.8") && text.contains("595.2"),
             "page box should be A4 landscape"
         );
+
+        // A cancelled export fails and leaves no files behind.
+        let cancelled = Progress::default();
+        cancelled.cancel();
+        let err = run(&scene, &settings, &dir.join("gone"), &cancelled).unwrap_err();
+        assert_eq!(err, render::CANCELLED);
+        assert!(!dir.join("gone.png").exists() && !dir.join("gone.pdf").exists());
         std::fs::remove_dir_all(&dir).ok();
     }
 }

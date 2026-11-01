@@ -7,8 +7,10 @@ mod export;
 mod file_dialog;
 mod history;
 mod layers_ui;
+mod recent;
 mod render;
 mod template;
+mod theme;
 mod view;
 
 /// Starts the app, opening the project file given on the command line, if any.

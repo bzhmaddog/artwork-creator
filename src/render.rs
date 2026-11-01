@@ -143,13 +143,36 @@ pub struct Scene {
 }
 
 impl Scene {
-    /// `colors` and `print` are per element kind (`ElementKind::index`).
+    /// The page as exported. `colors` and `print` are per element kind
+    /// (`ElementKind::index`).
     pub fn new(
         doc: &Document,
         template: Option<&Template>,
         colors: [[u8; 3]; 3],
         print: [bool; 3],
         cuts: Cuts,
+    ) -> Self {
+        Self::build(doc, template, colors, print, cuts, false)
+    }
+
+    /// Like `new`, but with the layers' smaller preview images: quick to render small.
+    pub fn preview(
+        doc: &Document,
+        template: Option<&Template>,
+        colors: [[u8; 3]; 3],
+        print: [bool; 3],
+        cuts: Cuts,
+    ) -> Self {
+        Self::build(doc, template, colors, print, cuts, true)
+    }
+
+    fn build(
+        doc: &Document,
+        template: Option<&Template>,
+        colors: [[u8; 3]; 3],
+        print: [bool; 3],
+        cuts: Cuts,
+        preview: bool,
     ) -> Self {
         let elements = template
             .map(|t| placed_elements(doc, t))
@@ -164,7 +187,7 @@ impl Scene {
         Self {
             page_mm: doc.page_mm(),
             background: doc.background,
-            layers: scene_nodes(&doc.layers, false),
+            layers: scene_nodes(&doc.layers, preview),
             elements,
             cuts,
         }
@@ -559,9 +582,27 @@ pub fn compose_region(
     Ok(pixmap)
 }
 
+/// Error returned when an export is cancelled.
+pub const CANCELLED: &str = "Export cancelled";
+
 /// Renders the page at `dpi`, cut by the template. With `lines`, also draws the lines of
 /// the elements marked for printing. The background is opaque, so every output pixel is.
 pub fn compose(scene: &Scene, dpi: f32, lines: bool) -> Result<Pixmap, String> {
+    let mut pixmap = compose_artwork(scene, dpi, &mut |_| true)?;
+    if lines {
+        draw_lines(&mut pixmap, scene, dpi);
+    }
+    Ok(pixmap)
+}
+
+/// Renders the background and layers at `dpi`, cut by the template, without lines.
+/// `progress` gets the fraction done after each top-level layer or group; returning
+/// false cancels with the `CANCELLED` error.
+pub fn compose_artwork(
+    scene: &Scene,
+    dpi: f32,
+    progress: &mut dyn FnMut(f32) -> bool,
+) -> Result<Pixmap, String> {
     let [w, h] = pixel_size(scene.page_mm, dpi);
     let mut pixmap =
         Pixmap::new(w, h).ok_or_else(|| format!("Cannot allocate a {w} x {h} image"))?;
@@ -569,19 +610,34 @@ pub fn compose(scene: &Scene, dpi: f32, lines: bool) -> Result<Pixmap, String> {
     pixmap.fill(tiny_skia::Color::from_rgba8(r, g, b, 255));
 
     let mm_to_px = Affine::scale(dpi / 25.4, dpi / 25.4);
-    draw_nodes(&mut pixmap.as_mut(), &scene.layers, mm_to_px)?;
+    // One step per top-level node, plus one for the cuts.
+    let steps = scene.layers.len() as f32 + 1.0;
+    for (i, node) in scene.layers.iter().enumerate() {
+        if !progress(i as f32 / steps) {
+            return Err(CANCELLED.into());
+        }
+        draw_nodes(&mut pixmap.as_mut(), std::slice::from_ref(node), mm_to_px)?;
+    }
+    if !progress((steps - 1.0) / steps) {
+        return Err(CANCELLED.into());
+    }
 
     let placed: Vec<PlacedElement> = scene.elements.iter().map(|e| e.placed.clone()).collect();
     if let Some(keep) = keep_mask(&placed, scene.cuts, [0.0, 0.0], [w, h], dpi / 25.4) {
         apply_cuts(&mut pixmap, &keep);
     }
+    progress(1.0);
+    Ok(pixmap)
+}
 
+/// Draws the lines of the template elements marked for printing, at least 1 px wide.
+pub fn draw_lines(pixmap: &mut Pixmap, scene: &Scene, dpi: f32) {
     let k = dpi / 25.4;
     let stroke = Stroke {
-        width: OUTLINE_WIDTH_MM * k,
+        width: (OUTLINE_WIDTH_MM * k).max(1.0),
         ..Default::default()
     };
-    for element in scene.elements.iter().filter(|e| lines && e.print) {
+    for element in scene.elements.iter().filter(|e| e.print) {
         let mut paint = Paint::default();
         let [r, g, b] = element.color;
         paint.set_color_rgba8(r, g, b, 255);
@@ -602,7 +658,6 @@ pub fn compose(scene: &Scene, dpi: f32, lines: bool) -> Result<Pixmap, String> {
             }
         }
     }
-    Ok(pixmap)
 }
 
 /// Opaque RGB bytes from a pixmap with an opaque background.

@@ -7,6 +7,10 @@ images on top, and export print-ready PNG or PDF at true size. The artwork is cl
 panel outline and left blank in the button and cutout holes. Runs on Windows and Linux.
 Built in Rust with [egui](https://github.com/emilk/egui).
 
+![Artwork Creator with the Cosmox T16 template: settings on the left, the A4 page with the
+template outline, buttons and fastener holes over a grid image in the middle, and the
+layers panel on the right](doc/capture.png)
+
 > **Note:** this project is shamelessly vibecoded. It was built by describing features to
 > an AI coding assistant ([Claude Code](https://claude.com/claude-code)), not by writing
 > the code by hand. It has tests and works for its author, but read the code with that in
@@ -26,6 +30,7 @@ Built in Rust with [egui](https://github.com/emilk/egui).
 - **Export** PNG and/or PDF at the resolution you choose (72 to 1200 DPI). Choose which
   template lines are printed; in the PDF they stay sharp vector lines.
 - **Projects** are saved as JSON, with image paths stored relative to the project file.
+  **File > Open Recent** lists the last 10 projects.
 
 ## Building
 
@@ -95,7 +100,8 @@ The app reloads a template when its files change on disk.
 On the canvas, with a layer selected:
 
 - **Corner handles** scale; **Shift** scales width and height freely.
-- **Ctrl+drag a corner** (or turn on **Distort** in Properties) moves that corner alone.
+- **Distort** (in Properties) makes corner handles move one corner at a time, for
+  perspective. **Holding Ctrl** swaps between resizing and distorting while you drag.
 - **Edge handles** stretch one side; **Alt** stretches both sides from the centre.
 - **Rotation handle** rotates; **Shift** snaps to 15° steps.
 

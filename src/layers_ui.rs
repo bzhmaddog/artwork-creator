@@ -785,7 +785,7 @@ pub fn show(
                     } else {
                         let mut text = RichText::new(name.as_str());
                         if missing.is_some() {
-                            text = text.color(Color32::from_rgb(230, 80, 80));
+                            text = text.color(ui.visuals().error_fg_color);
                         }
                         if row.parent_hidden {
                             text = text.weak();
@@ -1140,11 +1140,20 @@ pub fn show(
             ui.add_enabled_ui(!locked, |ui| {
                 ui.horizontal_wrapped(|ui| {
                     ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
-                    ui.toggle_value(&mut state.distort, "Distort")
+                    // Shows what the corner handles do right now: Ctrl swaps the mode
+                    // while held.
+                    let ctrl = ui.input(|i| i.modifiers.command);
+                    if ui
+                        .selectable_label(state.distort != ctrl, "Distort")
                         .on_hover_text(
-                            "Drag each corner on its own to fake perspective \
-                             (or hold Ctrl while dragging a corner)",
-                        );
+                            "On: drag each corner on its own to fake perspective.\n\
+                             Off: corners resize the image.\n\
+                             Holding Ctrl while dragging a corner swaps the two.",
+                        )
+                        .clicked()
+                    {
+                        state.distort = !state.distort;
+                    }
                     if ui
                         .add_enabled(
                             layer.transform.is_distorted(),
@@ -1165,7 +1174,7 @@ pub fn show(
             let text = format!("Print resolution: {dpi:.0} DPI");
             if dpi < 150.0 {
                 ui.colored_label(
-                    Color32::from_rgb(230, 160, 40),
+                    ui.visuals().warn_fg_color,
                     format!("{text} (may look blurry)"),
                 );
             } else {

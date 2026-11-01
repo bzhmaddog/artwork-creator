@@ -1,3 +1,4 @@
+use std::hash::{Hash, Hasher};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::thread::JoinHandle;
@@ -10,6 +11,7 @@ use crate::export::{self, ExportSettings};
 use crate::file_dialog::{self, FileBrowser, Purpose, Request};
 use crate::history::History;
 use crate::layers_ui::{self, LayersPanel};
+use crate::recent::{self, RecentFiles};
 use crate::render::{self, PlacedElement, Scene};
 use crate::template::{self, ElementKind, Template, TemplateEntry};
 use crate::view::{self, CanvasState, REAL_SIZE_ZOOM};
@@ -18,6 +20,8 @@ use crate::view::{self, CanvasState, REAL_SIZE_ZOOM};
 const MAX_TEXTURE_SIDE: u32 = 4096;
 /// Longest side of the copy used to preview semi-transparent groups on screen.
 const MAX_PREVIEW_SIDE: u32 = 2048;
+/// Width of the preview in the Export window, in points.
+const EXPORT_PREVIEW_WIDTH: f32 = 360.0;
 const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp", "gif"];
 const PROJECT_EXTENSIONS: &[&str] = &["json"];
 
@@ -50,9 +54,17 @@ pub struct ArtworkApp {
     /// The document differs from the saved project; follows `history`.
     dirty: bool,
     history: History,
+    /// Recently opened or saved projects, for File > Open Recent.
+    recent: RecentFiles,
     export_settings: ExportSettings,
     export_open: bool,
     export_job: Option<ExportJob>,
+    /// Progress of the running export, shared with its thread.
+    export_progress: export::Progress,
+    export_started: Instant,
+    /// Small render of the export shown in the Export window, with the hash of what it
+    /// shows.
+    export_preview: Option<(u64, egui::TextureHandle)>,
     messages: Vec<String>,
     title: String,
     /// Native dialogs when the system has them, otherwise the built-in browser.
@@ -71,6 +83,7 @@ impl ArtworkApp {
         cc.egui_ctx.options_mut(|o| {
             o.input_options.surrender_focus_on = egui::SurrenderFocusOn::Presses;
         });
+        crate::theme::detect_in_background(&cc.egui_ctx);
         let templates_dir = template::templates_dir();
         let templates = templates_dir
             .as_deref()
@@ -95,9 +108,13 @@ impl ArtworkApp {
             project_path: None,
             dirty: false,
             history: History::new(&Document::default()),
+            recent: RecentFiles::load(cc.storage),
             export_settings: ExportSettings::default(),
             export_open: false,
             export_job: None,
+            export_progress: export::Progress::default(),
+            export_started: Instant::now(),
+            export_preview: None,
             messages,
             title: String::new(),
             native_dialogs: file_dialog::native_available(),
@@ -437,12 +454,17 @@ impl ArtworkApp {
                 let template = self.doc.template.clone();
                 self.select_template(template, false);
                 self.selected = None;
+                self.recent.add(&path);
                 self.project_path = Some(path);
                 self.canvas.fit_pending = true;
                 self.dirty = false;
                 self.history.reset(&self.doc);
             }
-            Err(e) => self.messages.push(e),
+            Err(e) => {
+                // A file that can't be opened has no place in Open Recent.
+                self.recent.remove(&path);
+                self.messages.push(e);
+            }
         }
     }
 
@@ -469,6 +491,7 @@ impl ArtworkApp {
     fn save_to(&mut self, path: PathBuf) {
         match self.doc.save(&path) {
             Ok(()) => {
+                self.recent.add(&path);
                 self.project_path = Some(path);
                 self.history.mark_saved(&self.doc);
                 self.dirty = false;
@@ -506,8 +529,11 @@ impl ArtworkApp {
         );
         let settings = self.export_settings.clone();
         self.export_open = false;
+        self.export_progress = export::Progress::default();
+        self.export_started = Instant::now();
+        let progress = self.export_progress.clone();
         self.export_job = Some(std::thread::spawn(move || {
-            export::run(&scene, &settings, &base)
+            export::run(&scene, &settings, &base, &progress)
         }));
     }
 
@@ -528,6 +554,9 @@ impl ArtworkApp {
                     .collect::<Vec<_>>()
                     .join("\n")
             )),
+            Some(Ok(Err(e))) if e == render::CANCELLED => {
+                self.messages.push("Export cancelled.".into())
+            }
             Some(Ok(Err(e))) => self.messages.push(format!("Export failed: {e}")),
             Some(Err(_)) => self.messages.push("Export failed unexpectedly.".into()),
             None => {}
@@ -535,6 +564,30 @@ impl ArtworkApp {
     }
 
     // ---- UI ----
+
+    /// Entries of File > Open Recent. Projects that are missing (e.g. on an unplugged
+    /// drive) stay listed but greyed out.
+    fn recent_menu(&mut self, ui: &mut egui::Ui) {
+        let mut open = None;
+        for path in self.recent.paths() {
+            let exists = path.is_file();
+            let r = ui
+                .add_enabled(exists, egui::Button::new(recent::label(path)))
+                .on_hover_text(path.display().to_string())
+                .on_disabled_hover_text(format!("Not found: {}", path.display()));
+            if r.clicked() {
+                open = Some(path.clone());
+            }
+        }
+        ui.separator();
+        if ui.button("Clear list").clicked() {
+            self.recent.clear();
+        }
+        if let Some(path) = open {
+            let ctx = ui.ctx().clone();
+            self.open_project_path(&ctx, path);
+        }
+    }
 
     /// File, Edit and View menus.
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
@@ -554,6 +607,9 @@ impl ArtworkApp {
                 if item(ui, "Open…", Some(&SHORTCUT_OPEN)) {
                     self.open_project(&ctx);
                 }
+                ui.add_enabled_ui(!self.recent.paths().is_empty(), |ui| {
+                    ui.menu_button("Open Recent", |ui| self.recent_menu(ui));
+                });
                 if item(ui, "Save", Some(&SHORTCUT_SAVE)) {
                     self.save_project(&ctx, false);
                 }
@@ -561,9 +617,6 @@ impl ArtworkApp {
                     self.save_project(&ctx, true);
                 }
                 ui.separator();
-                if item(ui, "Add images…", None) {
-                    self.pick_images(&ctx);
-                }
                 if item(ui, "Export…", Some(&SHORTCUT_EXPORT)) {
                     self.export_open = true;
                 }
@@ -594,6 +647,8 @@ impl ArtworkApp {
                 }
                 ui.checkbox(&mut self.canvas.show_template, "Show template lines");
                 ui.checkbox(&mut self.canvas.preview_cuts, "Preview cuts");
+                ui.separator();
+                ui.menu_button("Theme", crate::theme::menu);
             });
         });
     }
@@ -818,7 +873,7 @@ impl ArtworkApp {
                 if off {
                     ui.separator();
                     ui.colored_label(
-                        Color32::from_rgb(230, 160, 40),
+                        ui.visuals().warn_fg_color,
                         "Template does not fit on this page",
                     );
                 }
@@ -831,8 +886,104 @@ impl ArtworkApp {
         });
     }
 
+    /// Re-renders the Export window's preview when the project or the export options
+    /// changed. Uses the layers' preview images, so it stays quick.
+    fn update_export_preview(&mut self, ctx: &egui::Context) {
+        let colors = self.canvas.element_color.map(|c| [c.r(), c.g(), c.b()]);
+        let s = &self.export_settings;
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        serde_json::to_string(&self.doc)
+            .unwrap_or_default()
+            .hash(&mut h);
+        (colors, s.print_lines, s.cuts, &self.template_stamp).hash(&mut h);
+        // Images loaded or reloaded change the pixels, not the saved project.
+        for leaf in self.doc.leaves() {
+            leaf.layer.preview.as_ref().map(Arc::as_ptr).hash(&mut h);
+        }
+        let key = h.finish();
+        if self.export_preview.as_ref().is_some_and(|(k, _)| *k == key) {
+            return;
+        }
+        let scene = Scene::preview(
+            &self.doc,
+            self.template.as_ref(),
+            colors,
+            s.print_lines,
+            s.cuts,
+        );
+        let [pw, ph] = self.doc.page_mm();
+        // Rendered at twice the shown width, for high-DPI screens.
+        let dpi = EXPORT_PREVIEW_WIDTH * 2.0 / (pw.max(ph) / 25.4);
+        match render::compose(&scene, dpi, true) {
+            Ok(pixmap) => {
+                let image = ColorImage::from_rgba_premultiplied(
+                    [pixmap.width() as usize, pixmap.height() as usize],
+                    pixmap.data(),
+                );
+                let texture = match self.export_preview.take() {
+                    Some((_, mut t)) => {
+                        t.set(image, TextureOptions::LINEAR);
+                        t
+                    }
+                    None => ctx.load_texture("export-preview", image, TextureOptions::LINEAR),
+                };
+                self.export_preview = Some((key, texture));
+            }
+            Err(e) => log::warn!("export preview: {e}"),
+        }
+    }
+
+    /// Progress window shown while an export runs, with a Cancel button.
+    fn export_progress_window(&mut self, ctx: &egui::Context) {
+        if self.export_job.is_none() {
+            return;
+        }
+        let (fraction, stage) = self.export_progress.get();
+        let cancelling = self.export_progress.is_cancelled();
+        egui::Modal::new(egui::Id::unique("export-progress")).show(ctx, |ui| {
+            ui.set_width(320.0);
+            ui.heading("Exporting");
+            ui.add_space(4.0);
+            ui.label(if cancelling {
+                "Cancelling…"
+            } else {
+                stage.as_str()
+            });
+            ui.add(
+                egui::ProgressBar::new(fraction)
+                    .show_percentage()
+                    .animate(true),
+            );
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.weak(format!(
+                    "{:.0} s",
+                    self.export_started.elapsed().as_secs_f32().floor()
+                ));
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui
+                        .add_enabled(!cancelling, egui::Button::new("Cancel"))
+                        .clicked()
+                    {
+                        self.export_progress.cancel();
+                    }
+                });
+            });
+        });
+    }
+
     /// Export options; the Export button opens the save dialog.
     fn export_window(&mut self, ctx: &egui::Context) {
+        if !self.export_open {
+            // Free the preview texture while the window is closed.
+            self.export_preview = None;
+            return;
+        }
+        self.update_export_preview(ctx);
+        let preview = self
+            .export_preview
+            .as_ref()
+            .map(|(_, t)| (t.id(), t.size_vec2()));
         let mut open = self.export_open;
         let mut go = false;
         egui::Window::new("Export")
@@ -840,54 +991,71 @@ impl ArtworkApp {
             .collapsible(false)
             .resizable(false)
             .show(ctx, |ui| {
-                let s = &mut self.export_settings;
-                ui.horizontal(|ui| {
-                    ui.label("Formats");
-                    ui.checkbox(&mut s.png, "PNG");
-                    ui.checkbox(&mut s.pdf, "PDF");
-                });
-                ui.horizontal(|ui| {
-                    ui.label("Resolution");
-                    ui.add(
-                        egui::DragValue::new(&mut s.dpi)
-                            .range(72..=1200)
-                            .suffix(" DPI"),
-                    );
-                });
-                let template = self.template.as_ref();
-                let has = |k: ElementKind| template.is_some_and(|t| t.has(k));
-                if template.is_some() {
-                    ui.add_space(4.0);
-                    ui.strong("Template");
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label("Print lines");
-                        for k in ElementKind::ALL.into_iter().filter(|&k| has(k)) {
-                            ui.checkbox(&mut s.print_lines[k.index()], k.label());
+                ui.horizontal_top(|ui| {
+                    if let Some((tex, size)) = preview {
+                        let size = size * (EXPORT_PREVIEW_WIDTH / size.x);
+                        ui.vertical(|ui| {
+                            egui::Frame::new()
+                                .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+                                .show(ui, |ui| ui.image((tex, size)));
+                            ui.weak("Preview");
+                        });
+                        ui.add_space(8.0);
+                    }
+                    ui.vertical(|ui| {
+                        // At least wide enough that the checkbox labels don't wrap; rows
+                        // that need more widen the column.
+                        ui.set_min_width(250.0);
+                        let s = &mut self.export_settings;
+                        ui.horizontal(|ui| {
+                            ui.label("Formats");
+                            ui.checkbox(&mut s.png, "PNG");
+                            ui.checkbox(&mut s.pdf, "PDF");
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Resolution");
+                            ui.add(
+                                egui::DragValue::new(&mut s.dpi)
+                                    .range(72..=1200)
+                                    .suffix(" DPI"),
+                            );
+                        });
+                        let template = self.template.as_ref();
+                        let has = |k: ElementKind| template.is_some_and(|t| t.has(k));
+                        if template.is_some() {
+                            ui.add_space(4.0);
+                            ui.strong("Template");
+                            ui.horizontal(|ui| {
+                                ui.label("Print lines");
+                                for k in ElementKind::ALL.into_iter().filter(|&k| has(k)) {
+                                    ui.checkbox(&mut s.print_lines[k.index()], k.label());
+                                }
+                            });
+                            ui.add_enabled(
+                                has(ElementKind::Outline),
+                                egui::Checkbox::new(
+                                    &mut s.cuts.clip_to_outline,
+                                    "Leave blank outside the outline",
+                                ),
+                            );
+                            ui.add_enabled(
+                                has(ElementKind::Buttons) || has(ElementKind::Cutouts),
+                                egui::Checkbox::new(
+                                    &mut s.cuts.blank_holes,
+                                    "Leave buttons and cutouts blank",
+                                ),
+                            );
+                            ui.add_space(4.0);
+                        }
+                        let [w, h] = render::pixel_size(self.doc.page_mm(), s.dpi as f32);
+                        ui.weak(format!("{} at {w} x {h} px", self.doc.page.label()));
+                        ui.add_space(6.0);
+                        let can = (s.png || s.pdf) && self.export_job.is_none();
+                        if ui.add_enabled(can, egui::Button::new("Export…")).clicked() {
+                            go = true;
                         }
                     });
-                    ui.add_enabled(
-                        has(ElementKind::Outline),
-                        egui::Checkbox::new(
-                            &mut s.cuts.clip_to_outline,
-                            "Leave blank outside the outline",
-                        ),
-                    );
-                    ui.add_enabled(
-                        has(ElementKind::Buttons) || has(ElementKind::Cutouts),
-                        egui::Checkbox::new(
-                            &mut s.cuts.blank_holes,
-                            "Leave buttons and cutouts blank",
-                        ),
-                    );
-                    ui.add_space(4.0);
-                }
-                let [w, h] = render::pixel_size(self.doc.page_mm(), s.dpi as f32);
-                ui.weak(format!("{} at {w} x {h} px", self.doc.page.label()));
-                ui.add_space(6.0);
-                let can = (s.png || s.pdf) && self.export_job.is_none();
-                if ui.add_enabled(can, egui::Button::new("Export…")).clicked() {
-                    go = true;
-                }
+                });
             });
         self.export_open = open;
         if go {
@@ -1001,6 +1169,11 @@ impl ArtworkApp {
 }
 
 impl eframe::App for ArtworkApp {
+    /// Keeps app settings between sessions (eframe also stores the theme and window).
+    fn save(&mut self, storage: &mut dyn eframe::Storage) {
+        self.recent.save(storage);
+    }
+
     /// One frame: input, panels, canvas and dialogs, then an undo step if the project
     /// changed.
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
@@ -1027,13 +1200,16 @@ impl eframe::App for ArtworkApp {
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui, &elements));
         egui::Panel::left("settings")
             .resizable(true)
-            .default_size(230.0)
+            .default_size(240.0)
+            .min_size(240.0)
             .show(ui, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| self.settings_panel(ui));
             });
+        // The layer panel's rows (toolbar, align, properties) need 310 points.
         egui::Panel::right("layers")
             .resizable(true)
-            .default_size(300.0)
+            .default_size(320.0)
+            .min_size(310.0)
             .show(ui, |ui| {
                 let bounds = Self::outline_bounds(&elements);
                 let out = layers_ui::show(
@@ -1064,6 +1240,7 @@ impl eframe::App for ArtworkApp {
         });
 
         self.export_window(&ctx);
+        self.export_progress_window(&ctx);
         if let Some((purpose, paths)) = self.browser.show(&ctx) {
             self.on_files(&ctx, purpose, paths);
         }

@@ -102,7 +102,11 @@ On the canvas, with a layer selected:
 ## License
 
 Licensed under the [PolyForm Noncommercial License 1.0.0](LICENSE): free to use, copy,
-modify and share for any non-commercial purpose. For commercial use, please contact the
-author.
+modify and share for any non-commercial purpose.
 
-Artwork you create with the app is yours; the license covers the software only.
+**Selling artwork made with this app is not allowed.** Using it to make artwork, panels or
+controllers for sale (commissions, shops, made-to-order or batch production) is commercial
+use and needs the author's permission. Making artwork for your own controller is fine,
+and so is selling your own controller secondhand later.
+
+For commercial use, please contact the author.

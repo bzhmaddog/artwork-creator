@@ -1,0 +1,5 @@
+# Cross-compile a Windows build from WSL2:
+#   cargo build --release --target x86_64-pc-windows-gnu
+# Requires the mingw toolchain: sudo apt install mingw-w64
+[target.x86_64-pc-windows-gnu]
+linker = "x86_64-w64-mingw32-gcc"

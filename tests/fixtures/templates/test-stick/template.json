@@ -1,0 +1,16 @@
+{
+  "name": "Test stick",
+  "elements": [
+    {"kind": "outline", "dxf": "outline.dxf", "name": "Outline"},
+    {"kind": "buttons", "dxf": "buttons.dxf", "name": "Action buttons"},
+    {"kind": "buttons", "dxf": "menu.dxf", "name": "Menu buttons"},
+    {"kind": "cutouts", "dxf": "holes.dxf", "name": "Fastener holes"}
+  ],
+  "units": "inch",
+  "placement": {
+    "rotation": 90,
+    "flip_x": false,
+    "flip_y": true,
+    "offset_mm": [0.0, 0.0]
+  }
+}

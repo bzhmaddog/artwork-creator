@@ -55,6 +55,18 @@ make test       # run the tests
 make dist       # package each build with the templates folder into dist/
 ```
 
+## Development
+
+After cloning, install the git hooks once:
+
+```sh
+git clone https://github.com/bzhmaddog/artwork-creator.git
+cd artwork-creator
+
+# Install hooks
+make hooks
+```
+
 ## Templates
 
 The app looks for a `templates` folder next to the executable, then in the current

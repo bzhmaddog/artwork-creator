@@ -12,6 +12,7 @@
 #   make run          run the Linux debug build
 #   make run-windows  run the Windows debug build (from WSL)
 #   make test         run the test suite
+#   make hooks        run fmt, clippy and tests before each git commit
 #   make dist         package each release build with its templates folder into dist/
 #   make clean        remove build outputs
 
@@ -25,7 +26,7 @@ LINUX_BIN   := target/$(LINUX)/release/$(APP)
 WINDOWS_BIN := target/$(WINDOWS)/release/$(APP).exe
 
 .PHONY: all linux windows debug debug-linux debug-windows run run-windows \
-        test check fmt clippy dist dist-linux dist-windows clean
+        test check fmt clippy hooks dist dist-linux dist-windows clean
 
 all: linux windows
 
@@ -51,6 +52,10 @@ run-windows: debug-windows
 
 test:
 	$(CARGO) test
+
+# Git hooks are versioned in .githooks/; this points the local clone at them.
+hooks:
+	git config core.hooksPath .githooks
 
 check:
 	$(CARGO) check --target $(LINUX)

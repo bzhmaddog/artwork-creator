@@ -248,11 +248,10 @@ mod tests {
     use crate::template;
 
     #[test]
-    fn exports_png_and_pdf_with_t16_outline() {
+    fn exports_png_and_pdf_with_template_outline() {
         let dir = std::env::temp_dir().join(format!("artwork-export-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let entry =
-            template::scan(&Path::new(env!("CARGO_MANIFEST_DIR")).join("templates")).remove(0);
+        let entry = template::tests::fixture();
         let tpl = template::load(&entry).unwrap();
         let mut doc = Document::default();
         doc.template_placement = entry.default_placement(tpl.size_mm, doc.page_mm());

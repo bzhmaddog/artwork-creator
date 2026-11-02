@@ -557,20 +557,25 @@ pub fn load(entry: &TemplateEntry) -> Result<Template, String> {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    fn t16() -> TemplateEntry {
-        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("templates");
-        scan(&dir)
+    /// Folder of the templates used by the tests, independent of the shipped ones.
+    pub(crate) fn fixtures_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/templates")
+    }
+
+    /// A 4 x 6 inch stick in four files, its outline drawn as separate lines.
+    pub(crate) fn fixture() -> TemplateEntry {
+        scan(&fixtures_dir())
             .into_iter()
-            .find(|t| t.id == "cosmox - T16")
-            .expect("T16 template folder")
+            .find(|t| t.id == "test-stick")
+            .expect("test-stick fixture folder")
     }
 
     #[test]
-    fn t16_loads_at_true_size() {
-        let t = load(&t16()).unwrap();
+    fn fixture_loads_at_true_size() {
+        let t = load(&fixture()).unwrap();
         let summary: Vec<_> = t
             .elements
             .iter()
@@ -580,9 +585,9 @@ mod tests {
             summary,
             [
                 (ElementKind::Outline, "Outline", 1),
-                (ElementKind::Buttons, "Action buttons", 16),
-                (ElementKind::Buttons, "Menu buttons", 5),
-                (ElementKind::Cutouts, "Fastener holes", 10),
+                (ElementKind::Buttons, "Action buttons", 3),
+                (ElementKind::Buttons, "Menu buttons", 2),
+                (ElementKind::Cutouts, "Fastener holes", 2),
             ]
         );
         // Everything is closed, the panel edge included (drawn as separate pieces).
@@ -592,14 +597,14 @@ mod tests {
                 .flat_map(|e| &e.polylines)
                 .all(|p| p.closed)
         );
-        // 7.715 x 11.652 inches.
+        // 4 x 6 inches.
         assert!(
-            (t.size_mm[0] - 195.96).abs() < 0.5,
+            (t.size_mm[0] - 101.6).abs() < 1e-3,
             "width {}",
             t.size_mm[0]
         );
         assert!(
-            (t.size_mm[1] - 295.96).abs() < 0.5,
+            (t.size_mm[1] - 152.4).abs() < 1e-3,
             "height {}",
             t.size_mm[1]
         );
@@ -619,10 +624,11 @@ mod tests {
     }
 
     #[test]
-    fn t16_config_is_landscape_and_flipped() {
-        let e = t16();
+    fn config_placement_is_read() {
+        let e = fixture();
         assert!(e.config_error.is_none(), "{:?}", e.config_error);
-        let p = e.config.placement.expect("T16 placement");
+        assert_eq!(e.name, "Test stick");
+        let p = e.config.placement.expect("fixture placement");
         assert_eq!((p.rotation, p.flip_x, p.flip_y), (90, false, true));
     }
 
@@ -630,7 +636,7 @@ mod tests {
     fn config_roundtrip_keeps_other_fields() {
         let dir = std::env::temp_dir().join(format!("artwork-tpl-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::copy(&t16().sources[0].path, dir.join("a.dxf")).unwrap();
+        std::fs::copy(&fixture().sources[0].path, dir.join("a.dxf")).unwrap();
         std::fs::write(
             dir.join(CONFIG_FILE),
             r#"{ "name": "My stick", "units": "inch" }"#,

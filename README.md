@@ -28,7 +28,8 @@ layers panel on the right](doc/capture.png)
 - **Templates** made of several elements, each in its own DXF file, with its own colour and
   visibility.
 - **Export** PNG and/or PDF at the resolution you choose (72 to 1200 DPI). Choose which
-  template lines are printed; in the PDF they stay sharp vector lines.
+  template lines are printed (in the PDF they stay sharp vector lines), and whether the
+  inside of buttons and of cutouts is left blank or printed over.
 - **Projects** are saved, by default, as a single `.artwork` file (a zip archive) holding
   the project and all its images, so it can be moved or shared on its own. **Save As**
   can also write a linked `.json` project that points to the image files on disk; images
@@ -88,7 +89,7 @@ describes the elements:
 ```
 
 - `kind` is `outline`, `buttons` or `cutouts`. The outline clips the artwork; buttons and
-  cutouts are holes, left blank in the export.
+  cutouts are holes, left blank in the export unless turned off in the Export window.
 - All DXF files of a template must share the same coordinates, as when they are exported
   from one drawing. Outlines drawn as separate lines and arcs are joined automatically.
 - `units` (`mm`, `cm` or `inch`) is used when the DXF files don't declare their units.

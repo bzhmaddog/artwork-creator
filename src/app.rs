@@ -82,9 +82,35 @@ pub struct ArtworkApp {
     /// Native dialogs when the system has them, otherwise the built-in browser.
     native_dialogs: bool,
     browser: FileBrowser,
+    /// A save or export waiting for the user to agree to replace existing files.
+    overwrite: Option<Overwrite>,
     /// Modification times of the current template's files, to reload on change.
     template_stamp: Vec<Option<SystemTime>>,
     last_template_check: Instant,
+}
+
+/// A save or export held until the user agrees to replace existing files.
+struct Overwrite {
+    purpose: Purpose,
+    /// Where to save or export, as `on_files` resolved it.
+    path: PathBuf,
+    /// The files that would be replaced.
+    existing: Vec<PathBuf>,
+}
+
+/// The file a project is saved to: the extension picks the format; without one of the
+/// project extensions, it's an archive.
+fn project_save_path(path: PathBuf) -> PathBuf {
+    let json = path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("json"));
+    if json || project::is_archive(&path) {
+        return path;
+    }
+    let mut name = path.into_os_string();
+    name.push(".");
+    name.push(project::EXTENSION);
+    name.into()
 }
 
 impl ArtworkApp {
@@ -131,6 +157,7 @@ impl ArtworkApp {
             title: String::new(),
             native_dialogs: file_dialog::native_available(),
             browser: FileBrowser::default(),
+            overwrite: None,
             template_stamp: Vec::new(),
             last_template_check: Instant::now(),
         };
@@ -384,36 +411,124 @@ impl ArtworkApp {
         if self.native_dialogs {
             let paths = file_dialog::native(&req);
             if !paths.is_empty() {
-                self.on_files(ctx, req.purpose, paths);
+                self.on_files(ctx, req.purpose, paths, true);
             }
         } else {
             self.browser.open(req);
         }
     }
 
-    /// Acts on the paths chosen in a file dialog.
-    fn on_files(&mut self, ctx: &egui::Context, purpose: Purpose, mut paths: Vec<PathBuf>) {
+    /// Acts on the paths chosen in a file dialog. Before a save or export replaces
+    /// existing files, asks the user; `native` dialogs have already asked about the
+    /// chosen file itself.
+    fn on_files(
+        &mut self,
+        ctx: &egui::Context,
+        purpose: Purpose,
+        mut paths: Vec<PathBuf>,
+        native: bool,
+    ) {
         if paths.is_empty() {
             return;
         }
-        match purpose {
-            Purpose::AddImages => self.add_images(ctx, paths),
-            Purpose::OpenProject => self.open_project_path(ctx, paths.swap_remove(0)),
-            Purpose::SaveProject => {
-                // The extension picks the format; without one, it's an archive.
-                let mut path = paths.swap_remove(0);
-                let json = path
-                    .extension()
-                    .is_some_and(|e| e.eq_ignore_ascii_case("json"));
-                if !json && !project::is_archive(&path) {
-                    let mut name = path.into_os_string();
-                    name.push(".");
-                    name.push(project::EXTENSION);
-                    path = name.into();
-                }
-                self.save_to(path);
+        let chosen = paths.swap_remove(0);
+        let path = match purpose {
+            Purpose::AddImages => {
+                paths.insert(0, chosen);
+                return self.add_images(ctx, paths);
             }
-            Purpose::Export => self.start_export(paths.swap_remove(0)),
+            Purpose::OpenProject => return self.open_project_path(ctx, chosen),
+            Purpose::SaveProject => project_save_path(chosen.clone()),
+            Purpose::Export => chosen.clone(),
+        };
+        let existing: Vec<PathBuf> = self
+            .files_written(purpose, &path)
+            .into_iter()
+            .filter(|p| p.exists() && !(native && *p == chosen))
+            .collect();
+        if existing.is_empty() {
+            self.write_files(purpose, path);
+        } else {
+            self.overwrite = Some(Overwrite {
+                purpose,
+                path,
+                existing,
+            });
+        }
+    }
+
+    /// The files a save or export to `path` writes.
+    fn files_written(&self, purpose: Purpose, path: &Path) -> Vec<PathBuf> {
+        match purpose {
+            Purpose::Export => {
+                let s = &self.export_settings;
+                [(s.png, "png"), (s.pdf, "pdf")]
+                    .into_iter()
+                    .filter(|&(on, _)| on)
+                    .map(|(_, ext)| path.with_extension(ext))
+                    .collect()
+            }
+            _ => vec![path.to_path_buf()],
+        }
+    }
+
+    /// Saves or exports to `path`, once any overwrite is agreed.
+    fn write_files(&mut self, purpose: Purpose, path: PathBuf) {
+        match purpose {
+            Purpose::SaveProject => self.save_to(path),
+            Purpose::Export => self.start_export(path),
+            Purpose::AddImages | Purpose::OpenProject => {}
+        }
+    }
+
+    /// Asks whether to replace the files a save or export would overwrite.
+    fn overwrite_modal(&mut self, ctx: &egui::Context) {
+        let Some(pending) = &self.overwrite else {
+            return;
+        };
+        let names: Vec<String> = pending
+            .existing
+            .iter()
+            .map(|p| {
+                p.file_name()
+                    .unwrap_or(p.as_os_str())
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect();
+        let folder = pending
+            .existing
+            .first()
+            .and_then(|p| p.parent())
+            .map(|d| d.display().to_string())
+            .unwrap_or_default();
+        let mut replace = false;
+        let mut cancel = false;
+        let response = egui::Modal::new(egui::Id::unique("overwrite")).show(ctx, |ui| {
+            ui.set_max_width(420.0);
+            ui.strong(if names.len() == 1 {
+                "Replace the existing file?"
+            } else {
+                "Replace the existing files?"
+            });
+            ui.add_space(6.0);
+            for name in &names {
+                ui.label(name);
+            }
+            ui.weak(format!("already exists in {folder}"));
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                replace |= ui.button("Replace").clicked();
+                cancel |= ui.button("Cancel").clicked();
+            });
+        });
+        cancel |= response.should_close();
+        if replace && !cancel {
+            if let Some(Overwrite { purpose, path, .. }) = self.overwrite.take() {
+                self.write_files(purpose, path);
+            }
+        } else if cancel {
+            self.overwrite = None;
         }
     }
 
@@ -591,7 +706,7 @@ impl ArtworkApp {
         }));
     }
 
-    /// Reports the export's result once its thread has finished.
+    /// Reports a failed or cancelled export once its thread has finished.
     fn poll_export(&mut self, ctx: &egui::Context) {
         let Some(job) = &self.export_job else { return };
         if !job.is_finished() {
@@ -600,14 +715,8 @@ impl ArtworkApp {
         }
         let result = self.export_job.take().map(|j| j.join());
         match result {
-            Some(Ok(Ok(paths))) => self.messages.push(format!(
-                "Exported:\n{}",
-                paths
-                    .iter()
-                    .map(|p| p.display().to_string())
-                    .collect::<Vec<_>>()
-                    .join("\n")
-            )),
+            // Success is silent: the progress window closing is enough.
+            Some(Ok(Ok(paths))) => log::info!("exported {paths:?}"),
             Some(Ok(Err(e))) if e == render::CANCELLED => {
                 self.messages.push("Export cancelled.".into())
             }
@@ -1099,13 +1208,17 @@ impl ArtworkApp {
                                     "Leave blank outside the outline",
                                 ),
                             );
-                            ui.add_enabled(
-                                has(ElementKind::Buttons) || has(ElementKind::Cutouts),
-                                egui::Checkbox::new(
-                                    &mut s.cuts.blank_holes,
-                                    "Leave buttons and cutouts blank",
-                                ),
-                            );
+                            if has(ElementKind::Buttons) || has(ElementKind::Cutouts) {
+                                ui.horizontal(|ui| {
+                                    ui.label("Leave blank inside");
+                                    if has(ElementKind::Buttons) {
+                                        ui.checkbox(&mut s.cuts.blank_buttons, "Buttons");
+                                    }
+                                    if has(ElementKind::Cutouts) {
+                                        ui.checkbox(&mut s.cuts.blank_cutouts, "Cutouts");
+                                    }
+                                });
+                            }
                             ui.add_space(4.0);
                         }
                         let [w, h] = render::pixel_size(self.doc.page_mm(), s.dpi as f32);
@@ -1135,7 +1248,7 @@ impl ArtworkApp {
         }
     }
 
-    /// Shows queued messages (errors, export results) one at a time.
+    /// Shows queued messages (errors, a cancelled export) one at a time.
     fn message_modal(&mut self, ctx: &egui::Context) {
         let Some(msg) = self.messages.first().cloned() else {
             return;
@@ -1302,8 +1415,9 @@ impl eframe::App for ArtworkApp {
         self.export_window(&ctx);
         self.export_progress_window(&ctx);
         if let Some((purpose, paths)) = self.browser.show(&ctx) {
-            self.on_files(&ctx, purpose, paths);
+            self.on_files(&ctx, purpose, paths, false);
         }
+        self.overwrite_modal(&ctx);
         self.message_modal(&ctx);
 
         // Record a step once the edit is over: no button held, no text being typed.
@@ -1311,5 +1425,26 @@ impl eframe::App for ArtworkApp {
         self.history.update(&self.doc, finished);
         self.dirty = self.history.is_modified();
         self.update_title(&ctx);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn project_save_path_adds_archive_extension() {
+        let p = |s: &str| project_save_path(PathBuf::from(s));
+        assert_eq!(p("/a/stick.json"), PathBuf::from("/a/stick.json"));
+        assert_eq!(p("/a/stick.JSON"), PathBuf::from("/a/stick.JSON"));
+        assert_eq!(
+            p("/a/stick"),
+            PathBuf::from(format!("/a/stick.{}", project::EXTENSION))
+        );
+        // A dot in the name is not an extension of ours.
+        assert_eq!(
+            p("/a/v1.2"),
+            PathBuf::from(format!("/a/v1.2.{}", project::EXTENSION))
+        );
     }
 }

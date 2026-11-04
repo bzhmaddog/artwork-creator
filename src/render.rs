@@ -105,15 +105,29 @@ pub struct PlacedElement {
 pub struct Cuts {
     /// Nothing outside the outline is printed.
     pub clip_to_outline: bool,
-    /// Nothing is printed inside buttons and cutouts.
-    pub blank_holes: bool,
+    /// Nothing is printed inside buttons.
+    pub blank_buttons: bool,
+    /// Nothing is printed inside cutouts.
+    pub blank_cutouts: bool,
+}
+
+impl Cuts {
+    /// Whether the inside of `kind` is left blank. The outline is never a hole.
+    pub fn blanks(self, kind: ElementKind) -> bool {
+        match kind {
+            ElementKind::Outline => false,
+            ElementKind::Buttons => self.blank_buttons,
+            ElementKind::Cutouts => self.blank_cutouts,
+        }
+    }
 }
 
 impl Default for Cuts {
     fn default() -> Self {
         Self {
             clip_to_outline: true,
-            blank_holes: true,
+            blank_buttons: true,
+            blank_cutouts: true,
         }
     }
 }
@@ -244,20 +258,18 @@ pub fn keep_mask(
 ) -> Option<Vec<u8>> {
     let to_px =
         Affine::translate(-origin_mm[0], -origin_mm[1]).then(Affine::scale(px_per_mm, px_per_mm));
-    let of = |hole: bool| {
-        elements
+    let of = |keep: &dyn Fn(ElementKind) -> bool| {
+        let polylines = elements
             .iter()
-            .filter(move |e| e.kind.is_hole() == hole)
-            .flat_map(|e| &e.polylines)
+            .filter(|e| keep(e.kind))
+            .flat_map(|e| &e.polylines);
+        closed_path(polylines, to_px)
     };
     let outline = cuts
         .clip_to_outline
-        .then(|| closed_path(of(false), to_px))
+        .then(|| of(&|k| !k.is_hole()))
         .flatten();
-    let holes = cuts
-        .blank_holes
-        .then(|| closed_path(of(true), to_px))
-        .flatten();
+    let holes = of(&|k| cuts.blanks(k));
     if outline.is_none() && holes.is_none() {
         return None;
     }
@@ -866,9 +878,20 @@ mod tests {
         assert!(pm.pixel(50, 10).unwrap().red() < 200, "outline line");
         assert_eq!(pm.pixel(25, 20).unwrap().red(), 255, "no button line");
 
+        // Buttons can be printed over while cutouts stay blank.
+        scene.cuts.blank_buttons = false;
+        let pm = compose(&scene, 25.4, false).unwrap();
+        assert_eq!(pm.pixel(25, 25).unwrap().red(), 0, "button printed over");
+        assert_eq!(
+            pm.pixel(72, 22).unwrap().red(),
+            255,
+            "screw hole still blank"
+        );
+
         scene.cuts = Cuts {
             clip_to_outline: false,
-            blank_holes: false,
+            blank_buttons: false,
+            blank_cutouts: false,
         };
         let pm = compose(&scene, 25.4, false).unwrap();
         assert_eq!(pm.pixel(5, 5).unwrap().red(), 0);
@@ -928,7 +951,8 @@ mod tests {
             }],
             cuts: Cuts {
                 clip_to_outline: false,
-                blank_holes: false,
+                blank_buttons: false,
+                blank_cutouts: false,
             },
         };
         let pm = compose(&scene, 254.0, true).unwrap(); // 10 px per mm

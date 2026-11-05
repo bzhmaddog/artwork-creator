@@ -6,6 +6,9 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
+use crate::effects::EffectInstance;
+use crate::effects::cache::Processed;
+
 /// A 2D point or vector, usually in page millimetres.
 pub type P2 = [f32; 2];
 
@@ -360,6 +363,9 @@ pub struct Layer {
     pub opacity: f32,
     /// Placement on the page.
     pub transform: Transform,
+    /// Effects applied to the image, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effects: Vec<EffectInstance>,
 
     /// The image file's original bytes, saved into project archives as they are.
     #[serde(skip)]
@@ -376,6 +382,10 @@ pub struct Layer {
     /// The image file couldn't be loaded.
     #[serde(skip)]
     pub broken: bool,
+    /// The image with its effects applied, for the screen. Kept up to date by
+    /// `EffectCache`; not kept in undo snapshots.
+    #[serde(skip)]
+    pub fx: Option<Processed>,
 }
 
 impl Layer {
@@ -390,11 +400,49 @@ impl Layer {
             locked: false,
             opacity: 1.0,
             transform: Transform::default(),
+            effects: Vec::new(),
             data: None,
             pixmap: None,
             preview: None,
             texture: None,
             broken: false,
+            fx: None,
+        }
+    }
+
+    /// Texture to draw on the canvas: with the effects applied once they are computed.
+    pub fn shown_texture(&self) -> Option<&egui::TextureHandle> {
+        match &self.fx {
+            Some(fx) => Some(&fx.texture),
+            None => self.texture.as_ref(),
+        }
+    }
+
+    /// Area covered by `shown_texture` and `shown_preview`, in source pixels (left, top,
+    /// right, bottom): the image, plus any margin its effects draw into.
+    pub fn shown_rect(&self) -> [f32; 4] {
+        let [w, h] = self.size_px.map(|v| v as f32);
+        match &self.fx {
+            Some(fx) => [-fx.pad[0], -fx.pad[1], w + fx.pad[2], h + fx.pad[3]],
+            None => [0.0, 0.0, w, h],
+        }
+    }
+
+    /// Part of `shown_texture` holding the image itself, in texture coordinates (min x,
+    /// min y, max x, max y).
+    pub fn image_uv(&self) -> [f32; 4] {
+        let [x0, y0, x1, y1] = self.shown_rect();
+        let [w, h] = self.size_px.map(|v| v as f32);
+        let (sw, sh) = ((x1 - x0).max(1e-6), (y1 - y0).max(1e-6));
+        [-x0 / sw, -y0 / sh, (w - x0) / sw, (h - y0) / sh]
+    }
+
+    /// Small pixmap for on-screen compositing, with the effects applied like
+    /// `shown_texture`.
+    pub fn shown_preview(&self) -> Option<&Arc<tiny_skia::Pixmap>> {
+        match &self.fx {
+            Some(fx) => Some(&fx.preview),
+            None => self.preview.as_ref(),
         }
     }
 
@@ -1044,6 +1092,22 @@ mod tests {
             "transform":{"center":[0,0],"scale":[1,1],"rotation_deg":0,"flip_x":false,"flip_y":false}}]}"#;
         let d: Document = serde_json::from_str(json).unwrap();
         assert_eq!(d.layers[0].as_layer().unwrap().id, 3);
+    }
+
+    #[test]
+    fn effects_are_saved_and_kept_even_when_unknown() {
+        use crate::effects::{EffectInstance, ParamValues};
+        let mut l = Layer::new(1, "a".into(), "a.png".into());
+        let plain = serde_json::to_string(&l).unwrap();
+        assert!(!plain.contains("effects"), "no key when there are none");
+        l.effects.push(EffectInstance {
+            effect: "plugin.not-installed".into(),
+            enabled: false,
+            params: ParamValues::from([("x".into(), serde_json::Value::from(3))]),
+        });
+        let json = serde_json::to_string(&l).unwrap();
+        let back: Layer = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.effects, l.effects);
     }
 
     #[test]

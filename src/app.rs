@@ -7,6 +7,7 @@ use std::time::{Duration, Instant, SystemTime};
 use egui::{Color32, ColorImage, Key, KeyboardShortcut, Modifiers, TextureFilter, TextureOptions};
 
 use crate::document::{Document, Layer, Node, Orientation, P2, PageSize};
+use crate::effects::cache::EffectCache;
 use crate::export::{self, ExportSettings};
 use crate::file_dialog::{self, FileBrowser, Filter, Purpose, Request};
 use crate::history::History;
@@ -77,6 +78,8 @@ pub struct ArtworkApp {
     /// Small render of the export shown in the Export window, with the hash of what it
     /// shows.
     export_preview: Option<(u64, egui::TextureHandle)>,
+    /// Layer images with their effects applied, for the screen.
+    effect_cache: EffectCache,
     messages: Vec<String>,
     title: String,
     /// Native dialogs when the system has them, otherwise the built-in browser.
@@ -153,6 +156,7 @@ impl ArtworkApp {
             export_progress: export::Progress::default(),
             export_started: Instant::now(),
             export_preview: None,
+            effect_cache: EffectCache::default(),
             messages,
             title: String::new(),
             native_dialogs: file_dialog::native_available(),
@@ -318,26 +322,6 @@ impl ArtworkApp {
 
     // ---- Images ----
 
-    /// Shrinks an image so its longest side is at most `max_side`; borrows it if it's
-    /// already small enough.
-    fn downscale(img: &image::RgbaImage, max_side: u32) -> std::borrow::Cow<'_, image::RgbaImage> {
-        let (w, h) = img.dimensions();
-        if w.max(h) <= max_side {
-            return std::borrow::Cow::Borrowed(img);
-        }
-        let k = max_side as f32 / w.max(h) as f32;
-        let (dw, dh) = (
-            ((w as f32 * k).round() as u32).max(1),
-            ((h as f32 * k).round() as u32).max(1),
-        );
-        std::borrow::Cow::Owned(image::imageops::resize(
-            img,
-            dw,
-            dh,
-            image::imageops::FilterType::Triangle,
-        ))
-    }
-
     /// Decodes a layer's image file into its full-size pixmap, preview pixmap and screen
     /// texture.
     fn load_image(ctx: &egui::Context, layer: &mut Layer) -> Result<(), String> {
@@ -358,12 +342,12 @@ impl ArtworkApp {
         let invalid = || format!("{} has no pixels", layer.source.display());
         let (w, h) = img.dimensions();
         layer.size_px = [w, h];
-        let display = Self::downscale(&img, MAX_TEXTURE_SIDE);
+        let display = render::downscale(&img, MAX_TEXTURE_SIDE);
         let color = ColorImage::from_rgba_unmultiplied(
             [display.width() as usize, display.height() as usize],
             display.as_raw(),
         );
-        let preview = render::premultiplied_pixmap(&Self::downscale(&display, MAX_PREVIEW_SIDE))
+        let preview = render::premultiplied_pixmap(&render::downscale(&display, MAX_PREVIEW_SIDE))
             .ok_or_else(invalid)?;
         let options = TextureOptions {
             mipmap_mode: Some(TextureFilter::Linear),
@@ -1056,6 +1040,13 @@ impl ArtworkApp {
         });
     }
 
+    /// Brings the layers' on-screen images up to date with their effects.
+    fn sync_effects(&mut self, ctx: &egui::Context) {
+        // Quick, smaller results while a slider or value is being dragged.
+        let quick = ctx.input(|i| i.pointer.any_down());
+        self.effect_cache.sync(ctx, &mut self.doc, quick);
+    }
+
     /// Re-renders the Export window's preview when the project or the export options
     /// changed. Uses the layers' preview images, so it stays quick.
     fn update_export_preview(&mut self, ctx: &egui::Context) {
@@ -1068,7 +1059,7 @@ impl ArtworkApp {
         (colors, s.print_lines, s.cuts, &self.template_stamp).hash(&mut h);
         // Images loaded or reloaded change the pixels, not the saved project.
         for leaf in self.doc.leaves() {
-            leaf.layer.preview.as_ref().map(Arc::as_ptr).hash(&mut h);
+            leaf.layer.shown_preview().map(Arc::as_ptr).hash(&mut h);
         }
         let key = h.finish();
         if self.export_preview.as_ref().is_some_and(|(k, _)| *k == key) {
@@ -1366,6 +1357,8 @@ impl eframe::App for ArtworkApp {
         self.shortcuts(&ctx);
         self.poll_export(&ctx);
         self.watch_template(&ctx);
+        // Undo, redo or a reload may have changed effects or images.
+        self.sync_effects(&ctx);
 
         let elements = self.elements();
 
@@ -1397,6 +1390,9 @@ impl eframe::App for ArtworkApp {
                     self.pick_images(&ctx);
                 }
             });
+
+        // Show effect changes made in the layer panel on this frame's canvas.
+        self.sync_effects(&ctx);
 
         // Settings may have moved the template this frame.
         let elements = self.elements();

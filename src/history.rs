@@ -22,6 +22,14 @@ pub struct History {
     saved_key: String,
 }
 
+/// A copy of `doc` to keep as a step, without the on-screen effect results: they can be
+/// large, and `EffectCache` brings them back.
+fn snapshot(doc: &Document) -> Document {
+    let mut d = doc.clone();
+    d.for_each_layer_mut(|l| l.fx = None);
+    d
+}
+
 /// What gets compared: everything saved to the project file.
 fn key(doc: &Document) -> String {
     serde_json::to_string(doc).unwrap_or_default()
@@ -34,7 +42,7 @@ impl History {
         Self {
             undo: Vec::new(),
             redo: Vec::new(),
-            current: doc.clone(),
+            current: snapshot(doc),
             current_key: k.clone(),
             saved_key: k,
         }
@@ -54,7 +62,7 @@ impl History {
         if k == self.current_key {
             return;
         }
-        let prev = std::mem::replace(&mut self.current, doc.clone());
+        let prev = std::mem::replace(&mut self.current, snapshot(doc));
         self.undo.push(prev);
         if self.undo.len() > MAX_STEPS {
             self.undo.remove(0);

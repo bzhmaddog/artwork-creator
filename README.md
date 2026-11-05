@@ -23,6 +23,10 @@ layers panel on the right](doc/capture.png)
   a whole.
 - **Transform on the canvas**: move, scale, rotate, stretch width or height on its own, and
   drag single corners to fake perspective.
+- **Effects** on each image layer: brightness / contrast, hue / saturation, grayscale,
+  sepia, tint, invert, posterize, threshold, Gaussian blur, sharpen, drop shadow and
+  outline. They are stacked, reordered and toggled in the layer's properties, applied to
+  the export at full resolution, and never change the image file.
 - **Align** layers or groups to the page or to the template.
 - **Undo / redo** for every change to the project.
 - **Templates** made of several elements, each in its own DXF file, with its own colour and

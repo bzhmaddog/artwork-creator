@@ -8,6 +8,7 @@ use tiny_skia::{
 };
 
 use crate::document::{Affine, Document, Homography, Node, P2};
+use crate::effects::{self, EffectInstance};
 use crate::template::{ElementKind, Polyline, Template};
 
 /// Width of printed cut lines.
@@ -21,6 +22,11 @@ pub struct SceneLayer {
     pub map: Homography,
     /// Its opacity, with any group opacity folded in.
     pub opacity: f32,
+    /// Effects still to apply to `pixmap` when drawing: empty for previews, whose
+    /// pixmaps already have them.
+    pub effects: Vec<EffectInstance>,
+    /// Size of `pixmap` relative to the source image, for the effects.
+    pub effects_scale: f32,
 }
 
 /// What gets drawn: an image, or a group composited on its own.
@@ -55,17 +61,37 @@ pub fn scene_nodes(nodes: &[Node], preview: bool) -> Vec<SceneNode> {
                 if !l.visible || l.opacity <= 0.0 {
                     continue;
                 }
-                let src = if preview { &l.preview } else { &l.pixmap };
+                let src = if preview {
+                    l.shown_preview()
+                } else {
+                    l.pixmap.as_ref()
+                };
                 let Some(pm) = src else { continue };
-                // The pixmap may be smaller than the source image.
+                let effects = if !preview && effects::is_active(&l.effects) {
+                    l.effects.clone()
+                } else {
+                    Vec::new()
+                };
+                // Area of the pixmap in source pixels: previews may carry margins drawn by
+                // effects, and pixmaps may be smaller than the source image.
+                let [x0, y0, x1, y1] = if preview {
+                    l.shown_rect()
+                } else {
+                    [0.0, 0.0, l.size_px[0] as f32, l.size_px[1] as f32]
+                };
                 let k = [
-                    l.size_px[0] as f32 / pm.width() as f32,
-                    l.size_px[1] as f32 / pm.height() as f32,
+                    (x1 - x0) / pm.width() as f32,
+                    (y1 - y0) / pm.height() as f32,
                 ];
                 out.push(SceneNode::Image(SceneLayer {
                     pixmap: pm.clone(),
-                    map: Homography::from(Affine::scale(k[0], k[1])).then(l.homography()),
+                    map: Homography::from(
+                        Affine::scale(k[0], k[1]).then(Affine::translate(x0, y0)),
+                    )
+                    .then(l.homography()),
                     opacity: l.opacity.min(1.0),
+                    effects,
+                    effects_scale: 1.0 / k[0],
                 }));
             }
             Node::Group(g) => {
@@ -338,6 +364,26 @@ pub fn premultiplied_pixmap(img: &image::RgbaImage) -> Option<Pixmap> {
     Pixmap::from_vec(data, IntSize::from_wh(img.width(), img.height())?)
 }
 
+/// Shrinks an image so its longest side is at most `max_side`; borrows it if it's
+/// already small enough.
+pub fn downscale(img: &image::RgbaImage, max_side: u32) -> std::borrow::Cow<'_, image::RgbaImage> {
+    let (w, h) = img.dimensions();
+    if w.max(h) <= max_side {
+        return std::borrow::Cow::Borrowed(img);
+    }
+    let k = max_side as f32 / w.max(h) as f32;
+    let (dw, dh) = (
+        ((w as f32 * k).round() as u32).max(1),
+        ((h as f32 * k).round() as u32).max(1),
+    );
+    std::borrow::Cow::Owned(image::imageops::resize(
+        img,
+        dw,
+        dh,
+        image::imageops::FilterType::Triangle,
+    ))
+}
+
 /// Axis-aligned bounds (min, max) of the drawn nodes, after mapping by `m`.
 pub fn bounds(nodes: &[SceneNode], m: Affine) -> Option<(P2, P2)> {
     let mut acc: Option<(P2, P2)> = None;
@@ -521,7 +567,18 @@ fn draw_nodes(target: &mut PixmapMut, nodes: &[SceneNode], to_px: Affine) -> Res
     for node in nodes {
         match node {
             SceneNode::Image(l) => {
-                let map = l.map.then_affine(to_px);
+                let processed;
+                let (pixmap, map) = if l.effects.is_empty() {
+                    (&l.pixmap, l.map)
+                } else {
+                    let (pm, pad) = effects::apply_pixmap(&l.pixmap, &l.effects, l.effects_scale)
+                        .ok_or("Cannot apply the effects of a layer")?;
+                    processed = Arc::new(pm);
+                    // The margins the effects added lie left of and above the image.
+                    let shift = Affine::translate(-(pad[0] as f32), -(pad[1] as f32));
+                    (&processed, Homography::from(shift).then(l.map))
+                };
+                let map = map.then_affine(to_px);
                 match map.as_affine() {
                     Some(affine) => {
                         let paint = PixmapPaint {
@@ -532,13 +589,13 @@ fn draw_nodes(target: &mut PixmapMut, nodes: &[SceneNode], to_px: Affine) -> Res
                         target.draw_pixmap(
                             0,
                             0,
-                            l.pixmap.as_ref().as_ref(),
+                            pixmap.as_ref().as_ref(),
                             &paint,
                             to_skia(affine),
                             None,
                         );
                     }
-                    None => draw_warped(target, &l.pixmap, map, l.opacity)?,
+                    None => draw_warped(target, pixmap, map, l.opacity)?,
                 }
             }
             SceneNode::Group { opacity, children } => {
@@ -922,6 +979,29 @@ mod tests {
     }
 
     #[test]
+    fn export_applies_layer_effects() {
+        use crate::effects::{EffectInstance, registry};
+        let mut l = crate::document::Layer::new(1, "a".into(), "a.png".into());
+        let img = image::RgbaImage::from_pixel(10, 10, image::Rgba([0, 0, 255, 255]));
+        l.pixmap = Some(Arc::new(premultiplied_pixmap(&img).unwrap()));
+        l.size_px = [10, 10];
+        l.transform.center = [5.0, 5.0];
+        l.effects.push(EffectInstance::new(
+            registry().get("builtin.invert").unwrap(),
+        ));
+        let scene = Scene {
+            page_mm: [10.0, 10.0],
+            background: [255, 255, 255],
+            layers: scene_nodes(&[Node::Layer(l)], false),
+            elements: Vec::new(),
+            cuts: Cuts::default(),
+        };
+        let pm = compose(&scene, 25.4, false).unwrap();
+        let px = pm.pixel(5, 5).unwrap();
+        assert_eq!((px.red(), px.green(), px.blue()), (255, 255, 0));
+    }
+
+    #[test]
     fn compose_draws_layer_and_outline() {
         let mut img = image::RgbaImage::new(10, 10);
         for p in img.pixels_mut() {
@@ -937,6 +1017,8 @@ mod tests {
                     .then(Affine::translate(25.0, 25.0))
                     .into(),
                 opacity: 1.0,
+                effects: Vec::new(),
+                effects_scale: 1.0,
             })],
             elements: vec![SceneElement {
                 placed: PlacedElement {

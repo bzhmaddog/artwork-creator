@@ -3,6 +3,8 @@
 
 mod app;
 mod document;
+mod effects;
+mod effects_ui;
 mod export;
 mod file_dialog;
 mod history;

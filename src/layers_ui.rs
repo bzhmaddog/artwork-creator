@@ -6,6 +6,7 @@ use egui::{
 };
 
 use crate::document::{Document, Group, Node, P2};
+use crate::effects_ui;
 
 /// Width of one nesting level in the layer list.
 const INDENT: f32 = 14.0;
@@ -474,14 +475,20 @@ fn lock_toggle(ui: &mut Ui, locked: &mut bool, dim: bool) -> Response {
 }
 
 /// Square thumbnail of a layer: the middle of the image, cropped to fill the square.
-fn thumbnail(ui: &mut Ui, tex: Option<egui::TextureId>, size_px: [u32; 2]) {
+/// `image_uv` is the part of the texture holding the image, without margins drawn by
+/// effects.
+fn thumbnail(ui: &mut Ui, tex: Option<egui::TextureId>, size_px: [u32; 2], image_uv: [f32; 4]) {
     let (rect, _) = ui.allocate_exact_size(vec2(THUMB, THUMB), Sense::hover());
     let radius = 3.0;
     if let Some(tex) = tex {
         let [w, h] = size_px.map(|v| v.max(1) as f32);
         // Fraction of the image kept along each axis.
         let (kx, ky) = if w > h { (h / w, 1.0) } else { (1.0, w / h) };
-        let uv = Rect::from_center_size(pos2(0.5, 0.5), vec2(kx, ky));
+        let [u0, v0, u1, v1] = image_uv;
+        let uv = Rect::from_center_size(
+            pos2((u0 + u1) / 2.0, (v0 + v1) / 2.0),
+            vec2(kx * (u1 - u0), ky * (v1 - v0)),
+        );
         egui::Image::new((tex, rect.size()))
             .uv(uv)
             .corner_radius(radius)
@@ -530,7 +537,7 @@ fn expander(ui: &mut Ui, expanded: &mut bool) {
 
 /// Icons of the toolbar under the layer list.
 #[derive(Clone, Copy)]
-enum Tool {
+pub enum Tool {
     Add,
     Group,
     Ungroup,
@@ -546,7 +553,7 @@ enum Tool {
 const TOOL: f32 = 24.0;
 
 /// A flat icon button of the layer toolbar; returns whether it was clicked.
-fn tool_button(ui: &mut Ui, tool: Tool, enabled: bool, tip: &str) -> bool {
+pub fn tool_button(ui: &mut Ui, tool: Tool, enabled: bool, tip: &str) -> bool {
     let sense = if enabled {
         Sense::click()
     } else {
@@ -732,11 +739,10 @@ pub fn show(
     let sel = selected.filter(|&id| doc.path_of(id).is_some());
     let has = sel.is_some();
     let is_group = sel.and_then(|id| doc.node(id)?.as_group()).is_some();
-    let page_center = doc.page_center();
-    let page = doc.page_mm();
 
     // Layer list, top of the stack first.
     let mut pending_drop = None;
+    let mut pending_duplicate = None;
     egui::ScrollArea::vertical()
         .id_salt("layer_list")
         .max_height(ui.available_height() * 0.5)
@@ -767,7 +773,8 @@ pub fn show(
                     match &*node {
                         Node::Group(_) => folder_icon(ui),
                         Node::Layer(l) => {
-                            thumbnail(ui, l.texture.as_ref().map(|t| t.id()), l.size_px);
+                            let tex = l.shown_texture().map(|t| t.id());
+                            thumbnail(ui, tex, l.size_px, l.image_uv());
                         }
                     }
                     let broken = node.as_layer().filter(|l| l.broken);
@@ -796,6 +803,14 @@ pub fn show(
                                 .sense(Sense::click_and_drag()),
                         );
                         r.dnd_set_drag_payload(DraggedNode(row.id));
+                        r.context_menu(|ui| {
+                            if ui
+                                .add(Button::new("Duplicate").shortcut_text("Ctrl+D"))
+                                .clicked()
+                            {
+                                pending_duplicate = Some(row.id);
+                            }
+                        });
                         if r.dragged()
                             && let Some(p) = ui.ctx().pointer_interact_pos()
                         {
@@ -869,6 +884,10 @@ pub fn show(
     if let Some((id, target)) = pending_drop {
         out.changed |= drop_node(doc, id, target);
     }
+    if let Some(id) = pending_duplicate {
+        *selected = Some(id);
+        out.changed |= duplicate(doc, selected);
+    }
 
     // Toolbar under the list, as in most layer panels.
     ui.add_space(2.0);
@@ -918,10 +937,29 @@ pub fn show(
     });
 
     ui.separator();
+    egui::ScrollArea::vertical()
+        .id_salt("layer_props")
+        .show(ui, |ui| {
+            properties(ui, doc, sel, state, template_bounds, &mut out)
+        });
+    out
+}
+
+/// Alignment, properties and effects of the selected layer or group.
+fn properties(
+    ui: &mut Ui,
+    doc: &mut Document,
+    sel: Option<u64>,
+    state: &mut LayersPanel,
+    template_bounds: Option<(P2, P2)>,
+    out: &mut LayersOutput,
+) {
     let Some(id) = sel else {
         ui.weak("Select a layer to edit it.");
-        return out;
+        return;
     };
+    let page_center = doc.page_center();
+    let page = doc.page_mm();
     let locked = doc.effectively_locked(id);
     // Align the selection with the page or the template outline.
     ui.horizontal(|ui| {
@@ -1184,10 +1222,13 @@ pub fn show(
                 "Source: {} x {} px",
                 layer.size_px[0], layer.size_px[1]
             ));
+
+            ui.add_space(6.0);
+            ui.separator();
+            out.changed |= effects_ui::show(ui, layer.id, &mut layer.effects);
         }
         None => {}
     }
-    out
 }
 
 #[cfg(test)]
@@ -1226,6 +1267,8 @@ mod tests {
         selected: Option<u64>,
         state: LayersPanel,
         time: f64,
+        /// Centres of the dots drawn in the last frame (effect drag handles).
+        dots: Vec<Pos2>,
     }
 
     impl Harness {
@@ -1241,6 +1284,7 @@ mod tests {
                 selected: None,
                 state: LayersPanel::default(),
                 time: 0.0,
+                dots: Vec::new(),
             };
             h.frame(vec![]);
             h.frame(vec![]);
@@ -1260,6 +1304,14 @@ mod tests {
                 show(ui, &mut self.doc, &mut self.selected, &mut self.state, None);
             });
             out.textures_delta.clear();
+            self.dots = out
+                .shapes
+                .iter()
+                .filter_map(|c| match &c.shape {
+                    Shape::Circle(d) => Some(d.center),
+                    _ => None,
+                })
+                .collect();
             out.shapes
                 .iter()
                 .filter_map(|c| match &c.shape {
@@ -1292,6 +1344,37 @@ mod tests {
             self.pointer(p, None);
             self.pointer(p, Some(true));
             self.pointer(p, Some(false));
+        }
+
+        /// Middle of the drag handle left of an effect's name.
+        fn handle(&mut self, name: &str) -> Pos2 {
+            let labels = self.frame(vec![]);
+            let (_, t) = labels.into_iter().find(|(t, _)| t == name).expect(name);
+            let dots: Vec<Pos2> = self
+                .dots
+                .iter()
+                .copied()
+                .filter(|d| d.x < t.x && (t.y - 6.0..t.y + 22.0).contains(&d.y))
+                .collect();
+            assert_eq!(dots.len(), 6, "handle of {name}");
+            let sum = dots.iter().fold(vec2(0.0, 0.0), |a, d| a + d.to_vec2());
+            (sum / 6.0).to_pos2()
+        }
+
+        fn secondary_click(&mut self, p: Pos2) {
+            self.pointer(p, None);
+            for pressed in [true, false] {
+                self.frame(vec![
+                    egui::Event::PointerMoved(p),
+                    egui::Event::PointerButton {
+                        pos: p,
+                        button: egui::PointerButton::Secondary,
+                        pressed,
+                        modifiers: Default::default(),
+                    },
+                ]);
+            }
+            self.frame(vec![]);
         }
 
         fn drag(&mut self, from: Pos2, to: Pos2) {
@@ -1358,6 +1441,77 @@ mod tests {
         let to = h.label("beta") + vec2(0.0, 7.0);
         h.drag(from, to);
         assert_eq!(shape(&h.doc.layers), "100[1 2]");
+    }
+
+    #[test]
+    fn panel_adds_and_removes_effects() {
+        let mut h = Harness::new(doc_with(vec![named(1, "alpha")]));
+        h.selected = Some(1);
+        let p = h.label("Add effect");
+        h.click(p);
+        let p = h.label("Invert");
+        h.click(p);
+        let effects = |h: &Harness| h.doc.layer(1).unwrap().effects.clone();
+        assert_eq!(effects(&h).len(), 1);
+        assert_eq!(effects(&h)[0].effect, "builtin.invert");
+
+        // Parameters get controls built from their specs.
+        let p = h.label("Add effect");
+        h.click(p);
+        let p = h.label("Gaussian blur");
+        h.click(p);
+        h.label("Radius");
+        assert_eq!(effects(&h)[1].effect, "builtin.blur");
+
+        let ids =
+            |h: &Harness| -> Vec<String> { effects(h).into_iter().map(|e| e.effect).collect() };
+        // Dragging the name does nothing: only the handle moves effects.
+        let from = h.label("Invert");
+        let to = h.label("Radius");
+        h.drag(from, to);
+        assert_eq!(ids(&h), ["builtin.invert", "builtin.blur"]);
+
+        // Drag Invert's handle onto the lower half of the blur (its Radius row).
+        let from = h.handle("Invert");
+        let to = h.label("Radius");
+        h.drag(from, to);
+        assert_eq!(ids(&h), ["builtin.blur", "builtin.invert"]);
+        // And back, released in the space just above the list.
+        let from = h.handle("Invert");
+        let to = h.handle("Gaussian blur") - vec2(0.0, 14.0);
+        h.drag(from, to);
+        assert_eq!(ids(&h), ["builtin.invert", "builtin.blur"]);
+
+        // Remove from the right-click menu; the blur stays.
+        let p = h.label("Invert");
+        h.secondary_click(p);
+        let p = h.label("Remove");
+        h.click(p);
+        assert_eq!(ids(&h), ["builtin.blur"]);
+    }
+
+    #[test]
+    fn right_click_duplicates_a_layer_with_its_effects() {
+        let mut h = Harness::new(doc_with(vec![named(1, "alpha")]));
+        h.doc
+            .layer_mut(1)
+            .unwrap()
+            .effects
+            .push(crate::effects::EffectInstance::new(
+                crate::effects::registry().get("builtin.invert").unwrap(),
+            ));
+        let p = h.label("alpha");
+        h.secondary_click(p);
+        let p = h.label("Duplicate");
+        h.click(p);
+        let copy = h
+            .doc
+            .node(h.selected.unwrap())
+            .and_then(Node::as_layer)
+            .unwrap();
+        assert_eq!(copy.name, "alpha copy");
+        assert_eq!(copy.effects, h.doc.layer(1).unwrap().effects);
+        assert_ne!(copy.id, 1);
     }
 
     #[test]

@@ -559,23 +559,19 @@ fn paint_layer(
     tex: egui::TextureId,
     opacity: f32,
 ) {
-    let corners = l.corners().map(|p| cam.to_screen(rect, p));
-    if !l.transform.is_distorted() {
-        paint_quad(painter, tex, corners, opacity);
-        return;
-    }
+    // The texture may reach past the image, where effects such as shadows draw.
     let m: Homography = l.homography().then_affine(cam.affine(rect));
-    let (w, h) = (l.size_px[0] as f32, l.size_px[1] as f32);
-    paint_grid(
-        painter,
-        tex,
-        WARP_GRID,
-        |u, v| {
-            let p = m.apply([u * w, v * h]);
-            pos2(p[0], p[1])
-        },
-        opacity,
-    );
+    let [x0, y0, x1, y1] = l.shown_rect();
+    let at = |u: f32, v: f32| {
+        let p = m.apply([x0 + u * (x1 - x0), y0 + v * (y1 - y0)]);
+        pos2(p[0], p[1])
+    };
+    if !l.transform.is_distorted() {
+        let corners = [at(0.0, 0.0), at(1.0, 0.0), at(1.0, 1.0), at(0.0, 1.0)];
+        paint_quad(painter, tex, corners, opacity);
+    } else {
+        paint_grid(painter, tex, WARP_GRID, at, opacity);
+    }
 }
 
 /// Missing image: its footprint crossed out.
@@ -626,7 +622,7 @@ impl Painting<'_> {
     fn nodes(&mut self, nodes: &[Node], opacity: f32) {
         for node in nodes {
             match node {
-                Node::Layer(l) if l.visible => match &l.texture {
+                Node::Layer(l) if l.visible => match l.shown_texture() {
                     Some(tex) => paint_layer(
                         &self.painter,
                         self.cam,
@@ -662,7 +658,7 @@ impl Painting<'_> {
     fn missing(&self, nodes: &[Node]) {
         for node in nodes {
             match node {
-                Node::Layer(l) if l.visible && l.texture.is_none() => {
+                Node::Layer(l) if l.visible && l.shown_texture().is_none() => {
                     paint_missing(
                         &self.painter,
                         l.corners().map(|p| self.cam.to_screen(self.rect, p)),

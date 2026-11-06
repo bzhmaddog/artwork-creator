@@ -13,6 +13,7 @@
 #   make run-windows  run the Windows debug build (from WSL)
 #   make test         run the test suite
 #   make hooks        run fmt, clippy and tests before each git commit
+#   make plugins      build the example plugins for Linux and Windows into plugins/
 #   make dist         package each release build with its templates folder into dist/
 #   make clean        remove build outputs
 
@@ -25,8 +26,13 @@ DIST    := dist
 LINUX_BIN   := target/$(LINUX)/release/$(APP)
 WINDOWS_BIN := target/$(WINDOWS)/release/$(APP).exe
 
+# Example plugins (crates in plugin-examples/), built as .so and .dll into plugins/,
+# where the app finds them when run from the repository.
+PLUGINS     := halftone
+PLUGINS_DIR := plugins
+
 .PHONY: all linux windows debug debug-linux debug-windows run run-windows \
-        test check fmt clippy hooks dist dist-linux dist-windows clean
+        test check fmt clippy hooks plugins dist dist-linux dist-windows clean
 
 all: linux windows
 
@@ -51,22 +57,30 @@ run-windows: debug-windows
 	./target/$(WINDOWS)/debug/$(APP).exe $(ARGS)
 
 test:
-	$(CARGO) test
+	$(CARGO) test --workspace
+
+plugins:
+	$(CARGO) build --release --target $(LINUX) $(PLUGINS:%=-p %)
+	$(CARGO) build --release --target $(WINDOWS) $(PLUGINS:%=-p %)
+	mkdir -p $(PLUGINS_DIR)
+	for p in $(PLUGINS); do \
+		cp target/$(LINUX)/release/lib$$p.so target/$(WINDOWS)/release/$$p.dll $(PLUGINS_DIR)/; \
+	done
 
 # Git hooks are versioned in .githooks/; this points the local clone at them.
 hooks:
 	git config core.hooksPath .githooks
 
 check:
-	$(CARGO) check --target $(LINUX)
-	$(CARGO) check --target $(WINDOWS)
+	$(CARGO) check --workspace --target $(LINUX)
+	$(CARGO) check --workspace --target $(WINDOWS)
 
 fmt:
 	$(CARGO) fmt
 
 clippy:
-	$(CARGO) clippy --target $(LINUX) -- -D warnings
-	$(CARGO) clippy --target $(WINDOWS) -- -D warnings
+	$(CARGO) clippy --workspace --target $(LINUX) -- -D warnings
+	$(CARGO) clippy --workspace --target $(WINDOWS) -- -D warnings
 
 # The app looks for templates/ next to the executable, so ship them together.
 dist: dist-linux dist-windows
@@ -89,4 +103,4 @@ dist-windows: windows
 
 clean:
 	$(CARGO) clean
-	rm -rf $(DIST)
+	rm -rf $(DIST) $(PLUGINS_DIR)

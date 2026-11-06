@@ -1,5 +1,6 @@
 //! Layer list, its toolbar and the selected layer's or group's properties.
 
+use egui::collapsing_header::CollapsingState;
 use egui::{
     Button, Color32, DragAndDrop, DragValue, Pos2, Rect, Response, RichText, Sense, Shape, Slider,
     Stroke, StrokeKind, Ui, pos2, vec2,
@@ -16,10 +17,6 @@ const ICON: f32 = 18.0;
 /// State of the layers panel that lasts across frames.
 #[derive(Default)]
 pub struct LayersPanel {
-    /// Layer or group whose name is being edited in the list.
-    pub renaming: Option<u64>,
-    /// The rename field still has to take the keyboard focus.
-    rename_focus: bool,
     /// Width and height can be changed separately in Properties.
     pub free_aspect: bool,
     /// Corner handles on the canvas distort the layer instead of scaling it.
@@ -451,15 +448,20 @@ fn lock_toggle(ui: &mut Ui, locked: &mut bool, dim: bool) -> Response {
         r.mark_changed();
     }
     let c = icon_color(ui, &r, *locked, dim);
-    let p = ui.painter();
+    paint_lock(ui.painter(), rect, *locked, c);
+    r.on_hover_text(if *locked { "Unlock" } else { "Lock position" })
+}
+
+/// A padlock centred in `rect`, closed when `locked`.
+fn paint_lock(p: &egui::Painter, rect: Rect, locked: bool, c: Color32) {
     let body = Rect::from_center_size(rect.center() + vec2(0.0, 3.0), vec2(10.0, 7.0));
-    if *locked {
+    if locked {
         p.rect_filled(body, 1.5, c);
     } else {
         p.rect_stroke(body, 1.5, Stroke::new(1.2, c), StrokeKind::Inside);
     }
     // Shackle: a half circle above the body, lifted and shifted when unlocked.
-    let (lift, shift) = if *locked { (0.0, 0.0) } else { (2.0, 2.5) };
+    let (lift, shift) = if locked { (0.0, 0.0) } else { (2.0, 2.5) };
     let center = pos2(body.center().x + shift, body.top() - 1.0 - lift);
     let pts: Vec<Pos2> = (0..=10)
         .map(|k| {
@@ -471,7 +473,29 @@ fn lock_toggle(ui: &mut Ui, locked: &mut bool, dim: bool) -> Response {
     shackle.extend(pts.iter().copied());
     shackle.push(pts[10] + vec2(0.0, 1.0 + lift * 0.3));
     p.add(Shape::line(shackle, Stroke::new(1.3, c)));
-    r.on_hover_text(if *locked { "Unlock" } else { "Lock position" })
+}
+
+/// Padlock button keeping a layer's width and height in proportion.
+fn aspect_lock(ui: &mut Ui, free_aspect: &mut bool) -> Response {
+    let (rect, r) = ui.allocate_exact_size(vec2(ICON, ICON), Sense::click());
+    if r.clicked() {
+        *free_aspect = !*free_aspect;
+    }
+    let locked = !*free_aspect;
+    if ui.is_rect_visible(rect) {
+        if r.hovered() {
+            let bg = ui.style().interact(&r).weak_bg_fill;
+            ui.painter().rect_filled(rect, 3.0, bg);
+        }
+        // Full strength when locked, faint when width and height are free.
+        let c = icon_color(ui, &r, locked, false);
+        paint_lock(ui.painter(), rect, locked, c);
+    }
+    r.on_hover_text(if locked {
+        "Aspect ratio locked: width and height change together. Click to unlock."
+    } else {
+        "Aspect ratio unlocked: width and height change separately. Click to lock."
+    })
 }
 
 /// Square thumbnail of a layer: the middle of the image, cropped to fill the square.
@@ -554,6 +578,12 @@ const TOOL: f32 = 24.0;
 
 /// A flat icon button of the layer toolbar; returns whether it was clicked.
 pub fn tool_button(ui: &mut Ui, tool: Tool, enabled: bool, tip: &str) -> bool {
+    let r = tool_icon(ui, tool, enabled, tip);
+    enabled && r.clicked()
+}
+
+/// A flat icon button of the layer toolbar, e.g. to open a menu from it.
+pub fn tool_icon(ui: &mut Ui, tool: Tool, enabled: bool, tip: &str) -> Response {
     let sense = if enabled {
         Sense::click()
     } else {
@@ -562,7 +592,7 @@ pub fn tool_button(ui: &mut Ui, tool: Tool, enabled: bool, tip: &str) -> bool {
     let (rect, r) = ui.allocate_exact_size(vec2(TOOL, TOOL), sense);
     let r = r.on_hover_text(tip);
     if !ui.is_rect_visible(rect) {
-        return false;
+        return r;
     }
     let visuals = ui.style().interact(&r);
     let p = ui.painter();
@@ -679,7 +709,7 @@ pub fn tool_button(ui: &mut Ui, tool: Tool, enabled: bool, tip: &str) -> bool {
             }
         }
     }
-    enabled && r.clicked()
+    r
 }
 
 // ---- Panel ----
@@ -755,6 +785,8 @@ pub fn show(
                 let Some(node) = doc.node_at_mut(&row.path) else {
                     continue;
                 };
+                // Room for the selection background, painted once the row's size is known.
+                let background = ui.painter().add(egui::Shape::Noop);
                 let r = ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 3.0;
                     ui.add_space(row.depth as f32 * INDENT);
@@ -780,16 +812,7 @@ pub fn show(
                     let broken = node.as_layer().filter(|l| l.broken);
                     let missing = broken.map(|l| l.source.display().to_string());
                     let name = name_mut(node);
-                    if state.renaming == Some(row.id) {
-                        let r = ui.text_edit_singleline(name);
-                        // Focus once; afterwards a press elsewhere, Enter or Esc ends renaming.
-                        if std::mem::take(&mut state.rename_focus) {
-                            r.request_focus();
-                        } else if !r.has_focus() {
-                            state.renaming = None;
-                        }
-                        out.changed |= r.changed();
-                    } else {
+                    {
                         let mut text = RichText::new(name.as_str());
                         if missing.is_some() {
                             text = text.color(ui.visuals().error_fg_color);
@@ -798,10 +821,29 @@ pub fn show(
                             text = text.weak();
                         }
                         let label = name.clone();
-                        let r = ui.add(
-                            Button::selectable(*selected == Some(row.id), text)
-                                .sense(Sense::click_and_drag()),
-                        );
+                        // The name takes the rest of the row, so short names are as easy to
+                        // click (and drag) as long ones. No frame of its own: the whole row
+                        // shows hover and selection. Renaming is done in Properties.
+                        let size = vec2(ui.available_width(), ui.spacing().interact_size.y);
+                        let (name_rect, r) = ui.allocate_exact_size(size, Sense::click_and_drag());
+                        if ui.is_rect_visible(name_rect) {
+                            let color = if *selected == Some(row.id) {
+                                ui.visuals().selection.stroke.color
+                            } else {
+                                ui.visuals().text_color()
+                            };
+                            let galley = egui::WidgetText::from(text).into_galley(
+                                ui,
+                                Some(egui::TextWrapMode::Truncate),
+                                name_rect.width(),
+                                egui::TextStyle::Button,
+                            );
+                            let pos = egui::pos2(
+                                name_rect.left(),
+                                name_rect.center().y - galley.size().y / 2.0,
+                            );
+                            ui.painter().galley(pos, galley, color);
+                        }
                         r.dnd_set_drag_payload(DraggedNode(row.id));
                         r.context_menu(|ui| {
                             if ui
@@ -830,15 +872,27 @@ pub fn show(
                         if r.clicked() {
                             *selected = Some(row.id);
                         }
-                        if r.double_clicked() {
-                            state.renaming = Some(row.id);
-                            state.rename_focus = true;
-                        }
                     }
                 });
 
                 // Drop target: upper/lower part of the row, or the middle of a group row.
                 let rect = Rect::from_x_y_ranges(full.x_range(), r.response.rect.y_range());
+                // The whole row, not only the name, shows the selection and the hover.
+                let fill = if *selected == Some(row.id) {
+                    Some(ui.visuals().selection.bg_fill)
+                } else if ui.rect_contains_pointer(rect)
+                    && DragAndDrop::payload::<DraggedNode>(ui.ctx()).is_none()
+                {
+                    Some(ui.visuals().widgets.hovered.weak_bg_fill)
+                } else {
+                    None
+                };
+                if let Some(fill) = fill {
+                    ui.painter().set(
+                        background,
+                        egui::epaint::RectShape::filled(rect.expand2(vec2(0.0, 1.0)), 2.0, fill),
+                    );
+                }
                 let hover = ui.ctx().pointer_hover_pos().filter(|p| rect.contains(*p));
                 if let (Some(p), Some(dragged)) =
                     (hover, DragAndDrop::payload::<DraggedNode>(ui.ctx()))
@@ -945,6 +999,39 @@ pub fn show(
     out
 }
 
+/// A titled section of a side panel, with a line above it, folded by clicking its arrow
+/// or title. `extra`
+/// adds widgets at the right of the header and returns true to open the section (e.g.
+/// after adding something to it). The open state is shared by all layers and kept
+/// between runs.
+pub fn section(
+    ui: &mut Ui,
+    id_salt: &str,
+    title: RichText,
+    extra: impl FnOnce(&mut Ui) -> bool,
+    body: impl FnOnce(&mut Ui),
+) {
+    let id = ui.make_persistent_id(("section", id_salt));
+    let mut state = CollapsingState::load_with_default_open(ui.ctx(), id, true);
+    // A line above each section, so sections stand apart, folded or not.
+    ui.add_space(2.0);
+    ui.separator();
+    ui.horizontal(|ui| {
+        state.show_toggle_button(ui, egui::collapsing_header::paint_default_icon);
+        let title = ui.add(egui::Label::new(title).sense(Sense::click()));
+        if title.clicked() {
+            state.toggle(ui);
+        }
+        let open = ui
+            .with_layout(egui::Layout::right_to_left(egui::Align::Center), extra)
+            .inner;
+        if open {
+            state.set_open(true);
+        }
+    });
+    state.show_body_unindented(ui, body);
+}
+
 /// Alignment, properties and effects of the selected layer or group.
 fn properties(
     ui: &mut Ui,
@@ -1008,223 +1095,236 @@ fn properties(
     };
     match doc.node_mut(id) {
         Some(Node::Group(g)) => {
-            ui.strong("Group");
-            egui::Grid::new("group_props")
-                .num_columns(2)
-                .spacing([8.0, 6.0])
-                .show(ui, |ui| {
-                    ui.label("Name");
-                    out.changed |= ui.text_edit_singleline(&mut g.name).changed();
-                    ui.end_row();
+            section(
+                ui,
+                "group_props",
+                RichText::new("Group").strong(),
+                |_| false,
+                |ui| {
+                    egui::Grid::new("group_props")
+                        .num_columns(2)
+                        .spacing([8.0, 6.0])
+                        .show(ui, |ui| {
+                            ui.label("Name");
+                            out.changed |= ui.text_edit_singleline(&mut g.name).changed();
+                            ui.end_row();
 
-                    ui.label("Opacity");
-                    out.changed |= ui
-                        .add(Slider::new(&mut g.opacity, 0.0..=1.0).fixed_decimals(2))
-                        .on_hover_text("Applied to the group as a whole")
-                        .changed();
-                    ui.end_row();
-                });
-            ui.weak(format!(
-                "{layer_count} image layer{}",
-                if layer_count == 1 { "" } else { "s" }
-            ));
-            ui.weak("Drag on the canvas inside the group to move it, or use the arrow keys.");
+                            ui.label("Opacity");
+                            out.changed |= ui
+                                .add(Slider::new(&mut g.opacity, 0.0..=1.0).fixed_decimals(2))
+                                .on_hover_text("Applied to the group as a whole")
+                                .changed();
+                            ui.end_row();
+                        });
+                    ui.weak(format!(
+                        "{layer_count} image layer{}",
+                        if layer_count == 1 { "" } else { "s" }
+                    ));
+                    ui.weak(
+                        "Drag on the canvas inside the group to move it, or use the arrow keys.",
+                    );
+                },
+            );
         }
         Some(Node::Layer(layer)) => {
-            ui.strong("Properties");
-            egui::Grid::new("layer_props")
-                .num_columns(2)
-                .spacing([8.0, 6.0])
-                .show(ui, |ui| {
-                    ui.label("Name");
-                    out.changed |= ui.text_edit_singleline(&mut layer.name).changed();
-                    ui.end_row();
+            section(
+                ui,
+                "layer_props",
+                RichText::new("Properties").strong(),
+                |_| false,
+                |ui| {
+                    egui::Grid::new("layer_props")
+                        .num_columns(2)
+                        .spacing([8.0, 6.0])
+                        .show(ui, |ui| {
+                            ui.label("Name");
+                            out.changed |= ui.text_edit_singleline(&mut layer.name).changed();
+                            ui.end_row();
 
-                    ui.label("Opacity");
-                    out.changed |= ui
-                        .add(Slider::new(&mut layer.opacity, 0.0..=1.0).fixed_decimals(2))
-                        .changed();
-                    ui.end_row();
+                            ui.label("Opacity");
+                            out.changed |= ui
+                                .add(Slider::new(&mut layer.opacity, 0.0..=1.0).fixed_decimals(2))
+                                .changed();
+                            ui.end_row();
 
-                    ui.add_enabled_ui(!locked, |ui| ui.label("Position"));
-                    ui.add_enabled_ui(!locked, |ui| {
-                        ui.horizontal(|ui| {
-                            let t = &mut layer.transform;
-                            out.changed |= ui
-                                .add(
-                                    DragValue::new(&mut t.center[0])
-                                        .fixed_decimals(1)
-                                        .speed(0.5)
-                                        .prefix("x ")
-                                        .suffix(" mm"),
-                                )
-                                .changed();
-                            out.changed |= ui
-                                .add(
-                                    DragValue::new(&mut t.center[1])
-                                        .fixed_decimals(1)
-                                        .speed(0.5)
-                                        .prefix("y ")
-                                        .suffix(" mm"),
-                                )
-                                .changed();
+                            ui.add_enabled_ui(!locked, |ui| ui.label("Position"));
+                            ui.add_enabled_ui(!locked, |ui| {
+                                ui.horizontal(|ui| {
+                                    let t = &mut layer.transform;
+                                    out.changed |= ui
+                                        .add(
+                                            DragValue::new(&mut t.center[0])
+                                                .fixed_decimals(1)
+                                                .speed(0.5)
+                                                .prefix("x ")
+                                                .suffix(" mm"),
+                                        )
+                                        .changed();
+                                    out.changed |= ui
+                                        .add(
+                                            DragValue::new(&mut t.center[1])
+                                                .fixed_decimals(1)
+                                                .speed(0.5)
+                                                .prefix("y ")
+                                                .suffix(" mm"),
+                                        )
+                                        .changed();
+                                });
+                            });
+                            ui.end_row();
+
+                            ui.label("Size");
+                            ui.add_enabled_ui(!locked, |ui| {
+                                ui.horizontal(|ui| {
+                                    let [px_w, px_h] = layer.size_px.map(|v| v.max(1) as f32);
+                                    let [mut w, mut h] = layer.size_mm();
+                                    let rw = ui.add(
+                                        DragValue::new(&mut w)
+                                            .fixed_decimals(1)
+                                            .speed(0.5)
+                                            .range(0.1..=5000.0)
+                                            .prefix("w ")
+                                            .suffix(" mm"),
+                                    );
+                                    let rh = ui.add(
+                                        DragValue::new(&mut h)
+                                            .fixed_decimals(1)
+                                            .speed(0.5)
+                                            .range(0.1..=5000.0)
+                                            .prefix("h ")
+                                            .suffix(" mm"),
+                                    );
+                                    aspect_lock(ui, &mut state.free_aspect);
+                                    let s = &mut layer.transform.scale;
+                                    if rw.changed() {
+                                        let k = w / px_w / s[0];
+                                        s[0] = w / px_w;
+                                        if !state.free_aspect {
+                                            s[1] *= k;
+                                        }
+                                        out.changed = true;
+                                    }
+                                    if rh.changed() {
+                                        let k = h / px_h / s[1];
+                                        s[1] = h / px_h;
+                                        if !state.free_aspect {
+                                            s[0] *= k;
+                                        }
+                                        out.changed = true;
+                                    }
+                                });
+                            });
+                            ui.end_row();
+
+                            ui.label("Rotation");
+                            ui.add_enabled_ui(!locked, |ui| {
+                                out.changed |= ui
+                                    .add(
+                                        Slider::new(
+                                            &mut layer.transform.rotation_deg,
+                                            -180.0..=180.0,
+                                        )
+                                        .suffix("°")
+                                        .fixed_decimals(1),
+                                    )
+                                    .changed();
+                            });
+                            ui.end_row();
                         });
-                    });
-                    ui.end_row();
 
-                    ui.label("Size");
+                    ui.add_space(4.0);
                     ui.add_enabled_ui(!locked, |ui| {
-                        ui.horizontal(|ui| {
-                            let [px_w, px_h] = layer.size_px.map(|v| v.max(1) as f32);
-                            let [mut w, mut h] = layer.size_mm();
-                            let rw = ui.add(
-                                DragValue::new(&mut w)
-                                    .fixed_decimals(1)
-                                    .speed(0.5)
-                                    .range(0.1..=5000.0)
-                                    .prefix("w ")
-                                    .suffix(" mm"),
-                            );
-                            let rh = ui.add(
-                                DragValue::new(&mut h)
-                                    .fixed_decimals(1)
-                                    .speed(0.5)
-                                    .range(0.1..=5000.0)
-                                    .prefix("h ")
-                                    .suffix(" mm"),
-                            );
-                            let s = &mut layer.transform.scale;
-                            if rw.changed() {
-                                let k = w / px_w / s[0];
-                                s[0] = w / px_w;
-                                if !state.free_aspect {
-                                    s[1] *= k;
-                                }
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                            if ui
+                                .button("Fit page")
+                                .on_hover_text("Cover the whole page")
+                                .clicked()
+                            {
+                                layer.fit_to(page_center, page, true);
                                 out.changed = true;
                             }
-                            if rh.changed() {
-                                let k = h / px_h / s[1];
-                                s[1] = h / px_h;
-                                if !state.free_aspect {
-                                    s[0] *= k;
-                                }
+                            if ui
+                                .add_enabled(template_bounds.is_some(), Button::new("Fit template"))
+                                .on_hover_text("Cover the template outline")
+                                .clicked()
+                            {
+                                let (c, s) = template_bounds.unwrap_or((page_center, page));
+                                layer.fit_to(c, s, true);
+                                out.changed = true;
+                            }
+                            if ui
+                                .button("Reset")
+                                .on_hover_text("Fit inside the page, no rotation")
+                                .clicked()
+                            {
+                                layer.fit_to(page_center, page, false);
+                                layer.transform.flip_x = false;
+                                layer.transform.flip_y = false;
+                                layer.transform.distort = Default::default();
+                                out.changed = true;
+                            }
+                            if ui.button("Flip H").clicked() {
+                                layer.transform.flip_x ^= true;
+                                out.changed = true;
+                            }
+                            if ui.button("Flip V").clicked() {
+                                layer.transform.flip_y ^= true;
                                 out.changed = true;
                             }
                         });
                     });
-                    ui.end_row();
 
-                    ui.label("");
-                    ui.checkbox(&mut state.free_aspect, "Unlock aspect ratio");
-                    ui.end_row();
-
-                    ui.label("Rotation");
+                    ui.add_space(4.0);
                     ui.add_enabled_ui(!locked, |ui| {
-                        out.changed |= ui
-                            .add(
-                                Slider::new(&mut layer.transform.rotation_deg, -180.0..=180.0)
-                                    .suffix("°")
-                                    .fixed_decimals(1),
-                            )
-                            .changed();
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                            // Shows what the corner handles do right now: Ctrl swaps the mode
+                            // while held.
+                            let ctrl = ui.input(|i| i.modifiers.command);
+                            if ui
+                                .selectable_label(state.distort != ctrl, "Distort")
+                                .on_hover_text(
+                                    "On: drag each corner on its own to fake perspective.\n\
+                                 Off: corners resize the image.\n\
+                                 Holding Ctrl while dragging a corner swaps the two.",
+                                )
+                                .clicked()
+                            {
+                                state.distort = !state.distort;
+                            }
+                            if ui
+                                .add_enabled(
+                                    layer.transform.is_distorted(),
+                                    Button::new("Reset distortion"),
+                                )
+                                .clicked()
+                            {
+                                layer.transform.distort = Default::default();
+                                out.changed = true;
+                            }
+                        });
                     });
-                    ui.end_row();
-                });
 
-            ui.add_space(4.0);
-            ui.add_enabled_ui(!locked, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
-                    if ui
-                        .button("Fit page")
-                        .on_hover_text("Cover the whole page")
-                        .clicked()
-                    {
-                        layer.fit_to(page_center, page, true);
-                        out.changed = true;
+                    // Print resolution of this layer, from its pixel count and printed size.
+                    let [w_mm, h_mm] = layer.size_mm();
+                    let dpi = (layer.size_px[0] as f32 / (w_mm / 25.4))
+                        .min(layer.size_px[1] as f32 / (h_mm / 25.4));
+                    let text = format!("Print resolution: {dpi:.0} DPI");
+                    if dpi < 150.0 {
+                        ui.colored_label(
+                            ui.visuals().warn_fg_color,
+                            format!("{text} (may look blurry)"),
+                        );
+                    } else {
+                        ui.weak(text);
                     }
-                    if ui
-                        .add_enabled(template_bounds.is_some(), Button::new("Fit template"))
-                        .on_hover_text("Cover the template outline")
-                        .clicked()
-                    {
-                        let (c, s) = template_bounds.unwrap_or((page_center, page));
-                        layer.fit_to(c, s, true);
-                        out.changed = true;
-                    }
-                    if ui
-                        .button("Reset")
-                        .on_hover_text("Fit inside the page, no rotation")
-                        .clicked()
-                    {
-                        layer.fit_to(page_center, page, false);
-                        layer.transform.flip_x = false;
-                        layer.transform.flip_y = false;
-                        layer.transform.distort = Default::default();
-                        out.changed = true;
-                    }
-                    if ui.button("Flip H").clicked() {
-                        layer.transform.flip_x ^= true;
-                        out.changed = true;
-                    }
-                    if ui.button("Flip V").clicked() {
-                        layer.transform.flip_y ^= true;
-                        out.changed = true;
-                    }
-                });
-            });
-
-            ui.add_space(4.0);
-            ui.add_enabled_ui(!locked, |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
-                    // Shows what the corner handles do right now: Ctrl swaps the mode
-                    // while held.
-                    let ctrl = ui.input(|i| i.modifiers.command);
-                    if ui
-                        .selectable_label(state.distort != ctrl, "Distort")
-                        .on_hover_text(
-                            "On: drag each corner on its own to fake perspective.\n\
-                             Off: corners resize the image.\n\
-                             Holding Ctrl while dragging a corner swaps the two.",
-                        )
-                        .clicked()
-                    {
-                        state.distort = !state.distort;
-                    }
-                    if ui
-                        .add_enabled(
-                            layer.transform.is_distorted(),
-                            Button::new("Reset distortion"),
-                        )
-                        .clicked()
-                    {
-                        layer.transform.distort = Default::default();
-                        out.changed = true;
-                    }
-                });
-            });
-
-            // Print resolution of this layer, from its pixel count and printed size.
-            let [w_mm, h_mm] = layer.size_mm();
-            let dpi = (layer.size_px[0] as f32 / (w_mm / 25.4))
-                .min(layer.size_px[1] as f32 / (h_mm / 25.4));
-            let text = format!("Print resolution: {dpi:.0} DPI");
-            if dpi < 150.0 {
-                ui.colored_label(
-                    ui.visuals().warn_fg_color,
-                    format!("{text} (may look blurry)"),
-                );
-            } else {
-                ui.weak(text);
-            }
-            ui.weak(format!(
-                "Source: {} x {} px",
-                layer.size_px[0], layer.size_px[1]
-            ));
-
-            ui.add_space(6.0);
-            ui.separator();
+                    ui.weak(format!(
+                        "Source: {} x {} px",
+                        layer.size_px[0], layer.size_px[1]
+                    ));
+                },
+            );
             out.changed |= effects_ui::show(ui, layer.id, &mut layer.effects);
         }
         None => {}
@@ -1269,6 +1369,8 @@ mod tests {
         time: f64,
         /// Centres of the dots drawn in the last frame (effect drag handles).
         dots: Vec<Pos2>,
+        /// Filled rectangles drawn in the last frame, with their colour.
+        fills: Vec<(Rect, egui::Color32)>,
     }
 
     impl Harness {
@@ -1285,6 +1387,7 @@ mod tests {
                 state: LayersPanel::default(),
                 time: 0.0,
                 dots: Vec::new(),
+                fills: Vec::new(),
             };
             h.frame(vec![]);
             h.frame(vec![]);
@@ -1312,6 +1415,14 @@ mod tests {
                     _ => None,
                 })
                 .collect();
+            self.fills = out
+                .shapes
+                .iter()
+                .filter_map(|c| match &c.shape {
+                    Shape::Rect(r) => Some((r.rect, r.fill)),
+                    _ => None,
+                })
+                .collect();
             out.shapes
                 .iter()
                 .filter_map(|c| match &c.shape {
@@ -1319,6 +1430,16 @@ mod tests {
                     _ => None,
                 })
                 .collect()
+        }
+
+        /// The "+" at the right of the Effects header.
+        fn add_effect_button(&mut self) -> Pos2 {
+            let labels = self.frame(vec![]);
+            let (_, p) = labels
+                .into_iter()
+                .find(|(t, _)| t.starts_with("Effects"))
+                .expect("Effects header");
+            Pos2::new(388.0, p.y + 6.0)
         }
 
         fn label(&mut self, text: &str) -> Pos2 {
@@ -1389,35 +1510,156 @@ mod tests {
     }
 
     #[test]
-    fn rename_and_name_fields_give_up_focus_on_a_press_elsewhere() {
+    fn name_field_gives_up_focus_on_a_press_elsewhere() {
         let mut h = Harness::new(doc_with(vec![named(1, "alpha")]));
         let p = h.label("alpha");
+        // Double-clicking the name in the list doesn't edit it there.
         h.click(p);
-        h.click(p); // double click
-        assert_eq!(h.state.renaming, Some(1));
+        h.click(p);
         h.frame(vec![]);
-        assert!(
-            h.ctx.memory(|m| m.focused().is_some()),
-            "rename field takes focus"
-        );
-
-        // Press and drag on empty space below the panel, as when grabbing the canvas.
-        let empty = Pos2::new(200.0, 780.0);
-        h.drag(empty, empty + vec2(40.0, -20.0));
-        assert_eq!(h.state.renaming, None);
         assert!(h.ctx.memory(|m| m.focused().is_none()));
 
         // The Name field of the properties.
-        h.click(p);
         let field = h.label("Name") + vec2(80.0, 0.0);
         h.click(field);
         assert!(h.ctx.memory(|m| m.focused().is_some()));
+        // Press and drag on empty space below the panel, as when grabbing the canvas.
+        let empty = Pos2::new(200.0, 780.0);
         h.drag(empty, empty + vec2(40.0, -20.0));
         assert!(h.ctx.memory(|m| m.focused().is_none()));
     }
 
     fn named(id: u64, name: &str) -> Node {
         Node::Layer(Layer::new(id, name.into(), "x.png".into()))
+    }
+
+    #[test]
+    fn properties_and_effects_fold_from_their_titles() {
+        let mut h = Harness::new(doc_with(vec![named(1, "alpha")]));
+        h.selected = Some(1);
+        let shown = |h: &mut Harness, text: &str| h.frame(vec![]).iter().any(|(t, _)| t == text);
+        assert!(shown(&mut h, "Opacity") && shown(&mut h, "Effects"));
+
+        let p = h.label("Properties");
+        h.click(p);
+        // Let the folding animation finish.
+        for _ in 0..30 {
+            h.frame(vec![]);
+        }
+        assert!(!shown(&mut h, "Opacity"), "Properties folded");
+        assert!(
+            shown(
+                &mut h,
+                "Effects change how the image looks without changing its file."
+            ),
+            "Effects still open"
+        );
+
+        let p = h.label("Effects");
+        h.click(p);
+        for _ in 0..30 {
+            h.frame(vec![]);
+        }
+        assert!(!shown(
+            &mut h,
+            "Effects change how the image looks without changing its file."
+        ));
+        // The + stays in the header, so effects can be added while folded; that opens it.
+        let p = h.add_effect_button();
+        h.click(p);
+        let p = h.label("Invert");
+        h.click(p);
+        for _ in 0..30 {
+            h.frame(vec![]);
+        }
+        assert_eq!(h.doc.layer(1).unwrap().effects.len(), 1);
+        assert!(shown(&mut h, "Effects (1)"));
+        assert!(h.handle("Invert").x > 0.0, "Effects opened on adding");
+
+        let p = h.label("Properties");
+        h.click(p);
+        for _ in 0..30 {
+            h.frame(vec![]);
+        }
+        assert!(shown(&mut h, "Opacity"), "Properties open again");
+    }
+
+    #[test]
+    fn padlock_right_of_the_size_toggles_the_aspect_ratio() {
+        let mut h = Harness::new(doc_with(vec![named(1, "alpha")]));
+        h.selected = Some(1);
+        let labels = h.frame(vec![]);
+        let (_, hpos) = labels
+            .iter()
+            .find(|(t, _)| t == "h ")
+            .unwrap_or_else(|| panic!("height field: {labels:?}"));
+        // The closed padlock's body: a filled 10 x 7 rectangle right of the height, on
+        // the same line.
+        let body = h
+            .fills
+            .iter()
+            .map(|(r, _)| *r)
+            .find(|r| {
+                (r.width() - 10.0).abs() < 0.1
+                    && (r.height() - 7.0).abs() < 0.1
+                    && r.left() > hpos.x
+                    && (r.center().y - hpos.y).abs() < 16.0
+            })
+            .expect("padlock");
+        assert!(!h.state.free_aspect);
+        h.click(body.center());
+        assert!(h.state.free_aspect, "unlocked");
+        h.click(body.center());
+        assert!(!h.state.free_aspect, "locked again");
+    }
+
+    #[test]
+    fn hovered_row_is_highlighted_across_its_width() {
+        let mut h = Harness::new(doc_with(vec![named(1, "a"), named(2, "b")]));
+        let b = h.label("b");
+        h.pointer(Pos2::new(380.0, b.y), None);
+        h.frame(vec![]);
+        let fill = h.ctx.global_style().visuals.widgets.hovered.weak_bg_fill;
+        let rows: Vec<Rect> = h
+            .fills
+            .iter()
+            .filter(|(r, c)| *c == fill && r.left() < 20.0 && r.width() > 300.0)
+            .map(|(r, _)| *r)
+            .collect();
+        assert_eq!(rows.len(), 1, "{:?}", h.fills);
+        assert!(rows[0].y_range().contains(b.y));
+    }
+
+    #[test]
+    fn clicking_right_of_a_short_name_selects_the_layer() {
+        let mut h = Harness::new(doc_with(vec![named(1, "a"), named(2, "b")]));
+        let p = h.label("b");
+        h.click(Pos2::new(380.0, p.y));
+        assert_eq!(h.selected, Some(2));
+    }
+
+    #[test]
+    fn selected_row_is_highlighted_across_its_width() {
+        let mut h = Harness::new(doc_with(vec![named(1, "alpha"), named(2, "beta")]));
+        let alpha = h.label("alpha");
+        h.click(alpha);
+        assert_eq!(h.selected, Some(1));
+        let beta = h.label("beta");
+        let fill = h.ctx.global_style().visuals.selection.bg_fill;
+        let rows: Vec<Rect> = h
+            .fills
+            .iter()
+            .filter(|(r, c)| *c == fill && r.left() < 20.0 && r.width() > 300.0)
+            .map(|(r, _)| *r)
+            .collect();
+        assert_eq!(rows.len(), 1, "one full-row highlight: {:?}", h.fills);
+        let row = rows[0];
+        // From the eye icon on the left to the name and beyond.
+        assert!(
+            row.left() < 20.0 && row.y_range().contains(alpha.y),
+            "{row:?}"
+        );
+        assert!(!row.y_range().contains(beta.y), "{row:?}");
     }
 
     #[test]
@@ -1447,16 +1689,21 @@ mod tests {
     fn panel_adds_and_removes_effects() {
         let mut h = Harness::new(doc_with(vec![named(1, "alpha")]));
         h.selected = Some(1);
-        let p = h.label("Add effect");
+        let p = h.add_effect_button();
         h.click(p);
         let p = h.label("Invert");
         h.click(p);
         let effects = |h: &Harness| h.doc.layer(1).unwrap().effects.clone();
         assert_eq!(effects(&h).len(), 1);
+        let labels = h.frame(vec![]);
+        assert!(
+            !labels.iter().any(|(t, _)| t == "Sepia"),
+            "menu closed after picking"
+        );
         assert_eq!(effects(&h)[0].effect, "builtin.invert");
 
         // Parameters get controls built from their specs.
-        let p = h.label("Add effect");
+        let p = h.add_effect_button();
         h.click(p);
         let p = h.label("Gaussian blur");
         h.click(p);

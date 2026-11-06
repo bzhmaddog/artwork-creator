@@ -10,7 +10,7 @@ cargo fmt --all --check || {
 }
 
 echo "pre-commit: cargo clippy"
-cargo clippy --all-targets --locked -q -- -D warnings
+cargo clippy --workspace --all-targets --locked -q -- -D warnings
 
 echo "pre-commit: cargo test"
-cargo test --locked -q
+cargo test --workspace --locked -q

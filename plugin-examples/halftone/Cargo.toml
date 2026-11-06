@@ -1,0 +1,13 @@
+[package]
+name = "halftone"
+version = "0.1.0"
+edition = "2024"
+description = "Example Artwork Creator plugin: a halftone effect"
+license-file = "../../LICENSE"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+artwork-plugin-sdk = { path = "../../plugin-sdk" }

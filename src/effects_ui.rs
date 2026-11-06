@@ -61,27 +61,87 @@ fn drag_handle(ui: &mut Ui, active: bool) -> egui::Response {
 
 /// Shows the effect stack of a layer. Returns true if it changed.
 pub fn show(ui: &mut Ui, layer_id: u64, stack: &mut Vec<EffectInstance>) -> bool {
+    let mut added = None;
     let mut changed = false;
-    ui.horizontal(|ui| {
-        ui.strong("Effects");
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            ui.menu_button("Add effect", |ui| {
-                for effect in registry().all() {
-                    let mut r = ui.button(effect.name());
-                    if !effect.description().is_empty() {
-                        r = r.on_hover_text(effect.description());
-                    }
-                    if r.clicked() {
-                        stack.push(EffectInstance::new(effect));
-                        changed = true;
-                        ui.close();
-                    }
-                }
-            });
-        });
+    let title = match stack.len() {
+        0 => "Effects".to_owned(),
+        n => format!("Effects ({n})"),
+    };
+    layers_ui::section(
+        ui,
+        "effects",
+        RichText::new(title).strong(),
+        |ui| {
+            added = add_menu(ui);
+            added.is_some()
+        },
+        |ui| changed = stack_ui(ui, layer_id, stack),
+    );
+    // Added after the list was shown: it appears on the next frame.
+    if let Some(e) = added {
+        stack.push(e);
+        changed = true;
+    }
+    changed
+}
+
+/// The "Add effect" menu. Returns the effect picked.
+fn add_menu(ui: &mut Ui) -> Option<EffectInstance> {
+    let mut added = None;
+    let button = layers_ui::tool_icon(ui, Tool::Add, true, "Add effect");
+    egui::Popup::menu(&button).show(|ui| {
+        let reg = registry();
+        let mut add = |ui: &mut Ui, effect: &dyn Effect| {
+            let mut r = ui.button(effect.name());
+            if !effect.description().is_empty() {
+                r = r.on_hover_text(effect.description());
+            }
+            if r.clicked() {
+                added = Some(EffectInstance::new(effect));
+                ui.close();
+            }
+        };
+        for effect in reg.all().filter(|e| e.plugin().is_none()) {
+            add(ui, effect);
+        }
+        // Each plugin's effects under its name.
+        for plugin in &reg.plugins {
+            let effects: Vec<_> = plugin.effects.iter().filter_map(|id| reg.get(id)).collect();
+            if effects.is_empty() {
+                continue;
+            }
+            ui.separator();
+            let title = format!("{} {}", plugin.name, plugin.version);
+            ui.weak(title.trim_end())
+                .on_hover_text(format!("Plugin loaded from {}", plugin.path.display()));
+            for effect in effects {
+                add(ui, effect);
+            }
+        }
+        if !reg.errors.is_empty() {
+            ui.separator();
+            let n = reg.errors.len();
+            ui.label(
+                RichText::new(format!(
+                    "⚠ {n} plugin problem{}",
+                    if n == 1 { "" } else { "s" }
+                ))
+                .color(ui.visuals().warn_fg_color),
+            )
+            .on_hover_text(reg.errors.join("\n"));
+        }
     });
+    added
+}
+
+/// The effects of the stack, with their controls. Returns true if it changed.
+fn stack_ui(ui: &mut Ui, layer_id: u64, stack: &mut Vec<EffectInstance>) -> bool {
+    let mut changed = false;
     if stack.is_empty() {
-        ui.weak("None. Effects change how the image looks without changing its file.");
+        // Centred, every wrapped line too.
+        ui.vertical_centered(|ui| {
+            ui.weak("Effects change how the image looks without changing its file.");
+        });
         return changed;
     }
     if stack.len() > 1 {

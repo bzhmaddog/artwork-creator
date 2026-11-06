@@ -26,7 +26,8 @@ layers panel on the right](doc/capture.png)
 - **Effects** on each image layer: brightness / contrast, hue / saturation, grayscale,
   sepia, tint, invert, posterize, threshold, Gaussian blur, sharpen, drop shadow and
   outline. They are stacked, reordered and toggled in the layer's properties, applied to
-  the export at full resolution, and never change the image file.
+  the export at full resolution, and never change the image file. More effects can be
+  added with [plugins](#plugins).
 - **Align** layers or groups to the page or to the template.
 - **Undo / redo** for every change to the project.
 - **Templates** made of several elements, each in its own DXF file, with its own colour and
@@ -57,6 +58,7 @@ make            # release builds for Linux and Windows
 make linux      # Linux only
 make windows    # Windows .exe only
 make test       # run the tests
+make plugins    # build the example plugins into plugins/ (.so and .dll)
 make dist       # package each build with the templates folder into dist/
 ```
 
@@ -102,6 +104,38 @@ describes the elements:
 - Without `elements`, the folder's single DXF file is used as the outline.
 
 The app reloads a template when its files change on disk.
+
+## Plugins
+
+Effect plugins are shared libraries (`.dll` on Windows, `.so` on Linux) placed in a
+`plugins` folder next to the executable or, failing that, in the current directory. The
+app loads them at startup and lists their effects in **Add effect**, under the plugin's
+name. A library that fails to load, or was made for another plugin interface version, is
+skipped and reported at the bottom of that menu.
+
+> **Install only plugins you trust.** A plugin is native code running inside the app
+> with all its rights: it can read and write your files, and a crash in it closes the
+> app, losing unsaved work.
+
+A project that uses an effect whose plugin is not installed still opens: the effect is
+shown as "Missing effect", is not applied, and is saved unchanged.
+
+### Writing a plugin
+
+In Rust, use the [`artwork-plugin-sdk`](plugin-sdk) crate: implement its `Effect` trait,
+which works on straight RGBA pixels and describes its parameters so the app builds their
+controls, and export it with `export_plugin!`. The crate must be a `cdylib`. See
+[`plugin-examples/halftone`](plugin-examples/halftone) for a complete example, built by
+`make plugins`.
+
+Other languages can implement the C interface described in
+[`plugin-sdk/include/artwork_plugin.h`](plugin-sdk/include/artwork_plugin.h): one
+exported function, `artwork_plugin_entry`, returning a table of effects whose parameters
+and values are passed as JSON.
+
+Effect ids are saved in projects, so keep them stable and prefix them with something
+unique to your plugin (`builtin.` is reserved). Effects may run on several threads at
+once.
 
 ## Shortcuts
 

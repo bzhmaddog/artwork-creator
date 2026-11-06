@@ -21,6 +21,8 @@ fn main() -> eframe::Result {
     env_logger::init();
     // A project file can be passed on the command line (or by double-clicking an associated file).
     let project = std::env::args_os().nth(1).map(std::path::PathBuf::from);
+    // Plugins are loaded once, before any effect is used.
+    effects::init(effects::plugin::plugins_dir().as_deref());
 
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Glow,

@@ -3,8 +3,8 @@
 //! An effect is anything implementing [`Effect`]. It describes its parameters with
 //! [`ParamSpec`]s, from which the Properties panel builds its controls, and changes the
 //! pixels of an image in place. Effects are looked up by id in the [`Registry`]; the
-//! built-in ones live in [`builtin`]. Plugins loaded from shared libraries will register
-//! there too, behind the same trait.
+//! built-in ones live in [`builtin`], those of plugin libraries come through [`plugin`]
+//! behind the same trait.
 //!
 //! A layer keeps its effect stack as [`EffectInstance`]s, saved with the project. The
 //! original image is never changed: the stack is applied to a copy for the screen (see
@@ -12,9 +12,11 @@
 
 pub mod builtin;
 pub mod cache;
+pub mod plugin;
 
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
+use std::path::Path;
 use std::sync::OnceLock;
 
 use image::RgbaImage;
@@ -34,6 +36,10 @@ pub trait Effect: Send + Sync {
     }
     /// Parameters, in display order.
     fn params(&self) -> &[ParamSpec];
+    /// Name of the plugin providing the effect; `None` for a built-in one.
+    fn plugin(&self) -> Option<&str> {
+        None
+    }
     /// Room the effect draws into around the image (left, top, right, bottom), in
     /// source pixels: e.g. a shadow falling outside it. The image passed to `apply` has
     /// transparent margins at least this wide.
@@ -277,6 +283,24 @@ impl<'a> Params<'a> {
             _ => default,
         }
     }
+
+    /// Every parameter's value as read by the getters above: in range, with colours as
+    /// `#rrggbbaa`. This is what plugins receive.
+    pub fn resolved(&self) -> Value {
+        let mut map = serde_json::Map::new();
+        for spec in self.specs {
+            let id = spec.id.as_str();
+            let v = match &spec.kind {
+                ParamKind::Float { .. } => Value::from(self.f32(id)),
+                ParamKind::Int { .. } => Value::from(self.i32(id)),
+                ParamKind::Bool { .. } => Value::from(self.bool(id)),
+                ParamKind::Color { .. } => Value::from(color_to_hex(self.color(id))),
+                ParamKind::Choice { .. } => Value::from(self.choice(id)),
+            };
+            map.insert(spec.id.clone(), v);
+        }
+        Value::Object(map)
+    }
 }
 
 fn yes() -> bool {
@@ -313,6 +337,10 @@ impl EffectInstance {
 /// All available effects.
 pub struct Registry {
     effects: Vec<Box<dyn Effect>>,
+    /// Plugins that loaded.
+    pub plugins: Vec<plugin::PluginInfo>,
+    /// Why some plugins, or some of their effects, are not available.
+    pub errors: Vec<String>,
 }
 
 impl Registry {
@@ -320,7 +348,35 @@ impl Registry {
     fn builtin() -> Self {
         Self {
             effects: builtin::all(),
+            plugins: Vec::new(),
+            errors: Vec::new(),
         }
+    }
+
+    /// The built-in effects, then those of the plugins in `dir`. An effect whose id is
+    /// already taken is left out.
+    fn with_plugins(dir: Option<&Path>) -> Self {
+        let mut reg = Self::builtin();
+        let Some(dir) = dir else {
+            return reg;
+        };
+        let loaded = plugin::load_dir(dir);
+        reg.errors = loaded.errors;
+        for e in loaded.effects {
+            if reg.get(e.id()).is_some() {
+                let msg = format!(
+                    "{}: effect \"{}\" left out, its id is already used",
+                    e.plugin().unwrap_or_default(),
+                    e.id()
+                );
+                log::warn!("{msg}");
+                reg.errors.push(msg);
+            } else {
+                reg.effects.push(e);
+            }
+        }
+        reg.plugins = loaded.plugins;
+        reg
     }
 
     pub fn get(&self, id: &str) -> Option<&dyn Effect> {
@@ -338,7 +394,15 @@ impl Registry {
 
 static REGISTRY: OnceLock<Registry> = OnceLock::new();
 
-/// The effects available in this run of the app.
+/// Builds the registry with the plugins of `plugins_dir` (see
+/// [`plugin::plugins_dir`]). Call it once at startup, before [`registry`]; later calls
+/// return the registry already built.
+pub fn init(plugins_dir: Option<&Path>) -> &'static Registry {
+    REGISTRY.get_or_init(|| Registry::with_plugins(plugins_dir))
+}
+
+/// The effects available in this run of the app: only the built-in ones if [`init`]
+/// wasn't called first.
 pub fn registry() -> &'static Registry {
     REGISTRY.get_or_init(Registry::builtin)
 }

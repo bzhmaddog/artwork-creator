@@ -6,7 +6,12 @@ description = "Design printable artwork for arcade controllers on DXF templates,
 license-file = "LICENSE"
 publish = false
 
+# The plugin SDK and the example plugin live in the same workspace; see "Plugins" in README.md.
+[workspace]
+members = [".", "plugin-sdk", "plugin-examples/halftone"]
+
 [dependencies]
+artwork-plugin-sdk = { path = "plugin-sdk" }
 eframe = { version = "0.37", default-features = false, features = [
     "accesskit",
     "clipboard",
@@ -22,6 +27,7 @@ egui = { version = "0.37", features = ["serde"] }
 env_logger = "0.11"
 log = "0.4"
 dxf = "0.6"
+libloading = "0.8"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "webp", "bmp", "gif"] }
 tiny-skia = "0.12"
 printpdf = { version = "0.12", default-features = false }

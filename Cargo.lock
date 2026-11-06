@@ -317,11 +317,13 @@ checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 name = "artwork-creator"
 version = "0.1.0"
 dependencies = [
+ "artwork-plugin-sdk",
  "dxf",
  "eframe",
  "egui",
  "env_logger",
  "image",
+ "libloading",
  "log",
  "png",
  "printpdf",
@@ -330,6 +332,14 @@ dependencies = [
  "serde_json",
  "tiny-skia",
  "zip",
+]
+
+[[package]]
+name = "artwork-plugin-sdk"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
@@ -1770,6 +1780,13 @@ dependencies = [
  "crunchy",
  "num-traits 0.2.19",
  "zerocopy",
+]
+
+[[package]]
+name = "halftone"
+version = "0.1.0"
+dependencies = [
+ "artwork-plugin-sdk",
 ]
 
 [[package]]

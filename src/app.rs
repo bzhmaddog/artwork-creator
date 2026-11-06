@@ -4,7 +4,9 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
-use egui::{Color32, ColorImage, Key, KeyboardShortcut, Modifiers, TextureFilter, TextureOptions};
+use egui::{
+    Color32, ColorImage, Key, KeyboardShortcut, Modifiers, RichText, TextureFilter, TextureOptions,
+};
 
 use crate::document::{Document, Layer, Node, Orientation, P2, PageSize};
 use crate::effects::cache::EffectCache;
@@ -218,7 +220,6 @@ impl ArtworkApp {
         {
             self.selected = None;
         }
-        self.layers_panel.renaming = None;
         self.dirty = self.history.is_modified();
     }
 
@@ -804,7 +805,30 @@ impl ArtworkApp {
                 ui.separator();
                 ui.menu_button("Theme", crate::theme::menu);
             });
+            ui.menu_button("Tools", |ui| {
+                ui.menu_button("Templates", |ui| {
+                    if ui
+                        .button("Rescan templates")
+                        .on_hover_text("Look again for templates added, changed or removed")
+                        .clicked()
+                    {
+                        self.rescan_templates();
+                        ui.close();
+                    }
+                });
+            });
         });
+    }
+
+    /// Lists the templates folder again and reloads the current template.
+    fn rescan_templates(&mut self) {
+        self.templates = self
+            .templates_dir
+            .as_deref()
+            .map(template::scan)
+            .unwrap_or_default();
+        let id = self.doc.template.clone();
+        self.select_template(id, true);
     }
 
     /// Left panel: template, page, background, template placement and elements.
@@ -826,15 +850,6 @@ impl ArtworkApp {
             });
         if choice != self.doc.template {
             self.select_template(choice, true);
-        }
-        if ui.small_button("Rescan templates").clicked() {
-            self.templates = self
-                .templates_dir
-                .as_deref()
-                .map(template::scan)
-                .unwrap_or_default();
-            let id = self.doc.template.clone();
-            self.select_template(id, true);
         }
 
         ui.separator();
@@ -873,120 +888,134 @@ impl ArtworkApp {
             }
         });
 
-        if let Some(t) = &self.template {
-            let size = t.size_mm;
-            ui.separator();
-            ui.heading("Template");
-            ui.weak(format!("{:.1} x {:.1} mm", size[0], size[1]));
-            let before = self.doc.template_placement;
-            let p = &mut self.doc.template_placement;
-            ui.horizontal(|ui| {
-                ui.label("Rotation");
-                for deg in [0, 90, 180, 270] {
-                    if ui
-                        .selectable_label(p.rotation == deg, format!("{deg}°"))
-                        .clicked()
-                    {
-                        p.rotation = deg;
-                    }
-                }
-            });
-            ui.horizontal(|ui| {
-                ui.label("Flip");
-                ui.checkbox(&mut p.flip_x, "Horizontal");
-                ui.checkbox(&mut p.flip_y, "Vertical");
-            });
-            ui.horizontal(|ui| {
-                ui.label("Offset");
-                ui.add(
-                    egui::DragValue::new(&mut p.offset_mm[0])
-                        .speed(0.2)
-                        .fixed_decimals(1)
-                        .prefix("x ")
-                        .suffix(" mm"),
-                );
-                ui.add(
-                    egui::DragValue::new(&mut p.offset_mm[1])
-                        .speed(0.2)
-                        .fixed_decimals(1)
-                        .prefix("y ")
-                        .suffix(" mm"),
-                );
-            });
-            if ui.small_button("Centre on page").clicked() {
-                p.offset_mm = [0.0, 0.0];
-            }
-
-            ui.add_space(4.0);
-            ui.strong("Elements");
-            for e in &t.elements {
-                let k = e.kind.index();
-                ui.horizontal(|ui| {
-                    ui.add_enabled_ui(self.canvas.show_template, |ui| {
-                        ui.checkbox(&mut self.canvas.element_show[k], "")
-                            .on_hover_text("Show its lines on the canvas");
-                    });
-                    ui.color_edit_button_srgba(&mut self.canvas.element_color[k])
-                        .on_hover_text("Line colour, on screen and in the export");
-                    ui.label(&e.name);
-                    ui.weak(format!(
-                        "{} shape{}",
-                        e.polylines.len(),
-                        if e.polylines.len() == 1 { "" } else { "s" }
-                    ));
-                });
-            }
-            ui.checkbox(&mut self.canvas.preview_cuts, "Preview cuts")
-                .on_hover_text(
-                    "Cover what the export leaves blank: outside the outline and inside holes",
-                );
-
-            ui.add_space(4.0);
-            let page = self.doc.page_mm();
-            let current = self.doc.template_placement;
-            let default = self
-                .current_entry()
-                .map(|e| e.default_placement(size, page));
-            ui.horizontal_wrapped(|ui| {
-                if ui
-                    .add_enabled(
-                        default.is_some_and(|d| d != current),
-                        egui::Button::new("Reset to default").small(),
-                    )
-                    .on_hover_text("Use the placement from template.json")
-                    .clicked()
-                    && let Some(d) = default
-                {
-                    self.doc.template_placement = d;
-                }
-                if ui
-                    .add_enabled(
-                        default.is_some_and(|d| d != current),
-                        egui::Button::new("Save as default").small(),
-                    )
-                    .on_hover_text("Write this placement into the template's template.json")
-                    .clicked()
-                {
-                    let id = self.doc.template.clone();
-                    if let Some(entry) = self
-                        .templates
-                        .iter_mut()
-                        .find(|t| Some(&t.id) == id.as_ref())
-                    {
-                        match entry.save_placement(current) {
-                            Ok(()) => self.template_stamp = entry.stamp(),
-                            Err(e) => self.messages.push(e),
-                        }
-                    }
-                }
-            });
-            if let Some(e) = self.current_entry() {
-                ui.weak(format!("Config: {}", e.config_path().display()));
-            }
-            if self.doc.template_placement != before {
-                self.dirty = true;
-            }
+        if self.template.is_some() {
+            crate::layers_ui::section(
+                ui,
+                "template",
+                RichText::new("Template").heading(),
+                |_| false,
+                |ui| self.template_settings(ui),
+            );
         }
+    }
+
+    /// Body of the Template section: placement, elements and default placement.
+    fn template_settings(&mut self, ui: &mut egui::Ui) {
+        // Taken out while shown, so the rest of `self` can change; put back at the end.
+        let Some(t) = self.template.take() else {
+            return;
+        };
+        let size = t.size_mm;
+        ui.weak(format!("{:.1} x {:.1} mm", size[0], size[1]));
+        let before = self.doc.template_placement;
+        let p = &mut self.doc.template_placement;
+        ui.horizontal(|ui| {
+            ui.label("Rotation");
+            for deg in [0, 90, 180, 270] {
+                if ui
+                    .selectable_label(p.rotation == deg, format!("{deg}°"))
+                    .clicked()
+                {
+                    p.rotation = deg;
+                }
+            }
+        });
+        ui.horizontal(|ui| {
+            ui.label("Flip");
+            ui.checkbox(&mut p.flip_x, "Horizontal");
+            ui.checkbox(&mut p.flip_y, "Vertical");
+        });
+        ui.horizontal(|ui| {
+            ui.label("Offset");
+            ui.add(
+                egui::DragValue::new(&mut p.offset_mm[0])
+                    .speed(0.2)
+                    .fixed_decimals(1)
+                    .prefix("x ")
+                    .suffix(" mm"),
+            );
+            ui.add(
+                egui::DragValue::new(&mut p.offset_mm[1])
+                    .speed(0.2)
+                    .fixed_decimals(1)
+                    .prefix("y ")
+                    .suffix(" mm"),
+            );
+        });
+        if ui.small_button("Centre on page").clicked() {
+            p.offset_mm = [0.0, 0.0];
+        }
+
+        ui.add_space(4.0);
+        ui.strong("Elements");
+        for e in &t.elements {
+            let k = e.kind.index();
+            ui.horizontal(|ui| {
+                ui.add_enabled_ui(self.canvas.show_template, |ui| {
+                    ui.checkbox(&mut self.canvas.element_show[k], "")
+                        .on_hover_text("Show its lines on the canvas");
+                });
+                ui.color_edit_button_srgba(&mut self.canvas.element_color[k])
+                    .on_hover_text("Line colour, on screen and in the export");
+                ui.label(&e.name);
+                ui.weak(format!(
+                    "{} shape{}",
+                    e.polylines.len(),
+                    if e.polylines.len() == 1 { "" } else { "s" }
+                ));
+            });
+        }
+        ui.checkbox(&mut self.canvas.preview_cuts, "Preview cuts")
+            .on_hover_text(
+                "Cover what the export leaves blank: outside the outline and inside holes",
+            );
+
+        ui.add_space(4.0);
+        let page = self.doc.page_mm();
+        let current = self.doc.template_placement;
+        let default = self
+            .current_entry()
+            .map(|e| e.default_placement(size, page));
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(
+                    default.is_some_and(|d| d != current),
+                    egui::Button::new("Reset to default").small(),
+                )
+                .on_hover_text("Use the placement from template.json")
+                .clicked()
+                && let Some(d) = default
+            {
+                self.doc.template_placement = d;
+            }
+            if ui
+                .add_enabled(
+                    default.is_some_and(|d| d != current),
+                    egui::Button::new("Save as default").small(),
+                )
+                .on_hover_text("Write this placement into the template's template.json")
+                .clicked()
+            {
+                let id = self.doc.template.clone();
+                if let Some(entry) = self
+                    .templates
+                    .iter_mut()
+                    .find(|t| Some(&t.id) == id.as_ref())
+                {
+                    match entry.save_placement(current) {
+                        Ok(()) => self.template_stamp = entry.stamp(),
+                        Err(e) => self.messages.push(e),
+                    }
+                }
+            }
+        });
+        if let Some(e) = self.current_entry() {
+            ui.weak(format!("Config: {}", e.config_path().display()));
+        }
+        if self.doc.template_placement != before {
+            self.dirty = true;
+        }
+        self.template = Some(t);
     }
 
     /// Bottom bar: zoom, page size, cursor position and warnings.

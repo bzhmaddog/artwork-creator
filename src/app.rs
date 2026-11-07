@@ -835,6 +835,19 @@ impl ArtworkApp {
                 }
                 ui.checkbox(&mut self.canvas.show_template, tr!("Show template lines"));
                 ui.checkbox(&mut self.canvas.preview_cuts, tr!("Preview cuts"));
+                let has_anchors = self
+                    .template
+                    .as_ref()
+                    .is_some_and(|t| t.has(ElementKind::Anchors));
+                ui.add_enabled(
+                    has_anchors,
+                    egui::Checkbox::new(&mut self.canvas.snap_to_anchors, tr!("Snap to anchors")),
+                )
+                .on_hover_text(tr!(
+                    "Image centres and corners snap to the template's anchors while dragged. \
+                     Hold Alt to drag freely."
+                ))
+                .on_disabled_hover_text(tr!("This template has no anchors"));
                 ui.separator();
                 ui.menu_button(tr!("Theme"), crate::theme::menu);
                 ui.menu_button(tr!("Language"), |ui| i18n::menu(ui, &mut self.language));
@@ -996,7 +1009,11 @@ impl ArtworkApp {
                 ui.color_edit_button_srgba(&mut self.canvas.element_color[k])
                     .on_hover_text(tr!("Line colour, on screen and in the export"));
                 ui.label(translate(&e.name));
-                ui.weak(tr_n!("{n} shape", "{n} shapes", e.polylines.len()));
+                ui.weak(if e.kind.has_lines() {
+                    tr_n!("{n} shape", "{n} shapes", e.polylines.len())
+                } else {
+                    tr_n!("{n} anchor", "{n} anchors", e.anchors.len())
+                });
             });
         }
         ui.checkbox(&mut self.canvas.preview_cuts, tr!("Preview cuts"))

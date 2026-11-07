@@ -10,6 +10,7 @@ use printpdf::{
 
 use crate::i18n::tr;
 use crate::render::{self, Cuts, OUTLINE_WIDTH_MM, Scene};
+use crate::template::{ElementKind, KINDS};
 
 /// Options of the Export window.
 #[derive(Clone, Debug)]
@@ -21,7 +22,7 @@ pub struct ExportSettings {
     /// Raster resolution, for both formats.
     pub dpi: u32,
     /// Print the lines of each element kind (`ElementKind::index`).
-    pub print_lines: [bool; 3],
+    pub print_lines: [bool; KINDS],
     /// Clip to the outline and leave holes blank.
     pub cuts: Cuts,
 }
@@ -32,7 +33,8 @@ impl Default for ExportSettings {
             png: true,
             pdf: true,
             dpi: 300,
-            print_lines: [true; 3],
+            // Anchors are construction marks: printed only when asked for.
+            print_lines: ElementKind::ALL.map(|k| k != ElementKind::Anchors),
             cuts: Cuts::default(),
         }
     }
@@ -215,7 +217,7 @@ fn write_pdf(
         ops.push(Op::SetOutlineThickness {
             pt: Pt(mm_to_pt(OUTLINE_WIDTH_MM)),
         });
-        for poly in &element.placed.polylines {
+        for poly in element.placed.printed_lines() {
             let points = poly
                 .points
                 .iter()
@@ -261,8 +263,8 @@ mod tests {
         let scene = Scene::new(
             &doc,
             Some(&tpl),
-            [[255, 0, 255]; 3],
-            [true; 3],
+            [[255, 0, 255]; crate::template::KINDS],
+            [true; crate::template::KINDS],
             Cuts::default(),
         );
         let settings = ExportSettings {

@@ -1,7 +1,8 @@
 //! Controller templates: each subfolder of `templates/` holding `.dxf` files.
 //!
-//! A template is made of elements (outline, buttons, cutouts), each drawn in its own DXF
-//! file. The files share one coordinate system, as when exported from the same drawing.
+//! A template is made of elements (outline, buttons, cutouts, anchors), each drawn in its
+//! own DXF file. The files share one coordinate system, as when exported from the same
+//! drawing.
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -26,13 +27,22 @@ pub enum ElementKind {
     Buttons,
     /// Other holes: screws, switches, windows.
     Cutouts,
+    /// Points that images snap to on the canvas, e.g. button centres. Cut nothing; printed
+    /// as small crosses only when asked for in the Export window. Read from the DXF's
+    /// POINT entities and the centres of its closed shapes, so a buttons DXF gives the
+    /// button centres.
+    Anchors,
 }
 
+/// Number of element kinds, for per-kind settings arrays.
+pub const KINDS: usize = ElementKind::ALL.len();
+
 impl ElementKind {
-    pub const ALL: [ElementKind; 3] = [
+    pub const ALL: [ElementKind; 4] = [
         ElementKind::Outline,
         ElementKind::Buttons,
         ElementKind::Cutouts,
+        ElementKind::Anchors,
     ];
 
     /// Position in `ALL`, for per-kind settings arrays.
@@ -46,6 +56,7 @@ impl ElementKind {
             ElementKind::Outline => tr_noop!("Outline"),
             ElementKind::Buttons => tr_noop!("Buttons"),
             ElementKind::Cutouts => tr_noop!("Cutouts"),
+            ElementKind::Anchors => tr_noop!("Anchors"),
         }
     }
 
@@ -55,12 +66,13 @@ impl ElementKind {
             ElementKind::Outline => [255, 0, 255],
             ElementKind::Buttons => [0, 170, 255],
             ElementKind::Cutouts => [255, 140, 0],
+            ElementKind::Anchors => [0, 200, 120],
         }
     }
 
-    /// Material is removed inside these shapes.
-    pub fn is_hole(self) -> bool {
-        self != ElementKind::Outline
+    /// Made of lines (all but anchors, which are points).
+    pub fn has_lines(self) -> bool {
+        self != ElementKind::Anchors
     }
 }
 
@@ -257,8 +269,10 @@ pub struct TemplateElement {
     pub name: String,
     /// Colour from `template.json`, if set.
     pub color: Option<[u8; 3]>,
-    /// Its shapes in template mm.
+    /// Its shapes in template mm. Empty for anchors.
     pub polylines: Vec<Polyline>,
+    /// Its anchor points in template mm. Empty for other kinds.
+    pub anchors: Vec<P2>,
 }
 
 /// Template geometry in mm, origin at the top-left of the bounding box of all its
@@ -398,15 +412,17 @@ fn bulged_path(verts: &[([f64; 2], f64)], closed: bool) -> Vec<[f64; 2]> {
 /// Points of a path and whether it is closed.
 type RawPath = (Vec<[f64; 2]>, bool);
 
-/// Paths of one DXF file in mm, y up.
-fn read_dxf(path: &Path, units: Option<f64>) -> Result<Vec<RawPath>, String> {
+/// Paths and POINT entities of one DXF file, in mm, y up.
+fn read_dxf(path: &Path, units: Option<f64>) -> Result<(Vec<RawPath>, Vec<[f64; 2]>), String> {
     let drawing = dxf::Drawing::load_file(path)
         .map_err(|e| tr!("Cannot read {path}: {e}", path = path.display(), e = e))?;
 
     // Raw paths in drawing units, y up.
     let mut raw: Vec<RawPath> = Vec::new();
+    let mut points = Vec::new();
     for entity in drawing.entities() {
         match &entity.specific {
+            EntityType::ModelPoint(p) => points.push([p.location.x, p.location.y]),
             EntityType::Polyline(pl) => {
                 // Skip 3D meshes and polyface meshes.
                 if pl.flags & (16 | 64) != 0 {
@@ -444,12 +460,27 @@ fn read_dxf(path: &Path, units: Option<f64>) -> Result<Vec<RawPath>, String> {
     }
     raw.retain(|(pts, _)| pts.len() >= 2);
     let k = units.unwrap_or_else(|| units_to_mm(drawing.header.default_drawing_units));
-    for (pts, _) in &mut raw {
-        for p in pts.iter_mut() {
-            *p = [p[0] * k, p[1] * k];
-        }
+    for p in raw.iter_mut().flat_map(|(pts, _)| pts).chain(&mut points) {
+        *p = [p[0] * k, p[1] * k];
     }
-    Ok(raw)
+    Ok((raw, points))
+}
+
+/// Anchor points of a DXF read as an anchors element: its points, then the centre of the
+/// bounding box of each closed shape (a circle's centre). Open lines give none.
+fn anchor_points(paths: &[RawPath], points: &[[f64; 2]]) -> Vec<[f64; 2]> {
+    let centres = paths.iter().filter(|(_, closed)| *closed).map(|(pts, _)| {
+        let (min, max) = pts
+            .iter()
+            .fold(([f64::MAX; 2], [f64::MIN; 2]), |(mn, mx), p| {
+                (
+                    [mn[0].min(p[0]), mn[1].min(p[1])],
+                    [mx[0].max(p[0]), mx[1].max(p[1])],
+                )
+            });
+        [(min[0] + max[0]) / 2.0, (min[1] + max[1]) / 2.0]
+    });
+    points.iter().copied().chain(centres).collect()
 }
 
 /// Endpoints closer than this (mm) are treated as the same point.
@@ -513,17 +544,24 @@ pub fn load(entry: &TemplateEntry) -> Result<Template, String> {
         })?),
         None => None,
     };
+    // (source, paths, anchor points) in drawing mm. Anchors have points and no paths.
     let mut elements = Vec::new();
     for src in &entry.sources {
-        let paths = join_paths(read_dxf(&src.path, units)?);
-        elements.push((src, paths));
+        let (paths, points) = read_dxf(&src.path, units)?;
+        let paths = join_paths(paths);
+        if src.kind.has_lines() {
+            elements.push((src, paths, Vec::new()));
+        } else {
+            elements.push((src, Vec::new(), anchor_points(&paths, &points)));
+        }
     }
 
-    // One frame for all elements: the bounding box of everything.
+    // One frame for all elements: the bounding box of their lines. Anchors don't widen
+    // it, so adding them never moves the template.
     let (mut min, mut max) = ([f64::MAX; 2], [f64::MIN; 2]);
     for p in elements
         .iter()
-        .flat_map(|(_, paths)| paths)
+        .flat_map(|(_, paths, _)| paths)
         .flat_map(|(pts, _)| pts)
     {
         min = [min[0].min(p[0]), min[1].min(p[1])];
@@ -540,22 +578,22 @@ pub fn load(entry: &TemplateEntry) -> Result<Template, String> {
             files = files.join(", ")
         ));
     }
+    // Drawing mm, y up, to template mm, y down.
+    let to_frame = |p: &[f64; 2]| [(p[0] - min[0]) as f32, (max[1] - p[1]) as f32];
     let elements = elements
         .into_iter()
-        .map(|(src, paths)| TemplateElement {
+        .map(|(src, paths, anchors)| TemplateElement {
             kind: src.kind,
             name: src.name.clone(),
             color: src.color,
             polylines: paths
                 .into_iter()
                 .map(|(pts, closed)| Polyline {
-                    points: pts
-                        .iter()
-                        .map(|p| [(p[0] - min[0]) as f32, (max[1] - p[1]) as f32])
-                        .collect(),
+                    points: pts.iter().map(to_frame).collect(),
                     closed,
                 })
                 .collect(),
+            anchors: anchors.iter().map(to_frame).collect(),
         })
         .collect();
 
@@ -700,6 +738,70 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn anchors_are_points_and_shape_centres_outside_the_frame() {
+        use dxf::Point;
+        use dxf::entities::{Entity, ModelPoint};
+        let dir = std::env::temp_dir().join(format!("artwork-anchors-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let panel: &[[f64; 2]] = &[[0.0, 0.0], [100.0, 0.0], [100.0, 50.0], [0.0, 50.0]];
+        write_dxf(&dir.join("edge.dxf"), &[panel], &[]);
+        // Two buttons; a square and an open line add an anchor and nothing.
+        let square: &[[f64; 2]] = &[[70.0, 10.0], [80.0, 10.0], [80.0, 20.0], [70.0, 20.0]];
+        write_dxf(
+            &dir.join("buttons.dxf"),
+            &[square],
+            &[([20.0, 30.0], 12.0), ([50.0, 30.0], 12.0)],
+        );
+        // A POINT outside the panel must not widen the template.
+        let mut d = dxf::Drawing::new();
+        d.header.default_drawing_units = Units::Millimeters;
+        d.add_entity(Entity::new(EntityType::ModelPoint(ModelPoint::new(
+            Point::new(150.0, 25.0, 0.0),
+        ))));
+        d.save_file(dir.join("points.dxf")).unwrap();
+        std::fs::write(
+            dir.join(CONFIG_FILE),
+            r#"{
+                "units": "mm",
+                "elements": [
+                    { "kind": "outline", "dxf": "edge.dxf" },
+                    { "kind": "buttons", "dxf": "buttons.dxf" },
+                    { "kind": "anchors", "dxf": "buttons.dxf", "name": "Centres" },
+                    { "kind": "anchors", "dxf": "points.dxf" }
+                ]
+            }"#,
+        )
+        .unwrap();
+        let t = load(&read_entry(&dir).unwrap()).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+
+        assert!((t.size_mm[0] - 100.0).abs() < 1e-3 && (t.size_mm[1] - 50.0).abs() < 1e-3);
+        assert!(t.has(ElementKind::Anchors));
+        let centres = &t.elements[2];
+        assert_eq!(
+            (centres.kind, centres.name.as_str()),
+            (ElementKind::Anchors, "Centres")
+        );
+        assert!(centres.polylines.is_empty());
+        // y down from the top of the panel.
+        let mut got = centres.anchors.clone();
+        got.sort_by(|a, b| a[0].total_cmp(&b[0]));
+        let want = [[20.0, 20.0], [50.0, 20.0], [75.0, 35.0]];
+        assert_eq!(got.len(), 3, "{got:?}");
+        for (g, w) in got.iter().zip(want) {
+            assert!(
+                (g[0] - w[0]).abs() < 1e-3 && (g[1] - w[1]).abs() < 1e-3,
+                "{got:?}"
+            );
+        }
+        let points = &t.elements[3];
+        assert_eq!(points.name, "Anchors", "named after the kind by default");
+        assert_eq!(points.anchors.len(), 1);
+        assert!((points.anchors[0][0] - 150.0).abs() < 1e-3);
+        assert!((points.anchors[0][1] - 25.0).abs() < 1e-3);
+    }
+
+    #[test]
     fn elements_from_separate_files_share_one_frame() {
         let dir = std::env::temp_dir().join(format!("artwork-elements-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -731,7 +833,14 @@ pub(crate) mod tests {
             "{s:?}"
         );
         let kinds: Vec<_> = t.elements.iter().map(|e| e.kind).collect();
-        assert_eq!(kinds, ElementKind::ALL);
+        assert_eq!(
+            kinds,
+            [
+                ElementKind::Outline,
+                ElementKind::Buttons,
+                ElementKind::Cutouts
+            ]
+        );
         assert_eq!(t.elements[1].color, Some([0, 255, 0]));
         assert_eq!(t.elements[2].name, "Screws");
         // Button centre: x 40 - 10 = 30, y flipped: 70 - 45 = 25.

@@ -10,10 +10,12 @@ use tiny_skia::{
 use crate::document::{Affine, Document, Homography, Node, P2};
 use crate::effects::{self, EffectInstance};
 use crate::i18n::tr;
-use crate::template::{ElementKind, Polyline, Template};
+use crate::template::{ElementKind, KINDS, Polyline, Template};
 
 /// Width of printed cut lines.
 pub const OUTLINE_WIDTH_MM: f32 = 0.25;
+/// Half the size of the cross marking a printed anchor.
+pub const ANCHOR_MARK_MM: f32 = 2.0;
 
 /// An image layer ready to draw.
 pub struct SceneLayer {
@@ -125,6 +127,25 @@ pub struct PlacedElement {
     pub kind: ElementKind,
     /// Its shapes in page mm.
     pub polylines: Vec<Polyline>,
+    /// Its anchor points in page mm (anchors only).
+    pub anchors: Vec<P2>,
+}
+
+impl PlacedElement {
+    /// The lines to print: its shapes, then a small cross on each anchor.
+    pub fn printed_lines(&self) -> impl Iterator<Item = std::borrow::Cow<'_, Polyline>> {
+        let d = ANCHOR_MARK_MM;
+        let crosses = self.anchors.iter().flat_map(move |&[x, y]| {
+            [[[x - d, y], [x + d, y]], [[x, y - d], [x, y + d]]].map(|seg| Polyline {
+                points: seg.to_vec(),
+                closed: false,
+            })
+        });
+        self.polylines
+            .iter()
+            .map(std::borrow::Cow::Borrowed)
+            .chain(crosses.map(std::borrow::Cow::Owned))
+    }
 }
 
 /// How the template cuts the artwork.
@@ -142,7 +163,7 @@ impl Cuts {
     /// Whether the inside of `kind` is left blank. The outline is never a hole.
     pub fn blanks(self, kind: ElementKind) -> bool {
         match kind {
-            ElementKind::Outline => false,
+            ElementKind::Outline | ElementKind::Anchors => false,
             ElementKind::Buttons => self.blank_buttons,
             ElementKind::Cutouts => self.blank_cutouts,
         }
@@ -189,8 +210,8 @@ impl Scene {
     pub fn new(
         doc: &Document,
         template: Option<&Template>,
-        colors: [[u8; 3]; 3],
-        print: [bool; 3],
+        colors: [[u8; 3]; KINDS],
+        print: [bool; KINDS],
         cuts: Cuts,
     ) -> Self {
         Self::build(doc, template, colors, print, cuts, false)
@@ -200,8 +221,8 @@ impl Scene {
     pub fn preview(
         doc: &Document,
         template: Option<&Template>,
-        colors: [[u8; 3]; 3],
-        print: [bool; 3],
+        colors: [[u8; 3]; KINDS],
+        print: [bool; KINDS],
         cuts: Cuts,
     ) -> Self {
         Self::build(doc, template, colors, print, cuts, true)
@@ -210,8 +231,8 @@ impl Scene {
     fn build(
         doc: &Document,
         template: Option<&Template>,
-        colors: [[u8; 3]; 3],
-        print: [bool; 3],
+        colors: [[u8; 3]; KINDS],
+        print: [bool; KINDS],
         cuts: Cuts,
         preview: bool,
     ) -> Self {
@@ -251,6 +272,7 @@ pub fn placed_elements(doc: &Document, template: &Template) -> Vec<PlacedElement
                     closed: p.closed,
                 })
                 .collect(),
+            anchors: e.anchors.iter().map(|&q| m.apply(q)).collect(),
         })
         .collect()
 }
@@ -294,7 +316,7 @@ pub fn keep_mask(
     };
     let outline = cuts
         .clip_to_outline
-        .then(|| of(&|k| !k.is_hole()))
+        .then(|| of(&|k| k == ElementKind::Outline))
         .flatten();
     let holes = of(&|k| cuts.blanks(k));
     if outline.is_none() && holes.is_none() {
@@ -712,7 +734,7 @@ pub fn draw_lines(pixmap: &mut Pixmap, scene: &Scene, dpi: f32) {
         let [r, g, b] = element.color;
         paint.set_color_rgba8(r, g, b, 255);
         paint.anti_alias = true;
-        for poly in &element.placed.polylines {
+        for poly in element.placed.printed_lines() {
             let mut pb = PathBuilder::new();
             let mut pts = poly.points.iter();
             let Some(first) = pts.next() else { continue };
@@ -782,7 +804,13 @@ mod tests {
             )],
             ..Default::default()
         };
-        let scene = Scene::new(&doc, None, [[0; 3]; 3], [true; 3], Cuts::default());
+        let scene = Scene::new(
+            &doc,
+            None,
+            [[0; 3]; crate::template::KINDS],
+            [true; crate::template::KINDS],
+            Cuts::default(),
+        );
         assert!(matches!(scene.layers[0], SceneNode::Group { .. }));
         let pm = compose(&scene, 254.0, false).unwrap();
         let px = pm.pixel(175, 150).unwrap();
@@ -811,7 +839,13 @@ mod tests {
             ),
             hidden,
         ];
-        let scene = Scene::new(&doc, None, [[0; 3]; 3], [true; 3], Cuts::default());
+        let scene = Scene::new(
+            &doc,
+            None,
+            [[0; 3]; crate::template::KINDS],
+            [true; crate::template::KINDS],
+            Cuts::default(),
+        );
         assert_eq!(scene.layers.len(), 1);
         match &scene.layers[0] {
             SceneNode::Image(l) => assert!((l.opacity - 0.25).abs() < 1e-6),
@@ -830,7 +864,13 @@ mod tests {
             layers: vec![node],
             ..Default::default()
         };
-        let scene = Scene::new(&doc, None, [[0; 3]; 3], [true; 3], Cuts::default());
+        let scene = Scene::new(
+            &doc,
+            None,
+            [[0; 3]; crate::template::KINDS],
+            [true; crate::template::KINDS],
+            Cuts::default(),
+        );
         let pm = compose(&scene, 254.0, false).unwrap(); // 10 px per mm
         let blue = |x: u32, y: u32| pm.pixel(x, y).unwrap().red() < 10;
         let white = |x: u32, y: u32| pm.pixel(x, y).unwrap().red() > 245;
@@ -865,7 +905,13 @@ mod tests {
             layers: vec![Node::Layer(Box::new(l))],
             ..Default::default()
         };
-        let scene = Scene::new(&doc, None, [[0; 3]; 3], [true; 3], Cuts::default());
+        let scene = Scene::new(
+            &doc,
+            None,
+            [[0; 3]; crate::template::KINDS],
+            [true; crate::template::KINDS],
+            Cuts::default(),
+        );
         let pm = compose(&scene, 25.4, false).unwrap(); // 1 px per mm: 10x reduction
         for x in 15..25 {
             let r = pm.pixel(x, 30).unwrap().red();
@@ -880,9 +926,47 @@ mod tests {
         }
     }
 
+    #[test]
+    fn anchors_print_as_crosses() {
+        let placed = PlacedElement {
+            kind: ElementKind::Anchors,
+            polylines: Vec::new(),
+            anchors: vec![[50.0, 25.0]],
+        };
+        let lines: Vec<_> = placed.printed_lines().map(|p| p.into_owned()).collect();
+        let d = ANCHOR_MARK_MM;
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].points, [[50.0 - d, 25.0], [50.0 + d, 25.0]]);
+        assert_eq!(lines[1].points, [[50.0, 25.0 - d], [50.0, 25.0 + d]]);
+        assert!(lines.iter().all(|l| !l.closed));
+
+        let mut scene = Scene {
+            page_mm: [100.0, 50.0],
+            background: [255, 255, 255],
+            layers: Vec::new(),
+            elements: vec![SceneElement {
+                placed,
+                color: [255, 0, 0],
+                print: true,
+            }],
+            cuts: Cuts::default(),
+        };
+        let red = |pm: &Pixmap, x, y| pm.pixel(x, y).unwrap().green() < 50;
+        let pm = compose(&scene, 254.0, true).unwrap(); // 10 px per mm
+        assert!(red(&pm, 500, 250) && red(&pm, 515, 250) && red(&pm, 500, 235));
+        assert!(!red(&pm, 515, 235), "a cross, not a square");
+        scene.elements[0].print = false;
+        let pm = compose(&scene, 254.0, true).unwrap();
+        assert!(!red(&pm, 500, 250));
+    }
+
     fn element(kind: ElementKind, polylines: Vec<Polyline>, print: bool) -> SceneElement {
         SceneElement {
-            placed: PlacedElement { kind, polylines },
+            placed: PlacedElement {
+                kind,
+                polylines,
+                anchors: Vec::new(),
+            },
             color: [0, 0, 0],
             print,
         }
@@ -965,6 +1049,7 @@ mod tests {
         let placed = vec![PlacedElement {
             kind: ElementKind::Outline,
             polylines: vec![open],
+            anchors: Vec::new(),
         }];
         assert!(keep_mask(&placed, Cuts::default(), [0.0, 0.0], [10, 10], 1.0).is_none());
     }
@@ -1028,6 +1113,7 @@ mod tests {
                         points: vec![[60.0, 10.0], [90.0, 10.0], [90.0, 40.0]],
                         closed: true,
                     }],
+                    anchors: Vec::new(),
                 },
                 color: [255, 0, 0],
                 print: true,

@@ -347,9 +347,21 @@ mod shadow_tests {
         assert_eq!(layer.fx.as_ref().unwrap().pad, [0.0, 0.0, 4.0, 4.0]);
         assert_eq!(layer.image_uv(), [0.0, 0.0, 10.0 / 14.0, 10.0 / 14.0]);
 
-        let colors = [[0; 3]; 3];
-        let export = Scene::new(&doc, None, colors, [false; 3], Cuts::default());
-        let screen = Scene::preview(&doc, None, colors, [false; 3], Cuts::default());
+        let colors = [[0; 3]; crate::template::KINDS];
+        let export = Scene::new(
+            &doc,
+            None,
+            colors,
+            [false; crate::template::KINDS],
+            Cuts::default(),
+        );
+        let screen = Scene::preview(
+            &doc,
+            None,
+            colors,
+            [false; crate::template::KINDS],
+            Cuts::default(),
+        );
         for scene in [export, screen] {
             // 1 px per mm.
             let pm = compose(&scene, 25.4, false).unwrap();

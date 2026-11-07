@@ -31,6 +31,8 @@ layers panel on the right](doc/capture.png)
   outline. They are stacked, reordered and toggled in the layer's properties, applied to
   the export at full resolution, and never change the image file. More effects can be
   added with [plugins](#plugins).
+- **Snap to anchors**: image centres and corners snap to points defined by the template,
+  such as the button centres.
 - **Align** layers or groups to the page or to the template.
 - **Undo / redo** for every change to the project.
 - **Templates** made of several elements, each in its own DXF file, with its own colour and
@@ -99,14 +101,24 @@ describes the elements:
     { "kind": "outline", "dxf": "outline.dxf" },
     { "kind": "buttons", "dxf": "buttons.dxf", "name": "Action buttons" },
     { "kind": "buttons", "dxf": "menu.dxf", "name": "Menu buttons" },
-    { "kind": "cutouts", "dxf": "holes.dxf", "name": "Fastener holes", "color": "#ff8c00" }
+    { "kind": "cutouts", "dxf": "holes.dxf", "name": "Fastener holes", "color": "#ff8c00" },
+    { "kind": "anchors", "dxf": "anchors.dxf", "name": "Button centres" }
   ],
   "placement": { "rotation": 90, "flip_x": false, "flip_y": true, "offset_mm": [0, 0] }
 }
 ```
 
-- `kind` is `outline`, `buttons` or `cutouts`. The outline clips the artwork; buttons and
-  cutouts are holes, left blank in the export unless turned off in the Export window.
+- `kind` is `outline`, `buttons`, `cutouts` or `anchors`. The outline clips the artwork;
+  buttons and cutouts are holes, left blank in the export unless turned off in the Export
+  window.
+- `anchors` are points that images snap to on the canvas: while an image is moved, its
+  centre or a corner lands on an anchor that comes near, and a corner being resized or
+  distorted does too. Hold Alt to drag freely, or turn it off with **View > Snap to
+  anchors**. Anchors are drawn as small crosses and cut nothing; they are printed only when
+  ticked under **Print lines** in the Export window. They are read from the DXF's POINT
+  entities, usually all in one `anchors.dxf`. The centre of each closed shape counts too,
+  so an anchors element can also point at a buttons DXF to get the button centres. They
+  don't change the template's size or placement.
 - All DXF files of a template must share the same coordinates, as when they are exported
   from one drawing. Outlines drawn as separate lines and arcs are joined automatically.
 - `units` (`mm`, `cm` or `inch`) is used when the DXF files don't declare their units.

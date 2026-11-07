@@ -25,8 +25,8 @@ pub struct LayersPanel {
     pub distort: bool,
     /// What the Align buttons line up with.
     pub align_to: AlignTo,
-    /// Put the keyboard in the selected text layer's text, with it all selected.
-    pub focus_text: bool,
+    /// Open the selected text layer's sections, for a new text layer.
+    pub show_text: bool,
     /// Typed in the font list to narrow it.
     pub font_filter: String,
 }
@@ -1192,8 +1192,8 @@ fn text_section(
     fonts: &FontLibrary,
 ) -> bool {
     let mut changed = false;
-    // A new text layer opens the section, so its text can be typed right away.
-    let open = state.focus_text;
+    // A new text layer opens the section, so its settings show while it is typed.
+    let open = state.show_text;
     section(
         ui,
         "text_props",
@@ -1206,21 +1206,17 @@ fn text_section(
             // The name follows the text until it is renamed.
             let auto = layer.name == text::auto_name(&t.content);
             let id = ui.make_persistent_id("text_content");
-            let r = ui.add(
-                egui::TextEdit::multiline(&mut t.content)
-                    .id(id)
-                    .desired_rows(3)
-                    .desired_width(f32::INFINITY)
-                    .hint_text(tr!("TEXT_PLACEHOLDER")),
-            );
-            if std::mem::take(&mut state.focus_text) {
-                r.request_focus();
+            let r = ui
+                .add(
+                    egui::TextEdit::multiline(&mut t.content)
+                        .id(id)
+                        .desired_rows(3)
+                        .desired_width(f32::INFINITY)
+                        .hint_text(tr!("TEXT_PLACEHOLDER")),
+                )
+                .on_hover_text(tr!("TYPE_ON_CANVAS_HINT"));
+            if std::mem::take(&mut state.show_text) {
                 r.scroll_to_me(Some(egui::Align::Center));
-                if let Some(mut st) = egui::TextEdit::load_state(ui.ctx(), id) {
-                    st.cursor
-                        .set_char_range(Some(egui::text::CCursorRange::select_all_str(&t.content)));
-                    st.store(ui.ctx(), id);
-                }
             }
             if r.changed() {
                 changed = true;
@@ -1241,8 +1237,24 @@ fn text_section(
                         ui.colored_label(ui.visuals().warn_fg_color, "⚠")
                             .on_hover_text(tr!("TEXT_FONT_NOT_INSTALLED"));
                     }
+                    let chars = &layer.text_state.missing;
+                    if !chars.is_empty() {
+                        let chars: Vec<String> = chars.iter().map(char::to_string).collect();
+                        ui.colored_label(ui.visuals().warn_fg_color, "⚠")
+                            .on_hover_text(tr!("TEXT_MISSING_CHARACTERS", chars = chars.join(" ")));
+                    }
                 });
                 ui.end_row();
+
+                // Fonts the characters this one lacks come from.
+                if !t.fallbacks.is_empty() {
+                    ui.label(tr!("TEXT_FALLBACK_FONTS"))
+                        .on_hover_text(tr!("TEXT_FALLBACK_FONTS_HINT"));
+                    let names: Vec<&str> = t.fallbacks.iter().map(|f| f.family.as_str()).collect();
+                    ui.add(egui::Label::new(RichText::new(names.join(", ")).weak()).wrap())
+                        .on_hover_text(tr!("TEXT_FALLBACK_FONTS_HINT"));
+                    ui.end_row();
+                }
 
                 ui.label(tr!("TEXT_STYLE"));
                 ui.horizontal(|ui| {
@@ -1553,7 +1565,7 @@ fn properties(
         }
         Some(Node::Layer(layer)) => {
             // Common properties first, then what only this kind of layer has.
-            let open = state.focus_text;
+            let open = state.show_text;
             section(
                 ui,
                 "layer_props",

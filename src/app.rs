@@ -404,8 +404,12 @@ impl ArtworkApp {
         let at = layers_ui::insertion_path(&mut self.doc, self.selected);
         self.doc.insert(&at, Node::Layer(Box::new(layer)));
         self.selected = Some(id);
-        self.layers_panel.focus_text = true;
+        self.layers_panel.show_text = true;
         text::sync(ctx, &mut self.doc, &self.fonts);
+        // Typed in right away on the canvas, its placeholder text selected.
+        if let Some(layer) = self.doc.layer(id) {
+            self.canvas.type_in(layer);
+        }
     }
 
     /// Adds one layer per image file, fitted to the page, above the selection.
@@ -1615,9 +1619,6 @@ impl eframe::App for ArtworkApp {
                 &mut self.canvas,
             );
         });
-        if std::mem::take(&mut self.canvas.edit_text) {
-            self.layers_panel.focus_text = true;
-        }
 
         self.export_window(&ctx);
         self.export_progress_window(&ctx);

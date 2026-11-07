@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod canvas_text;
 mod document;
 mod effects;
 mod effects_ui;

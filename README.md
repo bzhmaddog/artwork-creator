@@ -24,11 +24,14 @@ layers panel on the right](doc/capture.png)
 - **Layers and groups**: add images (PNG, JPEG, WebP, BMP, GIF) by button or drag and drop;
   reorder, group, duplicate, hide and lock them; group opacity is applied to the group as
   a whole.
-- **Text layers**: any installed font, bold and italic, multi-line text aligned left,
-  centered or right, letter and line spacing, color and outline. Text layers move, scale,
-  rotate, distort and take effects like images, and are drawn at the export resolution
-  so they print sharp. Fonts are saved inside `.artwork` projects (except those whose
-  license forbids embedding them), so a shared project looks the same elsewhere.
+- **Text layers**: typed in place on the canvas, in any installed font, bold and italic,
+  multi-line text aligned left, centered or right, letter and line spacing, color and
+  outline. Text layers move, scale, rotate, distort and take effects like images, and are
+  drawn at the export resolution so they print sharp. Characters the font lacks (other
+  scripts, symbols, emoji) are taken from the system's fallback fonts, or the built-in
+  emoji font. Fonts, fallback ones included, are saved inside `.artwork` projects (except
+  those whose license forbids embedding them), so a shared project looks the same
+  elsewhere.
 - **Transform on the canvas**: move, scale, rotate, stretch width or height on its own, and
   drag single corners to fake perspective.
 - **Effects** on each image layer: brightness / contrast, hue / saturation, grayscale,
@@ -43,8 +46,10 @@ layers panel on the right](doc/capture.png)
 - **Templates** made of several elements, each in its own DXF file, with its own color and
   visibility.
 - **Export** PNG and/or PDF at the resolution you choose (72 to 1200 DPI). Choose which
-  template lines are printed (in the PDF they stay sharp vector lines), and whether the
-  inside of buttons and of cutouts is left blank or printed over.
+  template lines are printed, and whether the inside of buttons and of cutouts is left
+  blank or printed over. In the PDF, template lines and text stay sharp vectors (text as
+  outlines, so no font is needed to print it); text layers with effects, or inside a
+  semi-transparent group, are printed as images like the rest.
 - **Projects** are saved, by default, as a single `.artwork` file (a zip archive) holding
   the project and all its images, so it can be moved or shared on its own. **Save As**
   can also write a linked `.json` project that points to the image files on disk; images
@@ -221,7 +226,7 @@ To add a language: add a `Language` variant and its table in `src/i18n.rs`, and 
 | Undo / Redo | Ctrl+Z / Ctrl+Shift+Z or Ctrl+Y |
 | Add an image layer | Ctrl+I, or drop image files on the window |
 | Add a text layer | Ctrl+T |
-| Edit a text layer's text | Double-click it on the canvas |
+| Type in a text layer on the canvas | Double-click it; Esc or a click outside it to stop |
 | Duplicate | Ctrl+D |
 | Group / Ungroup | Ctrl+G / Ctrl+Shift+G |
 | Delete layer | Del |
@@ -237,6 +242,11 @@ On the canvas, with a layer selected:
   perspective. **Holding Ctrl** swaps between resizing and distorting while you drag.
 - **Edge handles** stretch one side; **Alt** stretches both sides from the center.
 - **Rotation handle** rotates; **Shift** snaps to 15° steps.
+
+While typing in a text layer on the canvas, the keys edit the text as in any text field:
+arrows, Home / End, Shift to select, Ctrl+A / C / X / V, Ctrl+Z for the typing itself.
+A click on the text moves the cursor, a drag selects, a double click selects a word.
+Dragging a handle stops typing and transforms the layer as usual.
 
 ## License
 

@@ -462,6 +462,15 @@ impl Layer {
         self.transform.to_affine(self.size_px)
     }
 
+    /// The files the layer uses: its image or font, then a text's fallback fonts.
+    pub fn sources_mut(&mut self) -> impl Iterator<Item = &mut PathBuf> {
+        std::iter::once(&mut self.source).chain(
+            self.text
+                .iter_mut()
+                .flat_map(|t| t.fallbacks.iter_mut().map(|f| &mut f.source)),
+        )
+    }
+
     /// Image pixels to page mm, including the perspective distortion.
     pub fn homography(&self) -> Homography {
         self.transform.to_homography(self.size_px)
@@ -906,12 +915,14 @@ impl Document {
     pub fn to_json_relative(&self, base: &Path) -> Result<String, String> {
         let mut doc = self.clone();
         doc.for_each_layer_mut(|layer| {
-            if let Ok(rel) = layer.source.strip_prefix(base) {
-                let parts: Vec<String> = rel
-                    .components()
-                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
-                    .collect();
-                layer.source = PathBuf::from(parts.join("/"));
+            for source in layer.sources_mut() {
+                if let Ok(rel) = source.strip_prefix(base) {
+                    let parts: Vec<String> = rel
+                        .components()
+                        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                        .collect();
+                    *source = PathBuf::from(parts.join("/"));
+                }
             }
         });
         serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())
@@ -925,8 +936,10 @@ impl Document {
         let mut doc = Self::from_json(&text)?;
         let base = path.parent().unwrap_or(Path::new(""));
         doc.for_each_layer_mut(|layer| {
-            if layer.source.is_relative() && !layer.source.as_os_str().is_empty() {
-                layer.source = base.join(&layer.source);
+            for source in layer.sources_mut() {
+                if source.is_relative() && !source.as_os_str().is_empty() {
+                    *source = base.join(&*source);
+                }
             }
         });
         Ok(doc)

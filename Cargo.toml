@@ -12,8 +12,9 @@ members = [".", "plugin-sdk", "plugin-examples/halftone"]
 
 [dependencies]
 artwork-plugin-sdk = { path = "plugin-sdk" }
-# Text layers: system fonts, shaping and glyph outlines; the same crates egui uses.
-epaint_default_fonts = "0.37"
+# Text layers: system fonts, shaping and glyph outlines; the same crates egui uses. The
+# monochrome emoji fonts are the last fallback for characters no other font has.
+epaint_default_fonts = { version = "0.37", features = ["monochrome_emoji_fonts"] }
 fontique = { version = "0.11.1", default-features = false, features = ["system", "fontconfig-dlopen"] }
 harfrust = { version = "0.12", default-features = false, features = ["std"] }
 skrifa = { version = "0.44", default-features = false, features = ["std"] }

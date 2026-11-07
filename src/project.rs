@@ -58,6 +58,18 @@ pub fn load(path: &Path) -> Result<Document, String> {
             .or_insert_with_key(|name| read_entry(&mut zip, name).ok().map(Arc::new))
             .clone();
     });
+    // A text's fallback fonts.
+    doc.for_each_layer_mut(|layer| {
+        for f in layer.text.iter_mut().flat_map(|t| &mut t.fallbacks) {
+            let name = f.source.to_string_lossy().replace('\\', "/");
+            if name.starts_with(FONT_DIR) {
+                f.data = images
+                    .entry(name)
+                    .or_insert_with_key(|name| read_entry(&mut zip, name).ok().map(Arc::new))
+                    .clone();
+            }
+        }
+    });
     Ok(doc)
 }
 
@@ -81,6 +93,14 @@ pub fn save(doc: &Document, path: &Path) -> Result<Vec<String>, String> {
     let mut images: Vec<(String, Arc<Vec<u8>>)> = Vec::new();
     let mut missing = Vec::new();
     doc.for_each_layer_mut(|layer| {
+        for f in fallbacks_to_save(layer) {
+            let Some(data) = &f.data else { continue };
+            let name = entry_name(data, &f.source, true);
+            if !images.iter().any(|(n, _)| *n == name) {
+                images.push((name.clone(), data.clone()));
+            }
+            f.source = PathBuf::from(name);
+        }
         if !font_to_save(layer) {
             return;
         }
@@ -109,20 +129,14 @@ pub fn save_json(doc: &Document, path: &Path) -> Result<Vec<String>, String> {
     let mut doc = doc.clone();
     let mut missing = Vec::new();
     let mut error = None;
-    doc.for_each_layer_mut(|layer| {
-        if !font_to_save(layer) || (layer.source.is_absolute() && layer.source.is_file()) {
-            return;
-        }
-        let Some(data) = &layer.data else {
-            missing.push(layer.name.clone());
-            return;
-        };
-        let name = entry_name(data, &layer.source, layer.text.is_some());
+    // Writes a file the project only has in memory into the folder; returns its path.
+    let mut write = |data: &Arc<Vec<u8>>, source: &Path, font: bool| -> Option<PathBuf> {
+        let name = entry_name(data, source, font);
         let file = folder.join(
             name.trim_start_matches(IMAGE_DIR)
                 .trim_start_matches(FONT_DIR),
         );
-        // Identical images share a file, so an existing one is already right.
+        // Identical files are shared, so an existing one is already right.
         let written = file.is_file()
             || std::fs::create_dir_all(&folder)
                 .and_then(|()| std::fs::write(&file, data.as_slice()))
@@ -130,7 +144,27 @@ pub fn save_json(doc: &Document, path: &Path) -> Result<Vec<String>, String> {
                     error.get_or_insert(tr!("CANNOT_WRITE_FILE", path = file.display(), e = e))
                 })
                 .is_ok();
-        if written {
+        written.then_some(file)
+    };
+    doc.for_each_layer_mut(|layer| {
+        for f in fallbacks_to_save(layer) {
+            if f.source.is_absolute() && f.source.is_file() {
+                continue;
+            }
+            if let Some(data) = &f.data
+                && let Some(file) = write(data, &f.source, true)
+            {
+                f.source = file;
+            }
+        }
+        if !font_to_save(layer) || (layer.source.is_absolute() && layer.source.is_file()) {
+            return;
+        }
+        let Some(data) = &layer.data else {
+            missing.push(layer.name.clone());
+            return;
+        };
+        if let Some(file) = write(data, &layer.source, layer.text.is_some()) {
             layer.source = file;
         }
     });
@@ -200,6 +234,28 @@ fn font_to_save(layer: &mut Layer) -> bool {
     save
 }
 
+/// A text layer's fallback fonts whose file is saved with the project: loaded, not built
+/// in, and embeddable. The others have their `source` cleared unless it is a file on
+/// disk; they are looked up by family where the project opens.
+fn fallbacks_to_save(layer: &mut Layer) -> Vec<&mut crate::text::FallbackFont> {
+    let Some(text) = &mut layer.text else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for f in &mut text.fallbacks {
+        let save = !f.is_builtin()
+            && f.data
+                .as_ref()
+                .is_some_and(|d| crate::text::embeddable(d, f.index));
+        if save {
+            out.push(f);
+        } else if !f.source.is_absolute() {
+            f.source = PathBuf::new();
+        }
+    }
+    out
+}
+
 fn entry_name(data: &[u8], source: &Path, font: bool) -> String {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     data.hash(&mut h);
@@ -254,6 +310,20 @@ mod tests {
         a.source = "/usr/share/fonts/Hack-Regular.ttf".into();
         let mut b = text::new_layer(2, "Built in", BUILTIN_FAMILY.into(), [50.0, 80.0]);
         b.data = Some(Arc::new(epaint_default_fonts::UBUNTU_LIGHT.to_vec()));
+        // Fallback fonts: one from the system, saved; one built in, not saved.
+        b.text.as_mut().unwrap().fallbacks = vec![
+            text::FallbackFont {
+                family: "Hack".into(),
+                source: "/usr/share/fonts/Hack-Regular.ttf".into(),
+                data: Some(hack.clone()),
+                ..Default::default()
+            },
+            text::FallbackFont {
+                family: text::EMOJI_FAMILY.into(),
+                data: Some(Arc::new(epaint_default_fonts::NOTO_EMOJI_REGULAR.to_vec())),
+                ..Default::default()
+            },
+        ];
         doc.layers.push(Node::Layer(Box::new(a)));
         doc.layers.push(Node::Layer(Box::new(b)));
 
@@ -272,6 +342,16 @@ mod tests {
             b.data.is_none() && b.source.as_os_str().is_empty(),
             "not stored"
         );
+        let fb = &b.text.as_ref().unwrap().fallbacks;
+        assert_eq!(fb.len(), 2);
+        assert_eq!(
+            fb[0].data.as_deref(),
+            Some(hack.as_ref()),
+            "fallback read back"
+        );
+        assert_eq!(fb[0].source, a.source, "same font file, stored once");
+        assert!(fb[1].data.is_none() && fb[1].source.as_os_str().is_empty());
+        assert_eq!(fb[1].family, text::EMOJI_FAMILY);
 
         // A linked project writes the archive's font next to it.
         let json = dir.join("t.json");
@@ -279,6 +359,11 @@ mod tests {
         let linked = Document::load(&json).unwrap();
         let src = &linked.layer(1).unwrap().source;
         assert!(src.is_file() && src.extension().is_some_and(|e| e == "ttf"));
+        let fb = &linked.layer(2).unwrap().text.as_ref().unwrap().fallbacks[0];
+        assert_eq!(
+            &fb.source, src,
+            "fallback written next to it too, and linked"
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 

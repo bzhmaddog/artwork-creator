@@ -16,15 +16,16 @@ Done:
 - Size in pt, bold / italic, alignment, letter spacing, line spacing, multi-line text.
 - Fill color and outline (width and color).
 - Layer effects work on text too.
-- Text edited in the Properties panel; double-clicking a text layer on the canvas jumps
-  there.
+- Text edited in the Properties panel, or typed in place on the canvas after a double
+  click on the layer (new text layers start that way).
 - Drawn at the export resolution, so text prints sharp at any DPI.
+- Characters missing from the chosen font taken from the system's fallback fonts (saved
+  with the project too), or the built-in emoji font.
+- PDF export keeps text as vector outlines (except text with effects, or inside a
+  semi-transparent group).
 
 Still to do:
 
-- Editing the text in place on the canvas.
-- PDF export keeps text as vectors (today the whole artwork is one image in the PDF).
-- Characters missing from the chosen font taken from another font.
 - Text along a path.
 
 ### Shape layers

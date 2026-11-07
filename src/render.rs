@@ -11,6 +11,7 @@ use crate::document::{Affine, Document, Homography, Node, P2};
 use crate::effects::{self, EffectInstance};
 use crate::i18n::tr;
 use crate::template::{ElementKind, KINDS, Polyline, Template};
+use crate::text;
 
 /// Width of printed cut lines.
 pub const OUTLINE_WIDTH_MM: f32 = 0.25;
@@ -30,6 +31,18 @@ pub struct SceneLayer {
     pub effects: Vec<EffectInstance>,
     /// Size of `pixmap` relative to the source image, for the effects.
     pub effects_scale: f32,
+    /// A text layer without effects as filled shapes, for formats that keep text as
+    /// vectors. Not for previews.
+    pub vector: Option<Arc<text::Outlines>>,
+}
+
+impl SceneLayer {
+    /// Its shapes, if drawing them as vectors gives what its pixels show: they are drawn
+    /// one by one, so with several (outline, fake bold) the layer must be opaque.
+    pub fn vector(&self) -> Option<&text::Outlines> {
+        let v = self.vector.as_deref()?;
+        (self.opacity >= 1.0 || v.fills.len() <= 1).then_some(v)
+    }
 }
 
 /// What gets drawn: an image, or a group composited on its own.
@@ -93,6 +106,9 @@ pub fn scene_nodes(nodes: &[Node], preview: bool) -> Vec<SceneNode> {
                     )
                     .then(l.homography()),
                     opacity: l.opacity.min(1.0),
+                    vector: (!preview && effects.is_empty())
+                        .then(|| text::outlines(l).map(Arc::new))
+                        .flatten(),
                     effects,
                     effects_scale: 1.0 / k[0],
                 }));
@@ -205,6 +221,11 @@ pub struct Scene {
 }
 
 impl Scene {
+    /// The template elements as placed on the page.
+    fn placed(&self) -> Vec<PlacedElement> {
+        self.elements.iter().map(|e| e.placed.clone()).collect()
+    }
+
     /// The page as exported. `colors` and `print` are per element kind
     /// (`ElementKind::index`).
     pub fn new(
@@ -586,41 +607,45 @@ fn draw_warped(
 }
 
 /// Draws nodes onto `target`; `to_px` maps page mm to target pixels.
+/// Draws an image layer, applying its effects.
+fn draw_layer(target: &mut PixmapMut, l: &SceneLayer, to_px: Affine) -> Result<(), String> {
+    let processed;
+    let (pixmap, map) = if l.effects.is_empty() {
+        (&l.pixmap, l.map)
+    } else {
+        let (pm, pad) = effects::apply_pixmap(&l.pixmap, &l.effects, l.effects_scale)
+            .ok_or(tr!("CANNOT_APPLY_EFFECTS"))?;
+        processed = Arc::new(pm);
+        // The margins the effects added lie left of and above the image.
+        let shift = Affine::translate(-(pad[0] as f32), -(pad[1] as f32));
+        (&processed, Homography::from(shift).then(l.map))
+    };
+    let map = map.then_affine(to_px);
+    match map.as_affine() {
+        Some(affine) => {
+            let paint = PixmapPaint {
+                opacity: l.opacity.clamp(0.0, 1.0),
+                quality: FilterQuality::Bicubic,
+                ..Default::default()
+            };
+            target.draw_pixmap(
+                0,
+                0,
+                pixmap.as_ref().as_ref(),
+                &paint,
+                to_skia(affine),
+                None,
+            );
+        }
+        None => draw_warped(target, pixmap, map, l.opacity)?,
+    }
+    Ok(())
+}
+
 fn draw_nodes(target: &mut PixmapMut, nodes: &[SceneNode], to_px: Affine) -> Result<(), String> {
     for node in nodes {
         match node {
-            SceneNode::Image(l) => {
-                let processed;
-                let (pixmap, map) = if l.effects.is_empty() {
-                    (&l.pixmap, l.map)
-                } else {
-                    let (pm, pad) = effects::apply_pixmap(&l.pixmap, &l.effects, l.effects_scale)
-                        .ok_or(tr!("CANNOT_APPLY_EFFECTS"))?;
-                    processed = Arc::new(pm);
-                    // The margins the effects added lie left of and above the image.
-                    let shift = Affine::translate(-(pad[0] as f32), -(pad[1] as f32));
-                    (&processed, Homography::from(shift).then(l.map))
-                };
-                let map = map.then_affine(to_px);
-                match map.as_affine() {
-                    Some(affine) => {
-                        let paint = PixmapPaint {
-                            opacity: l.opacity.clamp(0.0, 1.0),
-                            quality: FilterQuality::Bicubic,
-                            ..Default::default()
-                        };
-                        target.draw_pixmap(
-                            0,
-                            0,
-                            pixmap.as_ref().as_ref(),
-                            &paint,
-                            to_skia(affine),
-                            None,
-                        );
-                    }
-                    None => draw_warped(target, pixmap, map, l.opacity)?,
-                }
-            }
+            SceneNode::Image(l) => draw_layer(target, l, to_px)?,
             SceneNode::Group { opacity, children } => {
                 // Offscreen buffer covering only the group's footprint on the target.
                 let Some((lo, hi)) = bounds(children, to_px) else {
@@ -694,30 +719,168 @@ pub fn compose_artwork(
     dpi: f32,
     progress: &mut dyn FnMut(f32) -> bool,
 ) -> Result<Pixmap, String> {
+    let parts = compose_parts(scene, dpi, false, progress)?;
+    match parts.into_iter().next() {
+        Some(Part::Raster { pixmap, .. }) => Ok(pixmap),
+        _ => unreachable!("the page comes first"),
+    }
+}
+
+/// A piece of the exported page, for formats that keep text as vectors.
+pub enum Part<'a> {
+    /// Layers drawn together at the export resolution. The first part is the whole page,
+    /// with its background and cut by the template. The others are transparent and
+    /// cropped to what they cover, their top-left corner at `origin` pixels.
+    Raster { pixmap: Pixmap, origin: [u32; 2] },
+    /// A text layer to draw as vectors: `SceneLayer::vector` gives its shapes.
+    Vector(&'a SceneLayer),
+}
+
+/// Renders the page as parts to stack, bottom first. With `vectors`, the top-level text
+/// layers that can be drawn as vectors become parts of their own, and the layers between
+/// them are rendered together. Without, there is a single part: the page as `compose`
+/// renders it, without lines. `progress` is as for `compose_artwork`.
+pub fn compose_parts<'a>(
+    scene: &'a Scene,
+    dpi: f32,
+    vectors: bool,
+    progress: &mut dyn FnMut(f32) -> bool,
+) -> Result<Vec<Part<'a>>, String> {
     let [w, h] = pixel_size(scene.page_mm, dpi);
-    let mut pixmap = Pixmap::new(w, h).ok_or_else(|| tr!("CANNOT_ALLOCATE_IMAGE", w = w, h = h))?;
+    let new_pixmap = || Pixmap::new(w, h).ok_or_else(|| tr!("CANNOT_ALLOCATE_IMAGE", w = w, h = h));
+    let mut page = new_pixmap()?;
     let [r, g, b] = scene.background;
-    pixmap.fill(tiny_skia::Color::from_rgba8(r, g, b, 255));
+    page.fill(tiny_skia::Color::from_rgba8(r, g, b, 255));
 
     let mm_to_px = Affine::scale(dpi / 25.4, dpi / 25.4);
+    let mut parts = Vec::new();
+    let mut current = Some(page);
+    let finish = |parts: &mut Vec<Part<'a>>, pixmap: Pixmap| {
+        if parts.is_empty() {
+            parts.push(Part::Raster {
+                pixmap,
+                origin: [0, 0],
+            });
+        } else if let Some((pixmap, origin)) = crop_to_content(&pixmap) {
+            parts.push(Part::Raster { pixmap, origin });
+        }
+    };
     // One step per top-level node, plus one for the cuts.
     let steps = scene.layers.len() as f32 + 1.0;
     for (i, node) in scene.layers.iter().enumerate() {
         if !progress(i as f32 / steps) {
             return Err(CANCELED.into());
         }
-        draw_nodes(&mut pixmap.as_mut(), std::slice::from_ref(node), mm_to_px)?;
+        if vectors
+            && let SceneNode::Image(l) = node
+            && l.vector().is_some()
+        {
+            if let Some(pixmap) = current.take() {
+                finish(&mut parts, pixmap);
+            }
+            parts.push(Part::Vector(l));
+            continue;
+        }
+        let target = match &mut current {
+            Some(p) => p,
+            None => current.insert(new_pixmap()?),
+        };
+        draw_nodes(&mut target.as_mut(), std::slice::from_ref(node), mm_to_px)?;
+    }
+    if let Some(pixmap) = current.take() {
+        finish(&mut parts, pixmap);
     }
     if !progress((steps - 1.0) / steps) {
         return Err(CANCELED.into());
     }
-
-    let placed: Vec<PlacedElement> = scene.elements.iter().map(|e| e.placed.clone()).collect();
-    if let Some(keep) = keep_mask(&placed, scene.cuts, [0.0, 0.0], [w, h], dpi / 25.4) {
-        apply_cuts(&mut pixmap, &keep);
+    if let Some(Part::Raster { pixmap, .. }) = parts.first_mut()
+        && let Some(keep) = keep_mask(&scene.placed(), scene.cuts, [0.0, 0.0], [w, h], dpi / 25.4)
+    {
+        apply_cuts(pixmap, &keep);
     }
     progress(1.0);
-    Ok(pixmap)
+    Ok(parts)
+}
+
+/// The smallest part of a transparent pixmap holding all it shows, and where it starts;
+/// `None` if it shows nothing.
+fn crop_to_content(pixmap: &Pixmap) -> Option<(Pixmap, [u32; 2])> {
+    let w = pixmap.width() as usize;
+    let (mut x0, mut y0, mut x1, mut y1) = (usize::MAX, usize::MAX, 0, 0);
+    for (y, row) in pixmap.data().chunks_exact(w * 4).enumerate() {
+        let mut row_has = false;
+        for (x, px) in row.as_chunks::<4>().0.iter().enumerate() {
+            if px[3] != 0 {
+                x0 = x0.min(x);
+                x1 = x1.max(x + 1);
+                row_has = true;
+            }
+        }
+        if row_has {
+            y0 = y0.min(y);
+            y1 = y + 1;
+        }
+    }
+    if x1 <= x0 || y1 <= y0 {
+        return None;
+    }
+    let rect =
+        tiny_skia::IntRect::from_xywh(x0 as i32, y0 as i32, (x1 - x0) as u32, (y1 - y0) as u32)?;
+    Some((pixmap.clone_rect(rect)?, [x0 as u32, y0 as u32]))
+}
+
+/// Stacks the parts into one picture of the page, cut by the template, without lines:
+/// what `compose_artwork` renders.
+pub fn flatten(parts: &[Part], scene: &Scene, dpi: f32) -> Result<Pixmap, String> {
+    let mut it = parts.iter();
+    let Some(Part::Raster { pixmap: page, .. }) = it.next() else {
+        unreachable!("the page comes first");
+    };
+    let mut out = page.clone();
+    if parts.len() == 1 {
+        return Ok(out);
+    }
+    let mm_to_px = Affine::scale(dpi / 25.4, dpi / 25.4);
+    for part in it {
+        match part {
+            Part::Raster { pixmap, origin } => out.draw_pixmap(
+                origin[0] as i32,
+                origin[1] as i32,
+                pixmap.as_ref(),
+                &PixmapPaint::default(),
+                Transform::identity(),
+                None,
+            ),
+            Part::Vector(l) => draw_layer(&mut out.as_mut(), l, mm_to_px)?,
+        }
+    }
+    let [w, h] = [out.width(), out.height()];
+    if let Some(keep) = keep_mask(&scene.placed(), scene.cuts, [0.0, 0.0], [w, h], dpi / 25.4) {
+        apply_cuts(&mut out, &keep);
+    }
+    Ok(out)
+}
+
+/// What the template cuts away, as closed shapes in page mm: the outline that clips
+/// (none if nothing is clipped), and the holes left blank. As for `keep_mask`, both are
+/// filled under the non-zero rule, and an outline without closed paths clips nothing.
+pub fn cut_shapes(scene: &Scene) -> (Vec<Vec<P2>>, Vec<Vec<P2>>) {
+    let shapes = |keep: &dyn Fn(ElementKind) -> bool| -> Vec<Vec<P2>> {
+        scene
+            .elements
+            .iter()
+            .filter(|e| keep(e.placed.kind))
+            .flat_map(|e| &e.placed.polylines)
+            .filter(|p| p.closed && p.points.len() > 2)
+            .map(|p| p.points.clone())
+            .collect()
+    };
+    let outline = if scene.cuts.clip_to_outline {
+        shapes(&|k| k == ElementKind::Outline)
+    } else {
+        Vec::new()
+    };
+    (outline, shapes(&|k| scene.cuts.blanks(k)))
 }
 
 /// Draws the lines of the template elements marked for printing, at least 1 px wide.
@@ -786,6 +949,122 @@ mod tests {
             expanded: true,
             children,
         })
+    }
+
+    /// A text layer saying "Hi" in red, laid out and drawn for an export at `dpi`.
+    fn text_layer(id: u64, center: P2) -> Node {
+        let mut l = text::new_layer(id, "Hi", text::BUILTIN_FAMILY.into(), center);
+        let t = l.text.as_mut().unwrap();
+        t.color = [255, 0, 0, 255];
+        let font = skrifa::FontRef::new(epaint_default_fonts::UBUNTU_LIGHT).unwrap();
+        l.size_px = text::layout(l.text.as_ref().unwrap(), &font).size;
+        // Huge, so it shows at a low test DPI.
+        l.transform.scale = l.transform.scale.map(|s| s * 6.0);
+        Node::Layer(Box::new(l))
+    }
+
+    fn scene_of(mut doc: Document, dpi: f32) -> Scene {
+        text::prepare_export(&mut doc, dpi);
+        Scene::new(
+            &doc,
+            None,
+            [[0; 3]; crate::template::KINDS],
+            [true; crate::template::KINDS],
+            Cuts::default(),
+        )
+    }
+
+    #[test]
+    fn text_layers_become_vector_parts_between_rasters() {
+        let doc = Document {
+            layers: vec![
+                square(1, [0, 0, 255], [40.0, 40.0]),
+                text_layer(2, [40.0, 40.0]),
+                square(3, [0, 255, 0], [45.0, 40.0]),
+            ],
+            ..Default::default()
+        };
+        let dpi = 50.8;
+        let scene = scene_of(doc, dpi);
+        let parts = compose_parts(&scene, dpi, true, &mut |_| true).unwrap();
+        let kinds: Vec<&str> = parts
+            .iter()
+            .map(|p| match p {
+                Part::Raster { .. } => "raster",
+                Part::Vector(_) => "vector",
+            })
+            .collect();
+        assert_eq!(kinds, ["raster", "vector", "raster"]);
+        // The upper raster is cropped to the green square: 10 mm at 2 px per mm.
+        let Part::Raster { pixmap, origin } = &parts[2] else {
+            unreachable!()
+        };
+        assert_eq!((pixmap.width(), pixmap.height()), (20, 20));
+        assert_eq!(*origin, [80, 70]);
+        // Stacked again, they give what is rendered in one go.
+        let flat = flatten(&parts, &scene, dpi).unwrap();
+        let whole = compose(&scene, dpi, false).unwrap();
+        let diff = flat
+            .data()
+            .iter()
+            .zip(whole.data())
+            .map(|(a, b)| a.abs_diff(*b))
+            .max()
+            .unwrap();
+        assert!(diff <= 2, "differs by {diff}");
+        // The text shows in red where the green square doesn't cover it.
+        assert!(
+            flat.pixels()
+                .iter()
+                .any(|p| p.red() > 200 && p.green() < 50)
+        );
+        // Without vectors, one part only.
+        assert_eq!(
+            compose_parts(&scene, dpi, false, &mut |_| true)
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn text_stays_pixels_when_vectors_would_differ() {
+        let with = |f: &dyn Fn(&mut Layer)| {
+            let mut node = text_layer(1, [40.0, 40.0]);
+            if let Node::Layer(l) = &mut node {
+                f(l);
+            }
+            let scene = scene_of(
+                Document {
+                    layers: vec![node],
+                    ..Default::default()
+                },
+                50.8,
+            );
+            let SceneNode::Image(l) = &scene.layers[0] else {
+                unreachable!()
+            };
+            l.vector().map(|v| v.fills.len())
+        };
+        assert_eq!(with(&|_| {}), Some(1));
+        // Half transparent: fine with one shape, not with an outline under the letters.
+        assert_eq!(with(&|l| l.opacity = 0.5), Some(1));
+        assert_eq!(with(&|l| l.text.as_mut().unwrap().outline = true), Some(2));
+        assert_eq!(
+            with(&|l| {
+                l.opacity = 0.5;
+                l.text.as_mut().unwrap().outline = true;
+            }),
+            None
+        );
+        // Effects only exist as pixels.
+        assert_eq!(
+            with(&|l| {
+                let blur = effects::registry().get("builtin.blur").unwrap();
+                l.effects = vec![effects::EffectInstance::new(blur)];
+            }),
+            None
+        );
     }
 
     #[test]
@@ -1103,6 +1382,7 @@ mod tests {
                 opacity: 1.0,
                 effects: Vec::new(),
                 effects_scale: 1.0,
+                vector: None,
             })],
             elements: vec![SceneElement {
                 placed: PlacedElement {

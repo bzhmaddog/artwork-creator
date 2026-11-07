@@ -9,6 +9,7 @@ use egui::{
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
+use crate::canvas_text;
 use crate::document::{
     Affine, Document, Homography, Layer, Node, P2, Transform, UNIT_CORNERS, is_convex,
 };
@@ -150,12 +151,13 @@ pub struct CanvasState {
     pub snap_to_anchors: bool,
     /// The anchor the dragged image snapped to this frame, in page mm, to highlight it.
     snapped: Option<P2>,
-    rect: Rect,
+    /// Where the canvas is on screen.
+    pub(crate) rect: Rect,
     drag: Option<Drag>,
     /// A left drag that started on empty canvas pans the view.
     panning: bool,
-    /// A text layer was double-clicked: the app puts the keyboard in its text.
-    pub edit_text: bool,
+    /// Typing in a text layer on the canvas, after a double click on it.
+    pub typing: Option<canvas_text::Typing>,
     group_previews: HashMap<u64, GroupPreview>,
 }
 
@@ -184,13 +186,19 @@ impl Default for CanvasState {
             rect: Rect::NOTHING,
             drag: None,
             panning: false,
-            edit_text: false,
+            typing: None,
             group_previews: HashMap::new(),
         }
     }
 }
 
 impl CanvasState {
+    /// Starts typing in a text layer on the canvas, all of its text selected.
+    pub fn type_in(&mut self, layer: &Layer) {
+        let n = layer.text.as_ref().map_or(0, |t| t.content.chars().count());
+        canvas_text::begin(&mut self.typing, layer.id, 0, n);
+    }
+
     /// Zooms around the center of the canvas (toolbar buttons).
     pub fn zoom_centered(&mut self, factor: f32) {
         if self.rect.is_positive() {
@@ -354,8 +362,9 @@ pub fn show(
         }
     }
 
-    // Panning: left drag on empty canvas, middle or right drag, or Space + left drag.
-    let space = ui.input(|i| i.key_down(Key::Space));
+    // Panning: left drag on empty canvas, middle or right drag, or Space + left drag
+    // (except while typing, where Space is a space).
+    let space = state.typing.is_none() && ui.input(|i| i.key_down(Key::Space));
     if !ui.input(|i| i.pointer.primary_down()) {
         state.panning = false;
     }
@@ -408,7 +417,20 @@ pub fn show(
         }
     };
 
-    if !space {
+    // Typing on the canvas takes the clicks and drags on its text.
+    let on_handle = hover.is_some_and(|p| handle_at(doc, *selected, p).is_some());
+    let typing = canvas_text::input(
+        ui,
+        doc,
+        *selected,
+        &mut state.typing,
+        cam,
+        rect,
+        &response,
+        on_handle,
+    );
+
+    if !space && !typing.took {
         if response.drag_started_by(PointerButton::Primary) {
             let origin = ui
                 .input(|i| i.pointer.press_origin())
@@ -446,15 +468,18 @@ pub fn show(
         {
             *selected = topmost_hit(doc, cam.to_mm(rect, p));
         }
-        // A double click on a text layer goes to its text.
+        // A double click on a text layer starts typing in it, where it was clicked.
         if response.double_clicked_by(PointerButton::Primary)
-            && selected
-                .and_then(|id| doc.layer(id))
-                .is_some_and(|l| l.text.is_some())
+            && let Some(p) = response.interact_pointer_pos()
+            && let Some(layer) = selected.and_then(|id| doc.layer(id))
+            && layer.text.is_some()
+            && !doc.effectively_locked(layer.id)
         {
-            state.edit_text = true;
+            let i = canvas_text::index_at(layer, cam.to_mm(rect, p));
+            canvas_text::begin(&mut state.typing, layer.id, i, i);
         }
     }
+    changed |= canvas_text::field(ui, doc, &mut state.typing, cam, rect);
 
     if let Some(drag) = &state.drag {
         if response.dragged_by(PointerButton::Primary)
@@ -613,6 +638,7 @@ pub fn show(
         }
     } else if let Some(p) = hover
         && !space
+        && !typing.over_text
     {
         match handle_at(doc, *selected, p) {
             Some((_, DragKind::Rotate)) => ui.ctx().set_cursor_icon(CursorIcon::Alias),
@@ -638,6 +664,7 @@ pub fn show(
 
     state.snapped = snapped;
     paint(ui, doc, elements, *selected, state, rect, distorting);
+    canvas_text::paint(ui, doc, &state.typing, cam, rect);
     changed
 }
 

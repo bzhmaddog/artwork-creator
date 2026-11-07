@@ -23,8 +23,8 @@ use skrifa::raw::TableProvider as _;
 use skrifa::{FontRef, GlyphId, MetadataProvider as _, Tag};
 use tiny_skia::{FillRule, LineCap, LineJoin, Paint, Path, PathBuilder, Pixmap, Stroke, Transform};
 
-use crate::document::{Document, Homography, Layer, P2};
-use crate::render;
+use crate::document::{Document, Layer, P2};
+use crate::render::{self, Outlines};
 
 /// Text units per em: a text layer's `size_px` and its effects are measured in these.
 /// Fine enough that the effects' default sizes, made for images, suit text too: a 20 px
@@ -54,7 +54,7 @@ const SCREEN_PX_PER_MM: f32 = 12.0;
 /// are worked out on this image, and export draws the text again at full resolution.
 const SCREEN_SIDE: f32 = 2048.0;
 /// Longest side of text drawn for the export.
-const EXPORT_SIDE: f32 = 20000.0;
+pub(crate) const EXPORT_SIDE: f32 = 20000.0;
 /// Longest side of the preview pixmap, as for images.
 const PREVIEW_SIDE: u32 = 2048;
 /// Extra thickness of letters made bold when the font has no bold face, in ems.
@@ -71,6 +71,79 @@ pub enum TextAlign {
     #[default]
     Center,
     Right,
+}
+
+/// What a text's lines follow, instead of a straight line.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PathKind {
+    #[default]
+    Straight,
+    /// Bent into an arc of a circle, by `TextPath::bend`.
+    Arc,
+    /// Around a circle of `TextPath::radius`, the layer centered on it.
+    Circle,
+    /// Along the outline of the shape layer `TextPath::shape`.
+    Shape,
+}
+
+impl PathKind {
+    pub const ALL: [PathKind; 4] = [
+        PathKind::Straight,
+        PathKind::Arc,
+        PathKind::Circle,
+        PathKind::Shape,
+    ];
+
+    pub fn name_key(self) -> &'static str {
+        match self {
+            PathKind::Straight => crate::i18n::tr_noop!("TEXT_PATH_STRAIGHT"),
+            PathKind::Arc => crate::i18n::tr_noop!("TEXT_PATH_ARC"),
+            PathKind::Circle => crate::i18n::tr_noop!("TEXT_PATH_CIRCLE"),
+            PathKind::Shape => crate::i18n::tr_noop!("TEXT_PATH_SHAPE"),
+        }
+    }
+}
+
+/// The path a text follows, and how it sits on it. Lengths are in ems.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct TextPath {
+    pub kind: PathKind,
+    /// Arc: how much the lines bend, -100 to 100: at 100 the first line makes a whole
+    /// circle; below 0 they bend down.
+    pub bend: f32,
+    /// Circle: radius of the first line's baseline.
+    pub radius: f32,
+    /// Shape: id of the shape layer followed.
+    pub shape: u64,
+    /// Circle and shape: where the text's alignment point stands on the path, in percent
+    /// of its length from its start (a circle starts at the top).
+    pub position: f32,
+    /// Circle and shape: the text runs the other way, on the other side of the path
+    /// (inside a circle).
+    pub flip: bool,
+    /// Distance from the path to the baseline, towards the top of the letters.
+    pub shift: f32,
+}
+
+impl Default for TextPath {
+    fn default() -> Self {
+        Self {
+            kind: PathKind::Straight,
+            bend: 30.0,
+            radius: 3.0,
+            shape: 0,
+            position: 0.0,
+            flip: false,
+            shift: 0.0,
+        }
+    }
+}
+
+impl TextPath {
+    fn is_straight(&self) -> bool {
+        *self == Self::default()
+    }
 }
 
 /// What a text layer says and how it looks. Sizes are in ems, so they follow the font
@@ -104,6 +177,9 @@ pub struct Text {
     /// Kept up to date with the text by `sync`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub fallbacks: Vec<FallbackFont>,
+    /// The path the lines follow; straight by default.
+    #[serde(skip_serializing_if = "TextPath::is_straight")]
+    pub path: TextPath,
 }
 
 fn is_zero(v: &u32) -> bool {
@@ -188,6 +264,7 @@ impl Default for Text {
             outline_color: [255, 255, 255, 255],
             font_index: 0,
             fallbacks: Vec::new(),
+            path: TextPath::default(),
         }
     }
 }
@@ -208,6 +285,9 @@ pub struct TextState {
     pub missing: Vec<char>,
     /// Identifies what the fallback fonts were last worked out for.
     fallback_key: u64,
+    /// The outline of the shape layer the text follows, on the page, and whether it is
+    /// closed; kept up to date by `sync`.
+    pub followed: Option<Arc<(Vec<P2>, bool)>>,
 }
 
 /// Where the cursor can stand on one line of text, in the layer's frame (text units,
@@ -802,6 +882,43 @@ fn with_fonts<R>(layer: &Layer, f: impl FnOnce(&Text, &[FontRef]) -> R) -> Optio
     Some(f(text, &fonts))
 }
 
+/// Lays the layer's text out with its fonts, along its path.
+fn lay(layer: &Layer) -> Option<Laid> {
+    let follow = layer
+        .text_state
+        .followed
+        .as_deref()
+        .filter(|_| {
+            layer
+                .text
+                .as_ref()
+                .is_some_and(|t| t.path.kind == PathKind::Shape)
+        })
+        .map(|(points, closed)| Follow {
+            points,
+            closed: *closed,
+            scale: layer.transform.scale[1].abs(),
+        });
+    with_fonts(layer, |t, f| layout_on(t, f, follow))
+}
+
+/// The id of the shape layer whose outline the text follows, if it does.
+pub fn followed_shape(layer: &Layer) -> Option<u64> {
+    layer
+        .text
+        .as_ref()
+        .filter(|t| t.path.kind == PathKind::Shape && t.path.shape != 0)
+        .map(|t| t.path.shape)
+}
+
+/// True if the text's lines are straight, so it can be typed in on the canvas.
+pub fn is_straight(layer: &Layer) -> bool {
+    layer
+        .text
+        .as_ref()
+        .is_some_and(|t| t.path.kind == PathKind::Straight)
+}
+
 // ---- Layout ----
 
 /// The text laid out in the layer's frame, in text units, y down.
@@ -814,8 +931,11 @@ pub struct Laid {
     pub metric: [f32; 3],
     /// Extra thickness for a fake bold, in units.
     pub embolden: f32,
-    /// Where the cursor can stand on each line.
+    /// Where the cursor can stand on each line; none on a path.
     pub carets: Vec<CaretLine>,
+    /// Following a shape: the box's top-left corner on the page, in text units of the
+    /// layer's scale. The layer is placed there, unrotated.
+    pub origin: Option<P2>,
 }
 
 /// Collects a glyph outline into a path, placed at a pen position, slanted, y flipped.
@@ -895,7 +1015,8 @@ fn style_for(font: &FontRef, bold: bool, italic: bool) -> Style {
 
 /// A glyph: the font it is from (index into the fonts laid out with), its id, and its
 /// pen position on the line (x, rise).
-type Placed = (usize, u32, f32, f32);
+/// A shaped glyph: face, glyph id, pen position (x, y offset) and advance.
+type Placed = (usize, u32, f32, f32, f32);
 
 /// What it takes to shape and draw with one font.
 struct Face<'a> {
@@ -963,7 +1084,23 @@ pub fn layout(text: &Text, font: &FontRef) -> Laid {
 /// Lays the text out with `fonts`: the first one is the text's own; characters it lacks
 /// come from the first of the others that has them. Line heights and the fake bold
 /// follow the text's own font.
+#[cfg(test)]
 pub fn layout_with(text: &Text, fonts: &[FontRef]) -> Laid {
+    layout_on(text, fonts, None)
+}
+
+/// A shape's outline the text follows: points on the page (mm), whether it is closed,
+/// and the layer's scale (mm per text unit).
+#[derive(Clone, Copy)]
+pub struct Follow<'a> {
+    pub points: &'a [P2],
+    pub closed: bool,
+    pub scale: f32,
+}
+
+/// `layout_with`, along the text's path: an arc or circle of its own, or `follow` (a
+/// straight line without it).
+pub fn layout_on(text: &Text, fonts: &[FontRef], follow: Option<Follow>) -> Laid {
     let faces: Vec<Face> = fonts.iter().map(|f| Face::new(f, text)).collect();
     let main = &faces[0];
     let metrics = main.font.metrics(Size::new(EM), &main.location);
@@ -1022,6 +1159,7 @@ pub fn layout_with(text: &Text, fonts: &[FontRef]) -> Laid {
                     info.glyph_id,
                     x + pos.x_offset as f32 * k,
                     pos.y_offset as f32 * k,
+                    pos.x_advance as f32 * k,
                 ));
                 let before = x;
                 x += pos.x_advance as f32 * k;
@@ -1053,6 +1191,13 @@ pub fn layout_with(text: &Text, fonts: &[FontRef]) -> Laid {
         },
     );
 
+    let route = Route::new(text, width, follow);
+    // The point of the lines that goes on the path's position.
+    let anchor_x = match text.align {
+        TextAlign::Left => 0.0,
+        TextAlign::Center => width / 2.0,
+        TextAlign::Right => width,
+    };
     let mut b = PathBuilder::new();
     let mut carets = Vec::new();
     for (i, ((glyphs, w), xs)) in shaped.iter().zip(line_xs).enumerate() {
@@ -1067,13 +1212,15 @@ pub fn layout_with(text: &Text, fonts: &[FontRef]) -> Laid {
             bottom: baseline + descent,
             xs: xs.into_iter().map(|x| x0 + x).collect(),
         });
-        for &(fi, gid, x, y) in glyphs {
+        for &(fi, gid, x, y, advance) in glyphs {
             let Some(glyph) = outlines[fi].get(GlyphId::new(gid)) else {
                 continue;
             };
             let face = &faces[fi];
+            // On a path, each glyph is drawn on its own, then set on the path.
+            let mut own = PathBuilder::new();
             let mut pen = Pen {
-                b: &mut b,
+                b: if route.is_some() { &mut own } else { &mut b },
                 x: x0 + x,
                 y: baseline - y,
                 skew: face.style.skew,
@@ -1086,6 +1233,21 @@ pub fn layout_with(text: &Text, fonts: &[FontRef]) -> Laid {
                     &mut pen,
                 )
                 .ok();
+            if let Some(r) = &route
+                && let Some(g) = own.finish()
+            {
+                // Upright at the middle of its advance, on the path at that distance.
+                let mid = x0 + x + advance / 2.0;
+                let (at, angle) = r.along(r.at + mid - anchor_x);
+                let up = [angle.sin(), -angle.cos()];
+                let lift = text.path.shift * EM - (baseline - ascent);
+                let ts = Transform::from_translate(-mid, -baseline)
+                    .post_rotate(angle.to_degrees())
+                    .post_translate(at[0] + up[0] * lift, at[1] + up[1] * lift);
+                if let Some(g) = g.transform(ts) {
+                    b.push_path(&g);
+                }
+            }
         }
     }
     let path = b.finish();
@@ -1102,11 +1264,22 @@ pub fn layout_with(text: &Text, fonts: &[FontRef]) -> Laid {
         0.0
     };
     let (mut lo, mut hi) = ([0.0f32, 0.0f32], [width, height.max(1.0)]);
+    // On a path, the box holds the letters around the path's position.
+    if let Some(r) = &route {
+        let (p, _) = r.along(r.at);
+        (lo, hi) = (p, [p[0] + 1.0, p[1] + 1.0]);
+    }
     if let Some(p) = &path {
         let r = p.bounds();
         let e = outline + embolden / 2.0 + 1.0;
         lo = [lo[0].min(r.left() - e), lo[1].min(r.top() - e)];
         hi = [hi[0].max(r.right() + e), hi[1].max(r.bottom() + e)];
+    }
+    // Around a circle, the box is centered on it, so the layer turns around it.
+    if let Some(c) = route.as_ref().and_then(|r| r.center) {
+        let half = [0, 1].map(|k| (c[k] - lo[k]).max(hi[k] - c[k]));
+        lo = [c[0] - half[0], c[1] - half[1]];
+        hi = [c[0] + half[0], c[1] + half[1]];
     }
     let lo = lo.map(f32::floor);
     let hi = hi.map(f32::ceil);
@@ -1116,15 +1289,144 @@ pub fn layout_with(text: &Text, fonts: &[FontRef]) -> Laid {
         c.bottom -= lo[1];
         c.xs.iter_mut().for_each(|x| *x -= lo[0]);
     }
+    let size = [
+        (hi[0] - lo[0]).max(1.0) as u32,
+        (hi[1] - lo[1]).max(1.0) as u32,
+    ];
+    let Some(r) = route else {
+        return Laid {
+            path,
+            size,
+            metric: [-lo[0], width - lo[0], -lo[1]],
+            embolden,
+            carets,
+            origin: None,
+        };
+    };
+    // The point that stays in place when the text changes: the circle's center, or the
+    // text's position on the path.
+    let fixed = r.center.unwrap_or_else(|| r.along(r.at).0);
+    let (fx, fy) = (fixed[0] - lo[0], fixed[1] - lo[1]);
     Laid {
         path,
-        size: [
-            (hi[0] - lo[0]).max(1.0) as u32,
-            (hi[1] - lo[1]).max(1.0) as u32,
-        ],
-        metric: [-lo[0], width - lo[0], -lo[1]],
+        size,
+        metric: [fx, fx, fy],
         embolden,
-        carets,
+        carets: Vec::new(),
+        origin: r.on_page.then_some(lo),
+    }
+}
+
+/// The path a text is laid along, worked out: a line through points, in the frame the
+/// text is laid out in (text units).
+struct Route {
+    points: Vec<P2>,
+    /// Length from the start to each point.
+    lengths: Vec<f32>,
+    closed: bool,
+    /// Where on the path the text's alignment point goes, as a length from its start.
+    at: f32,
+    /// A circle's center: the layer's box is centered on it.
+    center: Option<P2>,
+    /// The frame is the page, in text units: the text follows a shape layer.
+    on_page: bool,
+}
+
+/// Points around a circle of radius `r` centered on the origin, from the top, clockwise
+/// on screen.
+fn circle_points(r: f32) -> Vec<P2> {
+    const N: usize = 360;
+    (0..N)
+        .map(|j| {
+            let a = -std::f32::consts::FRAC_PI_2 + j as f32 * std::f32::consts::TAU / N as f32;
+            [r * a.cos(), r * a.sin()]
+        })
+        .collect()
+}
+
+impl Route {
+    /// The route of a text whose longest line is `width` units long; `None` for straight
+    /// lines, or a shape that isn't there.
+    fn new(text: &Text, width: f32, follow: Option<Follow>) -> Option<Self> {
+        let p = &text.path;
+        let (points, closed, center, on_page, flip, position) = match p.kind {
+            PathKind::Straight => return None,
+            PathKind::Arc => {
+                let bend = (p.bend / 100.0).clamp(-1.0, 1.0);
+                if bend.abs() < 1e-3 {
+                    return None;
+                }
+                let r = width.max(EM) / (bend.abs() * std::f32::consts::TAU);
+                // Bending down: along the bottom of the circle, inside it.
+                let down = bend < 0.0;
+                (
+                    circle_points(r),
+                    true,
+                    None,
+                    false,
+                    down,
+                    if down { 50.0 } else { 0.0 },
+                )
+            }
+            PathKind::Circle => (
+                circle_points(p.radius.max(0.05) * EM),
+                true,
+                Some([0.0, 0.0]),
+                false,
+                p.flip,
+                p.position,
+            ),
+            PathKind::Shape => {
+                let f = follow?;
+                let k = 1.0 / f.scale.max(1e-6);
+                let points = f.points.iter().map(|q| [q[0] * k, q[1] * k]).collect();
+                (points, f.closed, None, true, p.flip, p.position)
+            }
+        };
+        let mut points: Vec<P2> = points;
+        if flip {
+            // The other way round, from the same start.
+            if closed {
+                points[1..].reverse();
+            } else {
+                points.reverse();
+            }
+        }
+        if closed {
+            points.push(points[0]);
+        }
+        let mut lengths = vec![0.0];
+        for w in points.windows(2) {
+            let d = ((w[1][0] - w[0][0]).powi(2) + (w[1][1] - w[0][1]).powi(2)).sqrt();
+            lengths.push(lengths[lengths.len() - 1] + d);
+        }
+        let total = *lengths.last()?;
+        if total < 1e-3 {
+            return None;
+        }
+        Some(Self {
+            at: position / 100.0 * total,
+            points,
+            lengths,
+            closed,
+            center,
+            on_page,
+        })
+    }
+
+    /// The point at length `s` from the start, and the path's direction there (radians,
+    /// clockwise on screen). A closed path goes round; an open one goes on straight past
+    /// its ends.
+    fn along(&self, s: f32) -> (P2, f32) {
+        let total = self.lengths[self.lengths.len() - 1];
+        let s = if self.closed { s.rem_euclid(total) } else { s };
+        let n = self.points.len();
+        let k = self.lengths.partition_point(|&l| l <= s).clamp(1, n - 1);
+        let (a, b) = (self.points[k - 1], self.points[k]);
+        let seg = (self.lengths[k] - self.lengths[k - 1]).max(1e-6);
+        let t = (s - self.lengths[k - 1]) / seg;
+        let p = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+        (p, (b[1] - a[1]).atan2(b[0] - a[0]))
     }
 }
 
@@ -1195,16 +1497,6 @@ pub fn paint(laid: &Laid, text: &Text, px_per_unit: f32) -> Option<Pixmap> {
     Some(pixmap)
 }
 
-/// A text layer as filled shapes, for vector output such as PDF.
-#[derive(Debug)]
-pub struct Outlines {
-    /// Shapes in the layer's frame (text units, y down), each filled with its straight
-    /// RGBA color under the non-zero rule, bottom first: the outline, then the letters.
-    pub fills: Vec<(Path, [u8; 4])>,
-    /// Text units to page mm, including any distortion.
-    pub map: Homography,
-}
-
 /// Fineness of strokes turned into shapes: a few times the text unit, itself about
 /// 1/400 em.
 const STROKE_RES: f32 = 4.0;
@@ -1213,7 +1505,7 @@ const STROKE_RES: f32 = 4.0;
 /// bold) become shapes of their own.
 pub fn outlines(layer: &Layer) -> Option<Outlines> {
     let text = layer.text.as_ref()?;
-    let laid = with_fonts(layer, layout_with)?;
+    let laid = lay(layer)?;
     let fills = coats(&laid, text)
         .into_iter()
         .filter_map(|coat| {
@@ -1235,13 +1527,14 @@ pub fn outlines(layer: &Layer) -> Option<Outlines> {
 /// one.
 fn draw(layer: &Layer, px_per_unit: f32) -> Option<(Laid, Pixmap)> {
     let text = layer.text.as_ref()?;
-    let laid = with_fonts(layer, layout_with)?;
+    let laid = lay(layer)?;
     let pixmap = paint(&laid, text, px_per_unit)?;
     Some((laid, pixmap))
 }
 
-/// Text units to pixels for a page density, so the longest side stays under `max_side`.
-fn px_per_unit(layer: &Layer, size: [u32; 2], px_per_mm: f32, max_side: f32) -> f32 {
+/// Layer units to pixels for a page density, so the longest side stays under
+/// `max_side`. Also used for shape layers.
+pub(crate) fn px_per_unit(layer: &Layer, size: [u32; 2], px_per_mm: f32, max_side: f32) -> f32 {
     let mm_per_unit = layer.transform.scale[0]
         .abs()
         .max(layer.transform.scale[1].abs());
@@ -1251,8 +1544,8 @@ fn px_per_unit(layer: &Layer, size: [u32; 2], px_per_mm: f32, max_side: f32) -> 
 
 /// Resolution of the text drawn for the screen, for a box of `size` units: rounded up
 /// to steps of a half power of two, so resizing the layer redraws its text only now and
-/// then, but never over `max_side` pixels.
-fn screen_ppu(layer: &Layer, size: [u32; 2], max_side: f32) -> f32 {
+/// then, but never over `max_side` pixels. Also used for shape layers.
+pub(crate) fn screen_ppu(layer: &Layer, size: [u32; 2], max_side: f32) -> f32 {
     let v = px_per_unit(layer, size, SCREEN_PX_PER_MM, max_side);
     let side = size[0].max(size[1]).max(1) as f32;
     2f32.powf((v.log2() * 2.0).ceil() / 2.0)
@@ -1279,15 +1572,38 @@ fn key(layer: &Layer, ppu: f32) -> u64 {
         }
     }
     ppu.to_bits().hash(&mut h);
+    // Following a shape: its outline, and the scale it is turned into text units with.
+    if let Some(f) = layer.text_state.followed.as_deref()
+        && followed_shape(layer).is_some()
+    {
+        for p in &f.0 {
+            p.map(f32::to_bits).hash(&mut h);
+        }
+        layer.transform.scale[1].to_bits().hash(&mut h);
+    }
     h.finish()
 }
 
 /// Brings text layers' fonts, size and pixels up to date with their text. Returns true
 /// if one was redrawn.
 pub fn sync(ctx: &egui::Context, doc: &mut Document, fonts: &FontLibrary) -> bool {
+    // The outlines of the shapes texts follow, on the page.
+    let mut outlines: HashMap<u64, Arc<(Vec<P2>, bool)>> = HashMap::new();
+    for leaf in doc.leaves() {
+        if let Some(id) = followed_shape(leaf.layer)
+            && !outlines.contains_key(&id)
+            && let Some(o) = doc.layer(id).and_then(crate::shape::page_outline)
+        {
+            outlines.insert(id, Arc::new(o));
+        }
+    }
     let mut changed = false;
     doc.for_each_layer_mut(|layer| {
         if layer.text.is_some() {
+            let followed = followed_shape(layer).and_then(|id| outlines.get(&id).cloned());
+            if followed != layer.text_state.followed {
+                layer.text_state.followed = followed;
+            }
             changed |= sync_layer(ctx, layer, fonts);
         }
     });
@@ -1297,7 +1613,7 @@ pub fn sync(ctx: &egui::Context, doc: &mut Document, fonts: &FontLibrary) -> boo
 fn sync_layer(ctx: &egui::Context, layer: &mut Layer, fonts: &FontLibrary) -> bool {
     ensure_font(layer, fonts);
     ensure_fallbacks(layer, fonts);
-    let max_side = SCREEN_SIDE.min(ctx.input(|i| i.max_texture_side) as f32);
+    let max_side = screen_max_side(ctx);
     let ppu = screen_ppu(layer, layer.size_px, max_side);
     if layer.text_state.key == key(layer, ppu) && layer.pixmap.is_some() {
         return false;
@@ -1315,6 +1631,19 @@ fn sync_layer(ctx: &egui::Context, layer: &mut Layer, fonts: &FontLibrary) -> bo
     }
     place(layer, &laid);
     layer.text_state.key = key(layer, ppu2.min(ppu));
+    set_screen_pixmap(ctx, layer, pixmap);
+    true
+}
+
+/// Longest side of a drawn layer's pixmap on screen: `SCREEN_SIDE`, or less if the GPU
+/// can't take that. Also used for shape layers.
+pub(crate) fn screen_max_side(ctx: &egui::Context) -> f32 {
+    SCREEN_SIDE.min(ctx.input(|i| i.max_texture_side) as f32)
+}
+
+/// Gives a drawn layer (text or shape) its new pixels for the screen: its pixmap, the
+/// texture shown on the canvas and the small preview copy.
+pub(crate) fn set_screen_pixmap(ctx: &egui::Context, layer: &mut Layer, pixmap: Pixmap) {
     let full = crate::effects::cache::demultiply(&pixmap);
     let preview = render::downscale(&full, PREVIEW_SIDE);
     let color = ColorImage::from_rgba_unmultiplied(
@@ -1328,12 +1657,32 @@ fn sync_layer(ctx: &egui::Context, layer: &mut Layer, fonts: &FontLibrary) -> bo
     layer.texture = Some(ctx.load_texture(format!("layer-{}", layer.id), color, options));
     layer.preview = render::premultiplied_pixmap(&preview).map(Arc::new);
     layer.pixmap = Some(Arc::new(pixmap));
-    true
 }
 
 /// Gives the layer the laid out text's size, keeping the text in place on its alignment
 /// side when the size changes.
 fn place(layer: &mut Layer, laid: &Laid) {
+    // Following a shape: the layer goes where the letters are, unrotated, its scale
+    // (the font size) the same both ways.
+    if let Some(o) = laid.origin {
+        let s = layer.transform.scale[1].abs();
+        let t = &mut layer.transform;
+        t.scale = [s, s];
+        t.rotation_deg = 0.0;
+        t.flip_x = false;
+        t.flip_y = false;
+        t.distort = Default::default();
+        layer.size_px = laid.size;
+        t.center = [
+            (o[0] + laid.size[0] as f32 / 2.0) * s,
+            (o[1] + laid.size[1] as f32 / 2.0) * s,
+        ];
+        layer.text_state.metric = Some(laid.metric);
+        if !layer.text_state.carets.is_empty() {
+            layer.text_state.carets = Arc::new(Vec::new());
+        }
+        return;
+    }
     let align = layer.text.as_ref().map(|t| t.align).unwrap_or_default();
     if let Some(old) = layer.text_state.metric
         && laid.size != layer.size_px
@@ -1380,6 +1729,135 @@ mod tests {
             content: content.into(),
             ..Text::default()
         }
+    }
+
+    /// Distances of the letters' outline points from a point, in text units.
+    fn distances(laid: &Laid, c: P2) -> (f32, f32) {
+        let mut range = (f32::MAX, 0.0f32);
+        for p in laid.path.as_ref().unwrap().points() {
+            let d = ((p.x - c[0]).powi(2) + (p.y - c[1]).powi(2)).sqrt();
+            range = (range.0.min(d), range.1.max(d));
+        }
+        range
+    }
+
+    #[test]
+    fn text_around_a_circle() {
+        let font = builtin_font();
+        let mut t = text("Around the button");
+        t.path.kind = PathKind::Circle;
+        t.path.radius = 4.0;
+        let laid = layout(&t, &font);
+        // The box is centered on the circle, and stays so: the metric's anchor.
+        let c = [laid.size[0] as f32 / 2.0, laid.size[1] as f32 / 2.0];
+        assert!((laid.metric[0] - c[0]).abs() <= 1.0 && (laid.metric[2] - c[1]).abs() <= 1.0);
+        assert!(laid.carets.is_empty(), "not typed on the canvas");
+        // The letters stand on the circle, outside it.
+        let r = 4.0 * EM;
+        let (near, far) = distances(&laid, c);
+        assert!(near > r - 0.3 * EM && far < r + EM, "{near} {far} r {r}");
+        // Centered at the top: the letters are above the center.
+        let top = laid.path.as_ref().unwrap().bounds();
+        assert!(top.bottom() < c[1] + 1.0, "{top:?}");
+
+        // Other side, at the bottom (half way round): inside the circle, below the center.
+        t.path.flip = true;
+        t.path.position = 50.0;
+        let laid = layout(&t, &font);
+        let c = [laid.size[0] as f32 / 2.0, laid.size[1] as f32 / 2.0];
+        let b = laid.path.as_ref().unwrap().bounds();
+        assert!(b.top() > c[1] - 1.0, "{b:?} {c:?}");
+        let (near, far) = distances(&laid, c);
+        assert!(far < r + 0.3 * EM && near > r - EM, "{near} {far}");
+
+        // A baseline shift moves the letters away from the path.
+        t.path.flip = false;
+        t.path.position = 0.0;
+        t.path.shift = 1.0;
+        let laid = layout(&t, &font);
+        let c = [laid.size[0] as f32 / 2.0, laid.size[1] as f32 / 2.0];
+        let (near, _) = distances(&laid, c);
+        assert!(near > r + 0.7 * EM, "{near}");
+    }
+
+    #[test]
+    fn arc_bends_the_line() {
+        let font = builtin_font();
+        let straight = layout(&text("Arcade Stick"), &font);
+        let mut t = text("Arcade Stick");
+        t.path.kind = PathKind::Arc;
+        t.path.bend = 0.0;
+        assert_eq!(layout(&t, &font).size, straight.size, "no bend: straight");
+        t.path.bend = 40.0;
+        let up = layout(&t, &font);
+        assert!(
+            up.size[1] as f32 > straight.size[1] as f32 * 1.5,
+            "{:?}",
+            up.size
+        );
+        assert!(up.size[0] < straight.size[0], "shorter once bent");
+        // Bending up, the middle is higher than the ends; down, lower.
+        let b = up.path.as_ref().unwrap().bounds();
+        let anchor_y = up.metric[2];
+        assert!(anchor_y - b.top() < EM * 1.2, "the apex is at the top");
+        t.path.bend = -40.0;
+        let down = layout(&t, &font);
+        let b = down.path.as_ref().unwrap().bounds();
+        assert!(
+            b.bottom() - down.metric[2] < EM * 0.6,
+            "the apex is at the bottom"
+        );
+    }
+
+    #[test]
+    fn text_follows_a_shape_layer() {
+        use crate::document::Node;
+        use crate::shape::{self, ShapeKind};
+        let ctx = egui::Context::default();
+        let fonts = FontLibrary::builtin_only();
+        let mut doc = Document::default();
+        let line = shape::new_layer(1, ShapeKind::Line, [100.0, 50.0]);
+        let mut t = new_layer(2, "Hello", BUILTIN_FAMILY.into(), [20.0, 20.0]);
+        {
+            let p = &mut t.text.as_mut().unwrap().path;
+            p.kind = PathKind::Shape;
+            p.shape = 1;
+            p.position = 50.0;
+        }
+        t.transform.rotation_deg = 30.0;
+        doc.layers = vec![Node::Layer(Box::new(line)), Node::Layer(Box::new(t))];
+        let run = |doc: &mut Document| {
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                shape::sync(ui.ctx(), doc, true);
+                sync(ui.ctx(), doc, &fonts);
+            });
+            out.textures_delta.clear();
+        };
+        run(&mut doc);
+        let t = doc.layer(2).unwrap();
+        // Centered on the line's middle, sitting on it, upright.
+        assert_eq!(t.transform.rotation_deg, 0.0);
+        let c = t.transform.center;
+        assert!((c[0] - 100.0).abs() < 1.0, "{c:?}");
+        let corners = t.corners();
+        assert!(corners[2][1] > 50.0 && corners[2][1] < 51.5, "{corners:?}");
+        assert!(corners[0][1] < 50.0 - 3.0);
+        // The shape moves: the text goes with it.
+        doc.layer_mut(1).unwrap().transform.center[1] += 20.0;
+        run(&mut doc);
+        let c2 = doc.layer(2).unwrap().transform.center;
+        assert!((c2[1] - c[1] - 20.0).abs() < 0.1, "{c:?} {c2:?}");
+        assert!(!is_straight(doc.layer(2).unwrap()));
+        assert_eq!(followed_shape(doc.layer(2).unwrap()), Some(1));
+        // Vector output follows it too.
+        let o = outlines(doc.layer(2).unwrap()).unwrap();
+        assert!(!o.fills.is_empty());
+        // Saved only when not straight.
+        let json = serde_json::to_string(&text("x")).unwrap();
+        assert!(!json.contains("path"));
+        let json = serde_json::to_string(doc.layer(2).unwrap().text.as_ref().unwrap()).unwrap();
+        let back: Text = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.path.kind, PathKind::Shape);
     }
 
     #[test]

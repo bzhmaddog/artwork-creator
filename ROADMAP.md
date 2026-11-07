@@ -23,21 +23,23 @@ Done:
   with the project too), or the built-in emoji font.
 - PDF export keeps text as vector outlines (except text with effects, or inside a
   semi-transparent group).
-
-Still to do:
-
-- Text along a path.
+- Text along a path: an arc, a circle, or the outline of a shape layer, with position,
+  side and baseline shift.
 
 ### Shape layers
 
+Done:
+
 - Shapes: rectangle (with optional rounded corners), ellipse / circle, line, polyline,
-  polygon, regular polygon and star.
-- Stroke: width, color, opacity, dashes, line caps and joins.
-- Fill: color and opacity, or no fill.
-- Edit points on the canvas for lines, polylines and polygons; snap them to template
-  anchors.
+  polygon, regular polygon and star; one kind can be turned into another.
+- Stroke: width, color, opacity, dashes, line caps and joins. Resizing keeps its width.
+- Fill for closed shapes: color and opacity, or no fill.
 - Layer effects work on shapes too.
-- PDF export keeps shapes as vectors.
+- PDF export keeps shapes as vectors (except shapes with effects, or inside a
+  semi-transparent group).
+- Lines, polylines and polygons drawn point by point on the canvas, with straight or
+  Bezier curve segments; their points and curve handles edited afterwards (move, add,
+  remove, smooth or sharp); points snap to template anchors.
 
 ### Template creator
 

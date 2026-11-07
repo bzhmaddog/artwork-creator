@@ -12,9 +12,14 @@
   "EXPORT_CANCELING": "Cancelling…",
   "OUTLINE_POSITION_CENTER": "Centre",
   "PARAM_COLOR": "Colour",
+  "SHAPE_COLOR_HINT": "Colour and opacity",
+  "SHAPE_INNER_RADIUS_HINT": "Distance of the inner corners from the centre, as a share of the points' distance",
+  "SHAPE_STROKE_WIDTH_HINT": "Width of the line along the outline, centred on it; resizing the shape keeps it",
   "SNAP_TO_ANCHORS_HINT": "Image centres and corners snap to the template's anchors while dragged. Hold Alt to drag freely.",
+  "STROKE_JOIN_BEVEL": "Bevelled",
   "TEMPLATE_INVALID_COLOR": "{path}: invalid colour \"{c}\" (expected #rrggbb)",
   "TEXT_ALIGN_CENTER": "Centre lines",
   "TEXT_COLOR": "Colour",
+  "TEXT_PATH_RADIUS_HINT": "Radius of the circle the first line's baseline follows. The layer is centred on the circle: snap its centre to a button's anchor to put the text around the button.",
   "TINT_MODE_COLORIZE": "Colourise"
 }

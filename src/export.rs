@@ -115,7 +115,7 @@ fn write_all(
 ) -> Result<(), String> {
     let dpi = settings.dpi.clamp(72, 1200) as f32;
     progress.set(tr!("EXPORT_STEP_RENDERING"), 0.0);
-    // The PDF keeps text as vectors: the rest is rendered in parts around it.
+    // The PDF keeps text and shapes as vectors: the rest is rendered in parts around them.
     let parts = render::compose_parts(scene, dpi, settings.pdf, &mut |f| {
         progress.set(tr!("EXPORT_STEP_RENDERING"), f * RENDER_SHARE);
         !progress.is_canceled()
@@ -310,8 +310,8 @@ fn rgb(c: [u8; 3]) -> Color {
     ))
 }
 
-/// The page's drawing: the parts bottom first (images, and text as filled shapes), cut
-/// by the template, then the printed template lines.
+/// The page's drawing: the parts bottom first (images, and text and shapes as filled
+/// shapes), cut by the template, then the printed template lines.
 fn page_ops(doc: &mut PdfDocument, scene: &Scene, parts: &[Part], dpi: f32) -> Vec<Op> {
     let page_h = scene.page_mm[1];
     let page_h_pt = mm_to_pt(page_h);
@@ -432,8 +432,8 @@ fn page_ops(doc: &mut PdfDocument, scene: &Scene, parts: &[Part], dpi: f32) -> V
     ops
 }
 
-/// Saves a one-page PDF: the artwork as images, with its text layers and the printed
-/// template lines on top as vectors.
+/// Saves a one-page PDF: the artwork as images, with its text and shape layers and the
+/// printed template lines on top as vectors.
 fn write_pdf(scene: &Scene, parts: &[Part], dpi: f32, path: &Path) -> Result<(), String> {
     let mut doc = PdfDocument::new(tr!("PDF_DOCUMENT_TITLE"));
     let ops = page_ops(&mut doc, scene, parts, dpi);
@@ -569,6 +569,165 @@ mod tests {
                 .unwrap();
             }
         }
+    }
+
+    #[test]
+    fn pdf_keeps_shapes_as_vectors() {
+        use crate::document::Node;
+        use crate::shape::{self, ShapeKind};
+        let mut doc = Document::default();
+        let c = doc.page_center();
+        let mut star = shape::new_layer(1, ShapeKind::Star, c);
+        star.shape.as_mut().unwrap().fill_color = [200, 0, 0, 128];
+        let mut line = shape::new_layer(2, ShapeKind::Line, c);
+        line.shape.as_mut().unwrap().dash = shape::DashStyle::Dashed;
+        doc.layers = vec![Node::Layer(Box::new(star)), Node::Layer(Box::new(line))];
+        shape::prepare_export(&mut doc, 100.0);
+        let scene = Scene::new(
+            &doc,
+            None,
+            [[255, 0, 255]; crate::template::KINDS],
+            [true; crate::template::KINDS],
+            Cuts::default(),
+        );
+        let parts = render::compose_parts(&scene, 100.0, true, &mut |_| true).unwrap();
+        assert_eq!(parts.len(), 3, "the page, then both shapes as vectors");
+        let mut pdf = PdfDocument::new("test");
+        let ops = page_ops(&mut pdf, &scene, &parts, 100.0);
+        let polygons: Vec<&Polygon> = ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::DrawPolygon { polygon } => Some(polygon),
+                _ => None,
+            })
+            .collect();
+        // The star's fill and stroke, then the line's dashes, one ring each.
+        assert_eq!(polygons.len(), 3);
+        assert!(polygons.iter().all(|p| p.mode == PaintMode::Fill));
+        assert_eq!(polygons[0].rings.len(), 1);
+        assert!(polygons[2].rings.len() >= 5, "{}", polygons[2].rings.len());
+        // The semi-transparent fill keeps its opacity.
+        assert!(
+            ops.iter()
+                .any(|op| matches!(op, Op::LoadGraphicsState { .. }))
+        );
+
+        // A sample of every kind and stroke style to look at, when asked for.
+        if let Some(dir) = std::env::var_os("ARTWORK_PDF_SAMPLE") {
+            let mut doc = Document::default();
+            let mut id = 0;
+            for (row, kind) in ShapeKind::ALL.into_iter().enumerate() {
+                for (col, dash) in shape::DashStyle::ALL.into_iter().enumerate() {
+                    id += 1;
+                    let at = [40.0 + col as f32 * 65.0, 15.0 + row as f32 * 25.0];
+                    let mut l = shape::new_layer(id, kind, at);
+                    let s = l.shape.as_mut().unwrap();
+                    s.dash = dash;
+                    s.stroke_width = 1.5;
+                    s.corner_radius = 4.0 * col as f32;
+                    s.cap = shape::Cap::ALL[col % 3];
+                    s.join = shape::Join::ALL[col % 3];
+                    s.fill_color[3] = 255 - 60 * col as u8;
+                    shape::set_geometry_size(&mut l, [50.0, 20.0]);
+                    doc.layers.push(Node::Layer(Box::new(l)));
+                }
+            }
+            // Curves: an ellipse turned into a polygon, a polyline with smooth points.
+            let mut l = shape::new_layer(id + 1, ShapeKind::Ellipse, [40.0, 200.0]);
+            shape::set_kind(&mut l, ShapeKind::Polygon);
+            doc.layers.push(Node::Layer(Box::new(l)));
+            let mut l = shape::new_layer(id + 2, ShapeKind::Polyline, [110.0, 200.0]);
+            l.shape.as_mut().unwrap().stroke_width = 1.5;
+            shape::toggle_smooth(&mut l, 1);
+            shape::toggle_smooth(&mut l, 2);
+            doc.layers.push(Node::Layer(Box::new(l)));
+            shape::prepare_export(&mut doc, 150.0);
+            let scene = Scene::new(
+                &doc,
+                None,
+                [[255, 0, 255]; crate::template::KINDS],
+                [true; crate::template::KINDS],
+                Cuts::default(),
+            );
+            let settings = ExportSettings {
+                dpi: 150,
+                ..Default::default()
+            };
+            let base = std::path::PathBuf::from(dir).join("shapes");
+            run(&scene, &settings, &base, &Progress::default()).unwrap();
+        }
+    }
+
+    /// With ARTWORK_PDF_SAMPLE set, writes text on paths there to look at: around a
+    /// circle, under it on the other side, on an arc, and along a curved polyline.
+    #[test]
+    fn text_on_path_sample() {
+        use crate::document::Node;
+        use crate::shape::{self, ShapeKind};
+        use crate::text::{self, PathKind};
+        let Some(dir) = std::env::var_os("ARTWORK_PDF_SAMPLE") else {
+            return;
+        };
+        let mut doc = Document::default();
+        let mut ring = shape::new_layer(1, ShapeKind::Ellipse, [70.0, 70.0]);
+        ring.shape.as_mut().unwrap().fill = false;
+        let mut curve = shape::new_layer(2, ShapeKind::Polyline, [200.0, 150.0]);
+        shape::set_geometry_size(&mut curve, [120.0, 40.0]);
+        shape::toggle_smooth(&mut curve, 1);
+        shape::toggle_smooth(&mut curve, 2);
+        let mut layers = vec![Node::Layer(Box::new(ring)), Node::Layer(Box::new(curve))];
+        let mut add = |id: u64, words: &str, at: P2, set: &dyn Fn(&mut text::TextPath)| {
+            let mut t = text::new_layer(id, words, text::BUILTIN_FAMILY.into(), at);
+            set(&mut t.text.as_mut().unwrap().path);
+            layers.push(Node::Layer(Box::new(t)));
+        };
+        // An em is 8.5 mm at 24 pt: a little more than the 15 mm ring's radius.
+        add(3, "PLAYER ONE START", [70.0, 70.0], &|p| {
+            p.kind = PathKind::Circle;
+            p.radius = 2.0;
+        });
+        add(4, "SELECT", [70.0, 70.0], &|p| {
+            p.kind = PathKind::Circle;
+            p.radius = 2.0;
+            p.flip = true;
+            p.position = 50.0;
+            p.shift = -0.7;
+        });
+        add(5, "ARCADE STICK", [200.0, 60.0], &|p| {
+            p.kind = PathKind::Arc;
+            p.bend = 30.0;
+        });
+        add(6, "Along a curved polyline", [0.0, 0.0], &|p| {
+            p.kind = PathKind::Shape;
+            p.shape = 2;
+            p.position = 50.0;
+            p.shift = 0.3;
+        });
+        doc.layers = layers;
+        let ctx = egui::Context::default();
+        let fonts = text::FontLibrary::builtin_only();
+        for _ in 0..2 {
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                shape::sync(ui.ctx(), &mut doc, true);
+                text::sync(ui.ctx(), &mut doc, &fonts);
+            });
+            out.textures_delta.clear();
+        }
+        text::prepare_export(&mut doc, 150.0);
+        shape::prepare_export(&mut doc, 150.0);
+        let scene = Scene::new(
+            &doc,
+            None,
+            [[255, 0, 255]; crate::template::KINDS],
+            [true; crate::template::KINDS],
+            Cuts::default(),
+        );
+        let settings = ExportSettings {
+            dpi: 150,
+            ..Default::default()
+        };
+        let base = std::path::PathBuf::from(dir).join("text-on-path");
+        run(&scene, &settings, &base, &Progress::default()).unwrap();
     }
 
     #[test]

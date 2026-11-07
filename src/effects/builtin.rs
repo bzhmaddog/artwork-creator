@@ -209,6 +209,18 @@ pub fn all() -> Vec<Box<dyn Effect>> {
                     ],
                     "outside",
                 ),
+                // The same names as a shape's stroke dashes.
+                ParamSpec::choice(
+                    "style",
+                    tr_noop!("STROKE_DASHES"),
+                    &[
+                        ("solid", tr_noop!("STROKE_DASH_SOLID")),
+                        ("dashed", tr_noop!("STROKE_DASH_DASHED")),
+                        ("dotted", tr_noop!("STROKE_DASH_DOTTED")),
+                        ("dash_dot", tr_noop!("STROKE_DASH_DASH_DOT")),
+                    ],
+                    "solid",
+                ),
                 percent("opacity", tr_noop!("PARAM_OPACITY"), 0.0, 100.0, 100.0),
             ],
             apply: outline,
@@ -654,6 +666,17 @@ fn drop_shadow(img: &mut RgbaImage, p: &Params, scale: f32) -> Result<(), String
 /// `f` holds 0 at feature pixels and `INF` elsewhere, and becomes the squared distance
 /// to the nearest feature. `v`, `z` and `d` are scratch space.
 fn edt_row(f: &mut [f32], v: &mut Vec<usize>, z: &mut Vec<f32>, d: &mut Vec<f32>) {
+    edt_row_arg(f, None, v, z, d);
+}
+
+/// `edt_row`, also writing into `arg` where in the row each pixel's distance comes from.
+fn edt_row_arg(
+    f: &mut [f32],
+    mut arg: Option<&mut [u32]>,
+    v: &mut Vec<usize>,
+    z: &mut Vec<f32>,
+    d: &mut Vec<f32>,
+) {
     let n = f.len();
     v.clear();
     z.clear();
@@ -698,6 +721,9 @@ fn edt_row(f: &mut [f32], v: &mut Vec<usize>, z: &mut Vec<f32>, d: &mut Vec<f32>
         }
         let dq = q as f32 - v[k] as f32;
         *out = dq * dq + d[v[k]];
+        if let Some(a) = arg.as_deref_mut() {
+            a[q] = v[k] as u32;
+        }
     }
 }
 
@@ -754,6 +780,299 @@ fn distance_map(
     out
 }
 
+/// Where each pixel near a shape's edge is along that edge, for dashed outlines. The
+/// edge is traced through the image's alpha (marching squares on a grid one pixel larger
+/// on each side, so every contour closes), and each pixel takes the place along it of
+/// its nearest pixel across the edge.
+struct Along {
+    /// Width of the padded grid.
+    gw: usize,
+    /// For each padded pixel beside the edge: its contour and a point of it there.
+    at: Vec<Option<(u32, u32)>>,
+    /// The contours' points (padded pixel coordinates, centers on whole numbers), each
+    /// with its length from the contour's start.
+    contours: Vec<Vec<([f32; 2], f32)>>,
+    /// Length of each contour.
+    lengths: Vec<f32>,
+    /// For each padded pixel: the nearest padded pixel inside the shape.
+    near_in: Vec<u32>,
+    /// For each padded pixel: the nearest padded pixel outside the shape.
+    near_out: Vec<u32>,
+}
+
+impl Along {
+    fn new(img: &RgbaImage) -> Self {
+        let (w, h) = (img.width() as usize, img.height() as usize);
+        let (gw, gh) = (w + 2, h + 2);
+        let src = img.as_raw();
+        let alpha = |x: usize, y: usize| -> f32 {
+            if x == 0 || y == 0 || x == gw - 1 || y == gh - 1 {
+                0.0
+            } else {
+                src[((y - 1) * w + x - 1) * 4 + 3] as f32
+            }
+        };
+        let inside = |x: usize, y: usize| alpha(x, y) >= 128.0;
+
+        // Edges of the grid the contour crosses: between pixel (x, y) and its right
+        // neighbor (key 2 i) or the one below (key 2 i + 1). Each gets the point where
+        // the alpha crosses half way, and is linked to the two other crossed edges of
+        // the cells on both sides of it.
+        let key = |x: usize, y: usize, down: bool| 2 * (y * gw + x) + down as usize;
+        let mut point: std::collections::HashMap<usize, [f32; 2]> = Default::default();
+        let mut links: std::collections::HashMap<usize, Vec<usize>> = Default::default();
+        let cross = |x: usize, y: usize, down: bool| -> Option<[f32; 2]> {
+            let (x1, y1) = if down { (x, y + 1) } else { (x + 1, y) };
+            if inside(x, y) == inside(x1, y1) {
+                return None;
+            }
+            let (a0, a1) = (alpha(x, y), alpha(x1, y1));
+            let t = ((128.0 - a0) / (a1 - a0)).clamp(0.0, 1.0);
+            Some(if down {
+                [x as f32, y as f32 + t]
+            } else {
+                [x as f32 + t, y as f32]
+            })
+        };
+        for y in 0..gh - 1 {
+            for x in 0..gw - 1 {
+                // The cell's edges: top, right, bottom, left.
+                let edges = [
+                    (key(x, y, false), cross(x, y, false)),
+                    (key(x + 1, y, true), cross(x + 1, y, true)),
+                    (key(x, y + 1, false), cross(x, y + 1, false)),
+                    (key(x, y, true), cross(x, y, true)),
+                ];
+                let hit: Vec<usize> = (0..4).filter(|&e| edges[e].1.is_some()).collect();
+                let pairs: Vec<(usize, usize)> = match hit.len() {
+                    2 => vec![(hit[0], hit[1])],
+                    4 => {
+                        // A saddle: the cell's middle decides which corners are cut off.
+                        let mid =
+                            (alpha(x, y) + alpha(x + 1, y) + alpha(x, y + 1) + alpha(x + 1, y + 1))
+                                / 4.0
+                                >= 128.0;
+                        if inside(x, y) == mid {
+                            vec![(0, 1), (2, 3)]
+                        } else {
+                            vec![(0, 3), (1, 2)]
+                        }
+                    }
+                    _ => Vec::new(),
+                };
+                for (a, b) in pairs {
+                    let (ka, kb) = (edges[a].0, edges[b].0);
+                    for (k, e) in [(ka, a), (kb, b)] {
+                        if let Some(p) = edges[e].1 {
+                            point.insert(k, p);
+                        }
+                    }
+                    links.entry(ka).or_default().push(kb);
+                    links.entry(kb).or_default().push(ka);
+                }
+            }
+        }
+
+        // Walk each closed contour, giving both pixels of every crossed edge their
+        // length along it.
+        let mut at: Vec<Option<(u32, u32)>> = vec![None; gw * gh];
+        let mut contours: Vec<Vec<([f32; 2], f32)>> = Vec::new();
+        let mut lengths = Vec::new();
+        let mut seen: std::collections::HashSet<usize> = Default::default();
+        let mut starts: Vec<usize> = links.keys().copied().collect();
+        starts.sort_unstable();
+        for start in starts {
+            if !seen.insert(start) {
+                continue;
+            }
+            let id = lengths.len() as u32;
+            let (mut prev, mut cur) = (usize::MAX, start);
+            let mut s = 0.0f32;
+            let mut points = Vec::new();
+            loop {
+                let pixel = cur / 2;
+                let other = if cur % 2 == 1 { pixel + gw } else { pixel + 1 };
+                for q in [pixel, other] {
+                    if at[q].is_none() {
+                        at[q] = Some((id, points.len() as u32));
+                    }
+                }
+                points.push((point[&cur], s));
+                let next = links[&cur]
+                    .iter()
+                    .copied()
+                    .find(|&n| n != prev && (!seen.contains(&n) || n == start));
+                let Some(next) = next else { break };
+                let (a, b) = (point[&cur], point[&next]);
+                s += ((b[0] - a[0]).powi(2) + (b[1] - a[1]).powi(2)).sqrt();
+                if next == start {
+                    break;
+                }
+                seen.insert(next);
+                (prev, cur) = (cur, next);
+            }
+            lengths.push(s.max(1e-3));
+            contours.push(points);
+        }
+
+        let near_in = nearest(gw, gh, inside);
+        let near_out = nearest(gw, gh, |x, y| !inside(x, y));
+        Self {
+            gw,
+            at,
+            contours,
+            lengths,
+            near_in,
+            near_out,
+        }
+    }
+
+    /// The contour and length along it of the edge nearest image pixel (x, y): found
+    /// from its nearest pixel on the other side of the edge, then exactly, on the
+    /// contour's pieces around there.
+    fn place(&self, x: usize, y: usize, is_inside: bool) -> Option<(u32, f32)> {
+        let i = (y + 1) * self.gw + x + 1;
+        let site = if is_inside {
+            self.near_out[i]
+        } else {
+            self.near_in[i]
+        } as usize;
+        // A site touching the other side only by a corner: one of its neighbors has it.
+        let (sx, sy) = (site % self.gw, site / self.gw);
+        let (id, k) = self.at[site].or_else(|| {
+            (sy.saturating_sub(1)..=sy + 1)
+                .flat_map(|ny| (sx.saturating_sub(1)..=sx + 1).map(move |nx| (nx, ny)))
+                .filter_map(|(nx, ny)| self.at.get(ny * self.gw + nx).copied().flatten())
+                .next()
+        })?;
+        let points = &self.contours[id as usize];
+        let n = points.len();
+        let total = self.lengths[id as usize];
+        let p = [(x + 1) as f32, (y + 1) as f32];
+        let mut best = (f32::MAX, points[k as usize].1);
+        for j in 0..12.min(n) {
+            let a = (k as usize + n + j - 6) % n;
+            let b = (a + 1) % n;
+            let ((pa, sa), (pb, _)) = (points[a], points[b]);
+            let d = [pb[0] - pa[0], pb[1] - pa[1]];
+            let len2 = (d[0] * d[0] + d[1] * d[1]).max(1e-9);
+            let t = (((p[0] - pa[0]) * d[0] + (p[1] - pa[1]) * d[1]) / len2).clamp(0.0, 1.0);
+            let q = [pa[0] + d[0] * t, pa[1] + d[1] * t];
+            let dist = (p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2);
+            if dist < best.0 {
+                best = (dist, (sa + t * len2.sqrt()).rem_euclid(total));
+            }
+        }
+        Some((id, best.1))
+    }
+
+    /// How much of a pixel of the line the dashes or dots cover, 0 to 1. `across` is its
+    /// distance from the middle of the line, `width` the line's width.
+    fn coverage(
+        &self,
+        x: usize,
+        y: usize,
+        is_inside: bool,
+        across: f32,
+        width: f32,
+        style: &str,
+    ) -> f32 {
+        let Some((id, s)) = self.place(x, y, is_inside) else {
+            return 1.0;
+        };
+        let total = self.lengths[id as usize];
+        // Visible lengths of the dashes and gaps, in line widths.
+        let pattern: &[f32] = match style {
+            "dotted" => &[1.0, 1.0],
+            "dash_dot" => &[3.0, 1.5, 1.0, 1.5],
+            _ => &[3.0, 2.0],
+        };
+        let period: f32 = pattern.iter().sum::<f32>() * width.max(1.0);
+        // A whole number of patterns round the contour, so there is no odd one where it
+        // starts.
+        let n = (total / period).round().max(1.0);
+        let k = total / (n * period);
+        let u = (s / k).rem_euclid(period) / width.max(1.0);
+        if style == "dotted" {
+            // Round dots in the middle of each "on" part.
+            let c = ((u - 0.5) / 2.0).round() * 2.0 + 0.5;
+            let along = (u - c) * width.max(1.0) * k;
+            let r = width / 2.0;
+            return (r - (along * along + across * across).sqrt() + 0.5).clamp(0.0, 1.0);
+        }
+        // Distance (in pixels) inside or outside the nearest dash; dashes start at 0.
+        let mut start = 0.0;
+        let mut best = f32::MAX;
+        for (j, &len) in pattern.iter().enumerate() {
+            if j % 2 == 0 {
+                let (a, b) = (start, start + len);
+                // Measured both ways round the period.
+                for off in [0.0, -period / width.max(1.0), period / width.max(1.0)] {
+                    let (a, b) = (a + off, b + off);
+                    let d = if u < a {
+                        a - u
+                    } else if u > b {
+                        u - b
+                    } else {
+                        -(u - a).min(b - u)
+                    };
+                    best = best.min(d);
+                }
+            }
+            start += len;
+        }
+        (0.5 - best * width.max(1.0) * k).clamp(0.0, 1.0)
+    }
+}
+
+/// For each pixel of a `w` x `h` grid, the index of the nearest pixel where `feature`
+/// is true (exact Euclidean distance). The nearest one found in each row's pass is kept
+/// and combined with the column pass.
+fn nearest(w: usize, h: usize, feature: impl Fn(usize, usize) -> bool + Sync) -> Vec<u32> {
+    let mut f = vec![0.0f32; w * h];
+    par_rows(&mut f, w, |y0, chunk| {
+        for (j, row) in chunk.chunks_exact_mut(w).enumerate() {
+            for (x, v) in row.iter_mut().enumerate() {
+                *v = if feature(x, y0 + j) { 0.0 } else { EDT_INF };
+            }
+        }
+    });
+    // Rows: the nearest feature's x in each row. Then columns: the row it is in.
+    let mut row_x = vec![0u32; w * h];
+    edt_rows_arg(&mut f, &mut row_x, w);
+    let mut t = transpose(&f, w, h);
+    let mut col_y = vec![0u32; w * h];
+    edt_rows_arg(&mut t, &mut col_y, h);
+    let mut out = vec![0u32; w * h];
+    par_rows(&mut out, w, |y0, chunk| {
+        for (j, o) in chunk.iter_mut().enumerate() {
+            let i = y0 * w + j;
+            let (x, y) = (i % w, i / w);
+            let ys = col_y[x * h + y] as usize;
+            let xs = row_x[ys * w + x] as usize;
+            *o = (ys * w + xs) as u32;
+        }
+    });
+    out
+}
+
+/// `edt_row_arg` on every row of `f` (rows of `len`), in parallel, with `arg` alongside.
+fn edt_rows_arg(f: &mut [f32], arg: &mut [u32], len: usize) {
+    let rows = f.len() / len.max(1);
+    let threads = std::thread::available_parallelism().map_or(1, |n| n.get());
+    let per = rows.div_ceil(threads).max(16) * len;
+    std::thread::scope(|s| {
+        for (fc, ac) in f.chunks_mut(per).zip(arg.chunks_mut(per)) {
+            s.spawn(move || {
+                let (mut v, mut z, mut d) = (Vec::new(), Vec::new(), Vec::new());
+                for (row, a) in fc.chunks_exact_mut(len).zip(ac.chunks_exact_mut(len)) {
+                    edt_row_arg(row, Some(a), &mut v, &mut z, &mut d);
+                }
+            });
+        }
+    });
+}
+
 fn outline_padding(p: &Params) -> [f32; 4] {
     let w = p.f32("width");
     let out = match p.choice("position") {
@@ -802,6 +1121,27 @@ fn outline(img: &mut RgbaImage, p: &Params, scale: f32) -> Result<(), String> {
             *c = ((s - lo).min(hi - s) + 0.5).clamp(0.0, 1.0) * k;
         }
     });
+    // Dashes or dots: each pixel of the line takes its place along the edge from the
+    // nearest point of it.
+    let style = p.choice("style");
+    if style != "solid" {
+        let band_middle = match position {
+            "outside" => width / 2.0,
+            "inside" => -width / 2.0,
+            _ => 0.0,
+        };
+        let along = Along::new(img);
+        par_rows(&mut coverage, w, |y0, chunk| {
+            for (j, c) in chunk.iter_mut().enumerate() {
+                if *c <= 0.0 {
+                    continue;
+                }
+                let i = y0 * w + j;
+                let across = signed(i) - band_middle;
+                *c *= along.coverage(i % w, i / w, inside(i), across, width, style);
+            }
+        });
+    }
 
     let row = w * 4;
     par_rows(img, row, |y0, chunk| {
@@ -1042,6 +1382,113 @@ mod tests {
         assert_eq!(at(1), [255, 255, 255, 255], "inside");
         assert_eq!(at(5), [255, 0, 0, 255], "middle untouched");
         assert_eq!(at(-3)[3], 0, "beyond");
+    }
+
+    /// A `size` px opaque disc on transparency, outlined `width` px wide in `style`.
+    fn styled_disc(size: u32, width: f32, position: &str, style: &str) -> RgbaImage {
+        let c = size as f32 / 2.0;
+        let mut img = RgbaImage::from_fn(size, size, |x, y| {
+            let d = ((x as f32 + 0.5 - c).powi(2) + (y as f32 + 0.5 - c).powi(2)).sqrt();
+            image::Rgba([255, 0, 0, if d < c - 8.0 { 255 } else { 0 }])
+        });
+        run(
+            "builtin.outline",
+            &mut img,
+            &[
+                ("width", width.into()),
+                ("position", position.into()),
+                ("style", style.into()),
+                ("color", "#0000ff".into()),
+            ],
+            1.0,
+        );
+        img
+    }
+
+    /// How many separate runs of line color a ring of pixels at `radius` from the
+    /// image's middle crosses, going round once.
+    fn runs_round(img: &RgbaImage, radius: f32) -> usize {
+        let c = img.width() as f32 / 2.0;
+        let steps = 2000;
+        let on: Vec<bool> = (0..steps)
+            .map(|k| {
+                let a = k as f32 / steps as f32 * std::f32::consts::TAU;
+                let p = img.get_pixel((c + radius * a.cos()) as u32, (c + radius * a.sin()) as u32);
+                // Blue: the line, not the red disc or the transparent rest.
+                p.0[2] > 128 && p.0[0] < 128 && p.0[3] > 128
+            })
+            .collect();
+        (0..steps)
+            .filter(|&k| on[k] && !on[(k + steps - 1) % steps])
+            .count()
+    }
+
+    #[test]
+    fn outline_styles_cut_the_line_into_dashes_or_dots() {
+        // A disc of radius 92 with a 6 px line outside it, round the circle at 95.
+        let solid = styled_disc(200, 6.0, "outside", "solid");
+        let pad = (solid.width() - 200) / 2;
+        let r = 92.0 + 3.0;
+        let ring = |img: &RgbaImage| {
+            // Back in the padded image's middle.
+            assert_eq!(img.width(), 200 + 2 * pad);
+            runs_round(img, r)
+        };
+        assert_eq!(ring(&solid), 0, "one unbroken ring");
+        // Dashes of 3 widths and gaps of 2: about 2 pi 95 / 30 = 20 of them.
+        let dashed = ring(&styled_disc(200, 6.0, "outside", "dashed"));
+        assert!((18..=22).contains(&dashed), "{dashed}");
+        // Dots one width apart: about 2 pi 95 / 12 = 50.
+        let dotted = ring(&styled_disc(200, 6.0, "outside", "dotted"));
+        assert!((45..=55).contains(&dotted), "{dotted}");
+        // Dash, gap, dot, gap: two runs per 7 widths.
+        let dash_dot = ring(&styled_disc(200, 6.0, "outside", "dash_dot"));
+        assert!((26..=31).contains(&dash_dot), "{dash_dot}");
+        // Samples to look at, when asked for.
+        if let Some(dir) = std::env::var_os("ARTWORK_PDF_SAMPLE") {
+            let dir = std::path::PathBuf::from(dir);
+            let mut sheet = RgbaImage::from_pixel(4 * 230, 230, image::Rgba([255; 4]));
+            for (k, style) in ["solid", "dashed", "dotted", "dash_dot"].iter().enumerate() {
+                let img = styled_disc(200, 6.0, "outside", style);
+                image::imageops::overlay(&mut sheet, &img, k as i64 * 230, 0);
+            }
+            sheet.save(dir.join("outline-styles.png")).unwrap();
+        }
+        // Inside and centered lines are cut too.
+        assert!(runs_round(&styled_disc(200, 6.0, "inside", "dashed"), 89.0) >= 15);
+        assert!(runs_round(&styled_disc(200, 6.0, "center", "dashed"), 92.0) >= 15);
+    }
+
+    #[test]
+    fn outline_styles_on_odd_images() {
+        // Nothing to outline, or a fully opaque image outlined along its border.
+        for style in ["dashed", "dotted", "dash_dot"] {
+            let mut empty = RgbaImage::new(20, 20);
+            run(
+                "builtin.outline",
+                &mut empty,
+                &[("style", style.into())],
+                1.0,
+            );
+            let mut full = RgbaImage::from_pixel(40, 30, image::Rgba([255, 0, 0, 255]));
+            run(
+                "builtin.outline",
+                &mut full,
+                &[
+                    ("style", style.into()),
+                    ("position", "inside".into()),
+                    ("width", 4.0.into()),
+                ],
+                1.0,
+            );
+            // Along the top border, the line comes and goes.
+            // The line is white over the red image.
+            let row: Vec<bool> = (0..40).map(|x| full.get_pixel(x, 1).0[1] > 128).collect();
+            assert!(
+                row.iter().any(|&on| on) && row.iter().any(|&on| !on),
+                "{style}: {row:?}"
+            );
+        }
     }
 
     #[test]

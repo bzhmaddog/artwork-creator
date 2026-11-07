@@ -216,12 +216,14 @@ fn write_archive(path: &Path, json: &str, images: &[(String, Arc<Vec<u8>>)]) -> 
     file.sync_all().map_err(|e| e.to_string())
 }
 
-/// Name of an image inside the archive: identical images share one entry. The extension
-/// comes from the image data, or else from the original file name.
-/// False for a text layer whose font file is not saved with the project: not loaded, the
-/// built-in font, or one whose license forbids embedding it. Its `source` is cleared
-/// unless it is a file on disk; the font is looked up by family where the project opens.
+/// False for a shape layer, which has no file, and for a text layer whose font file is
+/// not saved with the project: not loaded, the built-in font, or one whose license
+/// forbids embedding it. Its `source` is cleared unless it is a file on disk; the font
+/// is looked up by family where the project opens.
 fn font_to_save(layer: &mut Layer) -> bool {
+    if layer.shape.is_some() {
+        return false;
+    }
     let Some(text) = &layer.text else {
         return true;
     };
@@ -256,6 +258,8 @@ fn fallbacks_to_save(layer: &mut Layer) -> Vec<&mut crate::text::FallbackFont> {
     out
 }
 
+/// Name of an image or font inside the archive: identical files share one entry. The
+/// extension comes from the data, or else from the original file name.
 fn entry_name(data: &[u8], source: &Path, font: bool) -> String {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     data.hash(&mut h);
@@ -296,6 +300,31 @@ mod tests {
         let mut l = Layer::new(id, name.into(), format!("/elsewhere/{name}.png").into());
         l.data = data.cloned();
         Node::Layer(Box::new(l))
+    }
+
+    #[test]
+    fn shapes_are_saved_without_files() {
+        use crate::shape::{self, ShapeKind};
+        let dir = std::env::temp_dir().join(format!("artwork-shapes-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut doc = Document::default();
+        let mut l = shape::new_layer(1, ShapeKind::Polygon, [50.0, 50.0]);
+        l.shape.as_mut().unwrap().stroke_width = 2.0;
+        let want = l.shape.clone();
+        doc.layers.push(Node::Layer(Box::new(l)));
+        for path in [dir.join("s.artwork"), dir.join("s.json")] {
+            let missing = if path.extension().is_some_and(|e| e == "json") {
+                save_json(&doc, &path).unwrap()
+            } else {
+                save(&doc, &path).unwrap()
+            };
+            assert!(missing.is_empty(), "nothing reported missing");
+            let back = load(&path).unwrap();
+            let l = back.layer(1).unwrap();
+            assert_eq!(l.shape, want);
+            assert!(l.source.as_os_str().is_empty() && l.data.is_none());
+        }
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

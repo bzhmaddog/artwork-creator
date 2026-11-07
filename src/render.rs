@@ -31,15 +31,35 @@ pub struct SceneLayer {
     pub effects: Vec<EffectInstance>,
     /// Size of `pixmap` relative to the source image, for the effects.
     pub effects_scale: f32,
-    /// A text layer without effects as filled shapes, for formats that keep text as
-    /// vectors. Not for previews.
-    pub vector: Option<Arc<text::Outlines>>,
+    /// A text or shape layer without effects as filled shapes, for formats that keep
+    /// them as vectors. Not for previews.
+    pub vector: Option<Arc<Outlines>>,
+}
+
+/// A text or shape layer as filled shapes, for vector output such as PDF.
+#[derive(Debug)]
+pub struct Outlines {
+    /// Shapes in the layer's frame (layer units, y down), each filled with its straight
+    /// RGBA color under the non-zero rule, bottom first.
+    pub fills: Vec<(tiny_skia::Path, [u8; 4])>,
+    /// Layer units to page mm, including any distortion.
+    pub map: Homography,
+}
+
+/// A text or shape layer as filled shapes; `None` for images.
+pub fn outlines(layer: &crate::document::Layer) -> Option<Outlines> {
+    if layer.shape.is_some() {
+        crate::shape::outlines(layer)
+    } else {
+        text::outlines(layer)
+    }
 }
 
 impl SceneLayer {
     /// Its shapes, if drawing them as vectors gives what its pixels show: they are drawn
-    /// one by one, so with several (outline, fake bold) the layer must be opaque.
-    pub fn vector(&self) -> Option<&text::Outlines> {
+    /// one by one, so with several (outline, fake bold, a shape's fill and stroke) the
+    /// layer must be opaque.
+    pub fn vector(&self) -> Option<&Outlines> {
         let v = self.vector.as_deref()?;
         (self.opacity >= 1.0 || v.fills.len() <= 1).then_some(v)
     }
@@ -107,7 +127,7 @@ pub fn scene_nodes(nodes: &[Node], preview: bool) -> Vec<SceneNode> {
                     .then(l.homography()),
                     opacity: l.opacity.min(1.0),
                     vector: (!preview && effects.is_empty())
-                        .then(|| text::outlines(l).map(Arc::new))
+                        .then(|| outlines(l).map(Arc::new))
                         .flatten(),
                     effects,
                     effects_scale: 1.0 / k[0],
@@ -726,18 +746,18 @@ pub fn compose_artwork(
     }
 }
 
-/// A piece of the exported page, for formats that keep text as vectors.
+/// A piece of the exported page, for formats that keep text and shapes as vectors.
 pub enum Part<'a> {
     /// Layers drawn together at the export resolution. The first part is the whole page,
     /// with its background and cut by the template. The others are transparent and
     /// cropped to what they cover, their top-left corner at `origin` pixels.
     Raster { pixmap: Pixmap, origin: [u32; 2] },
-    /// A text layer to draw as vectors: `SceneLayer::vector` gives its shapes.
+    /// A text or shape layer to draw as vectors: `SceneLayer::vector` gives its shapes.
     Vector(&'a SceneLayer),
 }
 
 /// Renders the page as parts to stack, bottom first. With `vectors`, the top-level text
-/// layers that can be drawn as vectors become parts of their own, and the layers between
+/// and shape layers that can be drawn as vectors become parts of their own, and the layers between
 /// them are rendered together. Without, there is a single part: the page as `compose`
 /// renders it, without lines. `progress` is as for `compose_artwork`.
 pub fn compose_parts<'a>(

@@ -32,24 +32,39 @@ layers panel on the right](doc/capture.png)
   emoji font. Fonts, fallback ones included, are saved inside `.artwork` projects (except
   those whose license forbids embedding them), so a shared project looks the same
   elsewhere.
+- **Text along a path**: bent into an arc, set around a circle (the layer centered on
+  it, so its center snaps to a button's anchor), or following the outline of a shape
+  layer, curves included. The text's position along the path, the side it stands on and
+  its distance from the path can be set; each letter stays upright on the path. A text
+  following a shape moves with it. Text on a path is typed in Properties.
+- **Shape layers**: rectangle (with rounded corners), ellipse, line, polyline, polygon,
+  regular polygon and star, with a stroke (width, color, opacity, dashes, line ends and
+  joins) and, for closed shapes, a fill. Lines, polylines and polygons are drawn by
+  clicking their points on the canvas, their segments straight or Bezier curves, and
+  their points and curve handles can be moved, added and removed afterwards; points snap
+  to the template's anchors. Resizing a shape keeps its stroke
+  width in mm, and one kind can be turned into another (a rectangle into a polygon of its
+  corners, for instance). Shapes move, rotate, distort and take effects like
+  images, and are drawn at the export resolution.
 - **Transform on the canvas**: move, scale, rotate, stretch width or height on its own, and
   drag single corners to fake perspective.
 - **Effects** on each image layer: brightness / contrast, hue / saturation, grayscale,
   sepia, tint, invert, posterize, threshold, Gaussian blur, sharpen, drop shadow and
-  outline. They are stacked, reordered and toggled in the layer's properties, applied to
+  outline (solid, dashed, dotted or dash-dot). They are stacked, reordered and toggled in the layer's properties, applied to
   the export at full resolution, and never change the image file. More effects can be
   added with [plugins](#plugins).
 - **Snap to anchors**: image centers and corners snap to points defined by the template,
-  such as the button centers.
+  such as the button centers; so do a shape's center, corners and points (its stroke left
+  out).
 - **Align** layers or groups to the page or to the template.
 - **Undo / redo** for every change to the project.
 - **Templates** made of several elements, each in its own DXF file, with its own color and
   visibility.
 - **Export** PNG and/or PDF at the resolution you choose (72 to 1200 DPI). Choose which
   template lines are printed, and whether the inside of buttons and of cutouts is left
-  blank or printed over. In the PDF, template lines and text stay sharp vectors (text as
-  outlines, so no font is needed to print it); text layers with effects, or inside a
-  semi-transparent group, are printed as images like the rest.
+  blank or printed over. In the PDF, template lines, text and shapes stay sharp vectors
+  (text as outlines, so no font is needed to print it); text and shape layers with
+  effects, or inside a semi-transparent group, are printed as images like the rest.
 - **Projects** are saved, by default, as a single `.artwork` file (a zip archive) holding
   the project and all its images, so it can be moved or shared on its own. **Save As**
   can also write a linked `.json` project that points to the image files on disk; images
@@ -226,7 +241,13 @@ To add a language: add a `Language` variant and its table in `src/i18n.rs`, and 
 | Undo / Redo | Ctrl+Z / Ctrl+Shift+Z or Ctrl+Y |
 | Add an image layer | Ctrl+I, or drop image files on the window |
 | Add a text layer | Ctrl+T |
-| Type in a text layer on the canvas | Double-click it; Esc or a click outside it to stop |
+| Add a shape layer (the kind added last; others from the Shape button) | Ctrl+R |
+| Type in a text layer on the canvas | Double-click it (straight text only); Esc or a click outside it to stop |
+| Finish drawing a polyline or polygon | Double-click, Enter, Esc or right-click; a click on the first point closes it |
+| Edit the points of a line, polyline or polygon | Double-click it; Esc or selecting something else to stop |
+| Add a point while editing points | Double-click a segment |
+| Make a point smooth or sharp | Double-click it while editing points |
+| Place a smooth point while drawing | Press and drag |
 | Duplicate | Ctrl+D |
 | Group / Ungroup | Ctrl+G / Ctrl+Shift+G |
 | Delete layer | Del |
@@ -242,6 +263,21 @@ On the canvas, with a layer selected:
   perspective. **Holding Ctrl** swaps between resizing and distorting while you drag.
 - **Edge handles** stretch one side; **Alt** stretches both sides from the center.
 - **Rotation handle** rotates; **Shift** snaps to 15° steps.
+
+A line, polyline or polygon picked in the Shape menu is drawn on the canvas: each click
+places a sharp point, and a press dragged places a smooth one, pulling out its curve
+handles. A click on the first point closes a polyline into a polygon; a
+double click, **Enter**, **Esc** or a right click finishes; a line is done at its second
+point.
+
+While editing a shape's points, drag a point to move it, or double-click a segment to add
+a point there; the curve keeps its shape. The picked point shows its curve handles, and
+its neighbors the ones facing it: drag them to bend the curve. A smooth point's two
+handles turn together; **Alt** moves one on its own. Double-click a point to make it
+smooth or sharp. **Del** removes the point picked last and the **arrow keys** nudge it.
+
+While drawing or editing points, **Shift** keeps the segment at 15° steps, and points snap
+to anchors unless **Alt** is held.
 
 While typing in a text layer on the canvas, the keys edit the text as in any text field:
 arrows, Home / End, Shift to select, Ctrl+A / C / X / V, Ctrl+Z for the typing itself.

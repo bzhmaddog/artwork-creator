@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use crate::effects::EffectInstance;
 use crate::effects::cache::Processed;
 use crate::i18n::tr;
+use crate::shape::{Shape, ShapeState};
 use crate::text::{Text, TextState};
 
 /// A 2D point or vector, usually in page millimeters.
@@ -346,7 +347,7 @@ impl Transform {
     }
 }
 
-/// An image or a text placed on the page: a leaf of the layer tree.
+/// An image, a text or a shape placed on the page: a leaf of the layer tree.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Layer {
     /// Unique in the project, shared with groups; never reused.
@@ -375,6 +376,13 @@ pub struct Layer {
     /// Where the drawing of a text layer stands.
     #[serde(skip)]
     pub text_state: TextState,
+    /// Makes this a shape layer: its pixels are drawn from this shape, and it has no
+    /// `source` (see `shape`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub shape: Option<Box<Shape>>,
+    /// Where the drawing of a shape layer stands.
+    #[serde(skip)]
+    pub shape_state: ShapeState,
 
     /// The image file's original bytes, saved into project archives as they are.
     #[serde(skip)]
@@ -412,6 +420,8 @@ impl Layer {
             effects: Vec::new(),
             text: None,
             text_state: TextState::default(),
+            shape: None,
+            shape_state: ShapeState::default(),
             data: None,
             pixmap: None,
             preview: None,
@@ -460,6 +470,12 @@ impl Layer {
     /// Image pixels to page mm, without the perspective distortion.
     pub fn affine(&self) -> Affine {
         self.transform.to_affine(self.size_px)
+    }
+
+    /// Its pixels are drawn by the app, from a text or a shape, rather than read from
+    /// an image file.
+    pub fn is_drawn(&self) -> bool {
+        self.text.is_some() || self.shape.is_some()
     }
 
     /// The files the layer uses: its image or font, then a text's fallback fonts.

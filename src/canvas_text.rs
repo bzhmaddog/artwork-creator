@@ -124,7 +124,7 @@ pub fn input(
     };
     let layer = doc
         .layer(t.layer)
-        .filter(|l| l.text.is_some())
+        .filter(|l| crate::text::is_straight(l))
         .filter(|_| selected == Some(t.layer))
         .filter(|_| !doc.effectively_locked(t.layer) && doc.effectively_visible(t.layer));
     // Escape, or a click in another field, took the keyboard.

@@ -9,7 +9,8 @@ use egui::{
 use crate::document::{Document, Group, Layer, Node, P2};
 use crate::effects_ui;
 use crate::i18n::{tr, tr_n, tr_noop, translate};
-use crate::text::{self, FontLibrary, TextAlign};
+use crate::shape::{self, Cap, DashStyle, Join, ShapeKind};
+use crate::text::{self, FontLibrary, PathKind, TextAlign};
 
 /// Width of one nesting level in the layer list.
 const INDENT: f32 = 14.0;
@@ -29,6 +30,10 @@ pub struct LayersPanel {
     pub show_text: bool,
     /// Typed in the font list to narrow it.
     pub font_filter: String,
+    /// Kind of shape added last, added again by the shortcut.
+    pub shape_kind: ShapeKind,
+    /// The shape layer whose points are being edited on the canvas.
+    pub edit_points: Option<u64>,
 }
 
 /// What the Align buttons line the selection up with.
@@ -82,6 +87,8 @@ pub struct LayersOutput {
     pub add_images: bool,
     /// The Text button was clicked: add a text layer.
     pub add_text: bool,
+    /// A kind was picked from the Shape button's menu: add a shape layer.
+    pub add_shape: Option<ShapeKind>,
 }
 
 /// Drag-and-drop payload in the layer list: the id of the dragged node.
@@ -581,6 +588,7 @@ pub enum Tool {
     Add,
     AddImage,
     AddText,
+    AddShape,
     Group,
     Ungroup,
     Duplicate,
@@ -677,6 +685,17 @@ pub fn tool_icon(ui: &mut Ui, tool: Tool, enabled: bool, tip: &str) -> Response 
             p.line_segment([at(4.5, -6.0), at(7.5, -6.0)], s);
             p.line_segment([at(4.5, 6.0), at(7.5, 6.0)], s);
         }
+        Tool::AddShape => {
+            // A square behind a circle.
+            p.rect_stroke(
+                Rect::from_min_size(at(-7.0, -7.0), vec2(9.0, 9.0)),
+                1.0,
+                s,
+                StrokeKind::Inside,
+            );
+            p.circle_filled(at(2.5, 2.5), 5.5, ui.visuals().panel_fill);
+            p.circle_stroke(at(2.5, 2.5), 5.0, s);
+        }
         Tool::Group => {
             folder(-2.0);
             p.line_segment([at(4.0, 4.5), at(10.0, 4.5)], s);
@@ -766,7 +785,7 @@ const PROP_ROW_GAP: f32 = 6.0;
 
 /// Labels on the left of the property grids: the label column is as wide as the longest,
 /// so the controls line up from one section to the next, in every language.
-const PROP_LABELS: [&str; 12] = [
+const PROP_LABELS: [&str; 30] = [
     tr_noop!("LAYER_NAME"),
     tr_noop!("OPACITY"),
     tr_noop!("LAYER_POSITION"),
@@ -779,6 +798,24 @@ const PROP_LABELS: [&str; 12] = [
     tr_noop!("TEXT_COLOR"),
     tr_noop!("TEXT_FONT_SIZE"),
     tr_noop!("TEXT_OUTLINE"),
+    tr_noop!("SHAPE_KIND"),
+    tr_noop!("SHAPE_CORNER_RADIUS"),
+    tr_noop!("SHAPE_SIDES"),
+    tr_noop!("SHAPE_POINTS"),
+    tr_noop!("SHAPE_POINT_COUNT"),
+    tr_noop!("SHAPE_INNER_RADIUS"),
+    tr_noop!("SHAPE_FILL"),
+    tr_noop!("SHAPE_STROKE"),
+    tr_noop!("STROKE_DASHES"),
+    tr_noop!("STROKE_CAPS"),
+    tr_noop!("STROKE_JOINS"),
+    tr_noop!("TEXT_PATH"),
+    tr_noop!("TEXT_PATH_BEND"),
+    tr_noop!("TEXT_PATH_RADIUS"),
+    tr_noop!("TEXT_PATH_SHAPE_LAYER"),
+    tr_noop!("TEXT_PATH_POSITION"),
+    tr_noop!("TEXT_PATH_FLIP"),
+    tr_noop!("TEXT_PATH_SHIFT"),
 ];
 
 /// A two-column grid of labels and controls, lined up with the other property grids.
@@ -1101,6 +1138,20 @@ pub fn show(
         if tool_button(ui, Tool::AddText, true, tr!("ADD_TEXT_LAYER")) {
             out.add_text = true;
         }
+        let button = tool_icon(ui, Tool::AddShape, true, tr!("ADD_SHAPE_LAYER"));
+        egui::Popup::menu(&button).show(|ui| {
+            for kind in ShapeKind::ALL {
+                let mut b = Button::new(translate(kind.name_key()));
+                // The shortcut adds the kind added last.
+                if kind == state.shape_kind {
+                    b = b.shortcut_text("Ctrl+R");
+                }
+                if ui.add(b).clicked() {
+                    out.add_shape = Some(kind);
+                    ui.close();
+                }
+            }
+        });
         ui.add_space(6.0);
         if tool_button(ui, Tool::Group, true, tr!("GROUP_LAYERS")) {
             out.changed |= group(doc, selected);
@@ -1190,6 +1241,7 @@ fn text_section(
     layer: &mut Layer,
     state: &mut LayersPanel,
     fonts: &FontLibrary,
+    shapes: &[(u64, String)],
 ) -> bool {
     let mut changed = false;
     // A new text layer opens the section, so its settings show while it is typed.
@@ -1214,7 +1266,11 @@ fn text_section(
                         .desired_width(f32::INFINITY)
                         .hint_text(tr!("TEXT_PLACEHOLDER")),
                 )
-                .on_hover_text(tr!("TYPE_ON_CANVAS_HINT"));
+                .on_hover_text(if t.path.kind == PathKind::Straight {
+                    tr!("TYPE_ON_CANVAS_HINT")
+                } else {
+                    tr!("TEXT_ON_PATH_TYPE_HINT")
+                });
             if std::mem::take(&mut state.show_text) {
                 r.scroll_to_me(Some(egui::Align::Center));
             }
@@ -1370,7 +1426,367 @@ fn text_section(
                     });
                 });
                 ui.end_row();
+
+                changed |= text_path_rows(ui, t, em_mm, layer.size_px, shapes);
             });
+        },
+    );
+    changed
+}
+
+/// The rows of a text's path: what it follows and how the text sits on it. `em_mm` is
+/// the length of an em on the page, `size_px` the layer's box. Returns true if it
+/// changed.
+fn text_path_rows(
+    ui: &mut Ui,
+    t: &mut text::Text,
+    em_mm: f32,
+    size_px: [u32; 2],
+    shapes: &[(u64, String)],
+) -> bool {
+    let mut changed = false;
+    let p = &mut t.path;
+    ui.label(tr!("TEXT_PATH"));
+    let mut kind = p.kind;
+    if choice(
+        ui,
+        "text_path",
+        &mut kind,
+        &PathKind::ALL,
+        PathKind::name_key,
+    ) {
+        // A circle about three times as long as the text; the first shape to follow.
+        if kind == PathKind::Circle && p.kind != PathKind::Circle {
+            let width = size_px[0] as f32 / text::EM;
+            p.radius = (width * 3.0 / std::f32::consts::TAU).max(1.0);
+        }
+        if kind == PathKind::Shape && !shapes.iter().any(|(id, _)| *id == p.shape) {
+            p.shape = shapes.first().map_or(0, |(id, _)| *id);
+        }
+        p.kind = kind;
+        changed = true;
+    }
+    ui.end_row();
+
+    // A length kept in ems, shown in mm.
+    let mm_value = |ui: &mut Ui, ems: &mut f32, range, hint: &str| {
+        let mut mm = *ems * em_mm;
+        let r = ui
+            .add(
+                DragValue::new(&mut mm)
+                    .range(range)
+                    .speed(0.1)
+                    .fixed_decimals(1)
+                    .suffix(" mm"),
+            )
+            .on_hover_text(hint);
+        if r.changed() {
+            *ems = mm / em_mm;
+            true
+        } else {
+            false
+        }
+    };
+    match p.kind {
+        PathKind::Straight => return changed,
+        PathKind::Arc => {
+            ui.label(tr!("TEXT_PATH_BEND"));
+            changed |= ui
+                .add(
+                    Slider::new(&mut p.bend, -100.0..=100.0)
+                        .fixed_decimals(0)
+                        .suffix(" %"),
+                )
+                .on_hover_text(tr!("TEXT_PATH_BEND_HINT"))
+                .changed();
+            ui.end_row();
+        }
+        PathKind::Circle => {
+            ui.label(tr!("TEXT_PATH_RADIUS"));
+            changed |= mm_value(
+                ui,
+                &mut p.radius,
+                0.5..=1000.0,
+                tr!("TEXT_PATH_RADIUS_HINT"),
+            );
+            ui.end_row();
+        }
+        PathKind::Shape => {
+            ui.label(tr!("TEXT_PATH_SHAPE_LAYER"));
+            if shapes.is_empty() {
+                ui.weak(tr!("TEXT_PATH_NO_SHAPES"));
+            } else {
+                let name = shapes
+                    .iter()
+                    .find(|(id, _)| *id == p.shape)
+                    .map_or(tr!("TEXT_PATH_PICK_SHAPE"), |(_, n)| n.as_str());
+                egui::ComboBox::from_id_salt("text_path_shape")
+                    .width(130.0)
+                    .selected_text(name)
+                    .show_ui(ui, |ui| {
+                        for (id, n) in shapes {
+                            changed |= ui.selectable_value(&mut p.shape, *id, n).changed();
+                        }
+                    });
+            }
+            ui.end_row();
+        }
+    }
+    if matches!(p.kind, PathKind::Circle | PathKind::Shape) {
+        ui.label(tr!("TEXT_PATH_POSITION"));
+        changed |= ui
+            .add(
+                Slider::new(&mut p.position, 0.0..=100.0)
+                    .fixed_decimals(1)
+                    .suffix(" %"),
+            )
+            .on_hover_text(tr!("TEXT_PATH_POSITION_HINT"))
+            .changed();
+        ui.end_row();
+
+        ui.label(tr!("TEXT_PATH_FLIP"));
+        changed |= ui
+            .checkbox(&mut p.flip, "")
+            .on_hover_text(tr!("TEXT_PATH_FLIP_HINT"))
+            .changed();
+        ui.end_row();
+    }
+    ui.label(tr!("TEXT_PATH_SHIFT"));
+    changed |= mm_value(
+        ui,
+        &mut p.shift,
+        -1000.0..=1000.0,
+        tr!("TEXT_PATH_SHIFT_HINT"),
+    );
+    ui.end_row();
+    changed
+}
+
+/// The Size row of a shape layer: the size of its geometry, stroke left out. Returns
+/// true if it changed.
+fn shape_size(ui: &mut Ui, layer: &mut Layer, state: &mut LayersPanel) -> bool {
+    let Some(old) = layer.shape.as_ref().map(|s| s.geometry_size()) else {
+        return false;
+    };
+    let [mut w, mut h] = old;
+    fn field<'a>(v: &'a mut f32, prefix: &str) -> DragValue<'a> {
+        DragValue::new(v)
+            .fixed_decimals(1)
+            .speed(0.5)
+            .range(0.0..=5000.0)
+            .prefix(format!("{prefix} "))
+            .suffix(" mm")
+    }
+    let rw = ui.add(field(&mut w, tr!("LAYER_WIDTH_PREFIX")));
+    let rh = ui.add(field(&mut h, tr!("LAYER_HEIGHT_PREFIX")));
+    aspect_lock(ui, &mut state.free_aspect);
+    let mut size = old;
+    if rw.changed() {
+        size[0] = w;
+        if !state.free_aspect && old[0] > 1e-6 {
+            size[1] = old[1] * w / old[0];
+        }
+    } else if rh.changed() {
+        size[1] = h;
+        if !state.free_aspect && old[1] > 1e-6 {
+            size[0] = old[0] * h / old[1];
+        }
+    } else {
+        return false;
+    }
+    shape::set_geometry_size(layer, size);
+    true
+}
+
+/// A drop-down list of a shape setting's values, named by their translation keys.
+/// Returns true if another was picked.
+fn choice<T: Copy + PartialEq>(
+    ui: &mut Ui,
+    id: &str,
+    value: &mut T,
+    all: &[T],
+    name: impl Fn(T) -> &'static str,
+) -> bool {
+    let mut changed = false;
+    egui::ComboBox::from_id_salt(id)
+        .width(130.0)
+        .selected_text(translate(name(*value)))
+        .show_ui(ui, |ui| {
+            for &v in all {
+                changed |= ui.selectable_value(value, v, translate(name(v))).changed();
+            }
+        });
+    changed
+}
+
+/// The part of Properties for a shape layer: its kind, fill and stroke. Returns true if
+/// it changed.
+fn shape_section(
+    ui: &mut Ui,
+    layer: &mut Layer,
+    locked: bool,
+    edit_points: &mut Option<u64>,
+) -> bool {
+    let id = layer.id;
+    let mut changed = false;
+    section(
+        ui,
+        "shape_props",
+        RichText::new(tr!("SHAPE_SECTION")),
+        |_| false,
+        |ui| {
+            let mut new_kind = None;
+            let Some(s) = layer.shape.as_deref_mut() else {
+                return;
+            };
+            prop_grid(ui, "shape_props").show(ui, |ui| {
+                ui.label(tr!("SHAPE_KIND"));
+                let mut kind = s.kind;
+                if choice(
+                    ui,
+                    "shape_kind",
+                    &mut kind,
+                    &ShapeKind::ALL,
+                    ShapeKind::name_key,
+                ) {
+                    new_kind = Some(kind);
+                }
+                ui.end_row();
+
+                match s.kind {
+                    ShapeKind::Rectangle => {
+                        ui.label(tr!("SHAPE_CORNER_RADIUS"));
+                        let max = s.size[0].min(s.size[1]) / 2.0;
+                        changed |= ui
+                            .add(
+                                DragValue::new(&mut s.corner_radius)
+                                    .range(0.0..=max)
+                                    .speed(0.1)
+                                    .fixed_decimals(1)
+                                    .suffix(" mm"),
+                            )
+                            .changed();
+                        ui.end_row();
+                    }
+                    ShapeKind::RegularPolygon | ShapeKind::Star => {
+                        let star = s.kind == ShapeKind::Star;
+                        ui.label(if star {
+                            tr!("SHAPE_POINTS")
+                        } else {
+                            tr!("SHAPE_SIDES")
+                        });
+                        changed |= ui
+                            .add(DragValue::new(&mut s.sides).range(3..=100).speed(0.1))
+                            .changed();
+                        ui.end_row();
+                        if star {
+                            ui.label(tr!("SHAPE_INNER_RADIUS"));
+                            let mut pct = s.inner_ratio * 100.0;
+                            if ui
+                                .add(
+                                    DragValue::new(&mut pct)
+                                        .range(1.0..=100.0)
+                                        .speed(0.5)
+                                        .fixed_decimals(0)
+                                        .suffix(" %"),
+                                )
+                                .on_hover_text(tr!("SHAPE_INNER_RADIUS_HINT"))
+                                .changed()
+                            {
+                                s.inner_ratio = pct / 100.0;
+                                changed = true;
+                            }
+                            ui.end_row();
+                        }
+                    }
+                    k if k.has_points() => {
+                        // Shows what the canvas does now: a double click there turns it on
+                        // as well.
+                        ui.label(tr!("SHAPE_POINT_COUNT"));
+                        ui.horizontal(|ui| {
+                            ui.label(s.points.len().to_string());
+                            let on = *edit_points == Some(id);
+                            let r = ui
+                                .add_enabled(
+                                    !locked,
+                                    egui::Button::selectable(on, tr!("EDIT_POINTS")),
+                                )
+                                .on_hover_text(tr!("EDIT_POINTS_HINT"));
+                            if r.clicked() {
+                                *edit_points = if on { None } else { Some(id) };
+                            }
+                        });
+                        ui.end_row();
+                    }
+                    _ => {}
+                }
+
+                if s.kind.can_fill() {
+                    ui.label(tr!("SHAPE_FILL"));
+                    ui.horizontal(|ui| {
+                        changed |= ui.checkbox(&mut s.fill, "").changed();
+                        ui.add_enabled_ui(s.fill, |ui| {
+                            changed |= ui
+                                .color_edit_button_srgba_unmultiplied(&mut s.fill_color)
+                                .on_hover_text(tr!("SHAPE_COLOR_HINT"))
+                                .changed();
+                        });
+                    });
+                    ui.end_row();
+                }
+
+                ui.label(tr!("SHAPE_STROKE"));
+                ui.horizontal(|ui| {
+                    changed |= ui.checkbox(&mut s.stroke, "").changed();
+                    ui.add_enabled_ui(s.stroke, |ui| {
+                        changed |= ui
+                            .add(
+                                DragValue::new(&mut s.stroke_width)
+                                    .range(0.01..=100.0)
+                                    .speed(0.02)
+                                    .fixed_decimals(2)
+                                    .suffix(" mm"),
+                            )
+                            .on_hover_text(tr!("SHAPE_STROKE_WIDTH_HINT"))
+                            .changed();
+                        changed |= ui
+                            .color_edit_button_srgba_unmultiplied(&mut s.stroke_color)
+                            .on_hover_text(tr!("SHAPE_COLOR_HINT"))
+                            .changed();
+                    });
+                });
+                ui.end_row();
+
+                ui.add_enabled_ui(s.stroke, |ui| ui.label(tr!("STROKE_DASHES")));
+                ui.add_enabled_ui(s.stroke, |ui| {
+                    changed |= choice(
+                        ui,
+                        "stroke_dash",
+                        &mut s.dash,
+                        &DashStyle::ALL,
+                        DashStyle::name_key,
+                    );
+                });
+                ui.end_row();
+
+                // Caps show at the ends of open lines and of dashes.
+                let caps = s.stroke && (!s.kind.closed() || s.dash != DashStyle::Solid);
+                ui.add_enabled_ui(caps, |ui| ui.label(tr!("STROKE_CAPS")));
+                ui.add_enabled_ui(caps, |ui| {
+                    changed |= choice(ui, "stroke_cap", &mut s.cap, &Cap::ALL, Cap::name_key);
+                });
+                ui.end_row();
+
+                ui.add_enabled_ui(s.stroke, |ui| ui.label(tr!("STROKE_JOINS")));
+                ui.add_enabled_ui(s.stroke, |ui| {
+                    changed |= choice(ui, "stroke_join", &mut s.join, &Join::ALL, Join::name_key);
+                });
+                ui.end_row();
+            });
+            if let Some(kind) = new_kind {
+                shape::set_kind(layer, kind);
+                changed = true;
+            }
         },
     );
     changed
@@ -1522,6 +1938,13 @@ fn properties(
     });
     ui.add_space(4.0);
 
+    // Shape layers a text can follow, by name.
+    let shapes: Vec<(u64, String)> = doc
+        .leaves()
+        .iter()
+        .filter(|l| l.layer.shape.is_some())
+        .map(|l| (l.layer.id, l.layer.name.clone()))
+        .collect();
     let layer_count = {
         let mut n = 0;
         if let Some(node) = doc.node(id) {
@@ -1612,6 +2035,10 @@ fn properties(
                         ui.label(tr!("LAYER_SIZE"));
                         ui.add_enabled_ui(!locked, |ui| {
                             ui.horizontal(|ui| {
+                                if layer.shape.is_some() {
+                                    out.changed |= shape_size(ui, layer, state);
+                                    return;
+                                }
                                 let [px_w, px_h] = layer.size_px.map(|v| v.max(1) as f32);
                                 let [mut w, mut h] = layer.size_mm();
                                 let rw = ui.add(
@@ -1739,18 +2166,24 @@ fn properties(
                     });
 
                     if layer.text.is_some() {
-                        out.changed |= text_section(ui, layer, state, fonts);
+                        out.changed |= text_section(ui, layer, state, fonts, &shapes);
+                    } else if layer.shape.is_some() {
+                        out.changed |= shape_section(ui, layer, locked, &mut state.edit_points);
                     } else {
                         image_section(ui, layer);
                     }
                 },
             );
-            out.changed |= effects_ui::show(
-                ui,
-                layer.id,
-                &mut layer.effects,
-                layer.text.is_some().then(|| layer.transform.scale[1].abs()),
-            );
+            // Effect sizes of drawn layers are shown in mm: a text's follow its font
+            // size, a shape's stay the same when it is resized.
+            let px_mm = if layer.text.is_some() {
+                Some((layer.transform.scale[1].abs(), tr!("TEXT_EFFECT_SIZE_HINT")))
+            } else if layer.shape.is_some() {
+                Some((1.0 / shape::UNITS_PER_MM, tr!("SHAPE_EFFECT_SIZE_HINT")))
+            } else {
+                None
+            };
+            out.changed |= effects_ui::show(ui, layer.id, &mut layer.effects, px_mm);
         }
         None => {}
     }
@@ -1798,6 +2231,8 @@ mod tests {
         fills: Vec<(Rect, egui::Color32)>,
         /// The mouse cursor asked for in the last frame.
         cursor: egui::CursorIcon,
+        /// A shape kind picked from the Shape button's menu.
+        added_shape: Option<ShapeKind>,
     }
 
     impl Harness {
@@ -1813,6 +2248,7 @@ mod tests {
                 dots: Vec::new(),
                 fills: Vec::new(),
                 cursor: egui::CursorIcon::Default,
+                added_shape: None,
             };
             h.frame(vec![]);
             h.frame(vec![]);
@@ -1828,16 +2264,19 @@ mod tests {
                 events,
                 ..Default::default()
             };
+            let mut added = None;
             let mut out = self.ctx.run_ui(input, |ui| {
-                show(
+                added = show(
                     ui,
                     &mut self.doc,
                     &mut self.selected,
                     &mut self.state,
                     None,
                     &FontLibrary::builtin_only(),
-                );
+                )
+                .add_shape;
             });
+            self.added_shape = self.added_shape.or(added);
             out.textures_delta.clear();
             self.cursor = out.platform_output.cursor_icon;
             self.dots = out
@@ -2382,5 +2821,106 @@ mod tests {
             g.locked = true;
         }
         assert!(!nudge(&mut d, Some(1), [1.0, 0.0]));
+    }
+
+    #[test]
+    fn shape_menu_and_properties() {
+        let mut h = Harness::new(doc_with(vec![layer(1)]));
+        // The Shape button is the third in the toolbar, above the hint at the bottom.
+        let labels = h.frame(vec![]);
+        assert!(!labels.iter().any(|(t, _)| t == "Star"), "menu closed");
+        let hint = labels
+            .iter()
+            .find(|(t, _)| t.starts_with("Select a layer"))
+            .map(|(_, p)| p.y)
+            .unwrap();
+        let mut found = None;
+        for dy in (8..60).step_by(4) {
+            let p = Pos2::new(2.0 * (TOOL + 2.0) + TOOL / 2.0, hint - dy as f32);
+            h.click(p);
+            if h.frame(vec![]).iter().any(|(t, _)| t == "Star") {
+                found = Some(p);
+                break;
+            }
+        }
+        assert!(found.is_some(), "a toolbar button opens the shape menu");
+        let star = h.label("Star");
+        h.click(star);
+        assert_eq!(h.added_shape, Some(ShapeKind::Star));
+
+        // A shape layer's Properties: its kind, fill and stroke; a new kind from the list.
+        let l = shape::new_layer(2, ShapeKind::Rectangle, [50.0, 50.0]);
+        let mut h = Harness::new(doc_with(vec![Node::Layer(Box::new(l))]));
+        h.selected = Some(2);
+        let labels = h.frame(vec![]);
+        for want in [
+            "Shape",
+            "Kind",
+            "Corner radius",
+            "Fill",
+            "Stroke",
+            "Dashes",
+            "Joins",
+        ] {
+            assert!(labels.iter().any(|(t, _)| t == want), "{want}");
+        }
+        let kind = labels
+            .iter()
+            .filter(|(t, _)| t == "Rectangle")
+            .map(|(_, p)| *p)
+            .next_back()
+            .expect("kind list");
+        h.click(kind + vec2(4.0, 6.0));
+        let ellipse = h.label("Ellipse");
+        h.click(ellipse);
+        let shape = h.doc.layer(2).unwrap().shape.as_ref().unwrap();
+        assert_eq!(shape.kind, ShapeKind::Ellipse);
+        assert_eq!(shape.size, [40.0, 25.0], "same size");
+
+        // A polyline's points are edited on the canvas, turned on here too.
+        let l = shape::new_layer(3, ShapeKind::Polyline, [50.0, 50.0]);
+        let mut h = Harness::new(doc_with(vec![Node::Layer(Box::new(l))]));
+        h.selected = Some(3);
+        let button = h.label("Edit points");
+        h.click(button);
+        assert_eq!(h.state.edit_points, Some(3));
+        h.click(button);
+        assert_eq!(h.state.edit_points, None);
+    }
+
+    #[test]
+    fn text_path_in_properties() {
+        let t = text::new_layer(1, "Hello", text::BUILTIN_FAMILY.into(), [50.0, 50.0]);
+        let ring = shape::new_layer(2, ShapeKind::Ellipse, [50.0, 50.0]);
+        let mut h = Harness::new(doc_with(vec![
+            Node::Layer(Box::new(ring)),
+            Node::Layer(Box::new(t)),
+        ]));
+        h.selected = Some(1);
+        let labels = h.frame(vec![]);
+        assert!(labels.iter().any(|(t, _)| t == "Path"));
+        assert!(
+            !labels.iter().any(|(t, _)| t == "Radius"),
+            "straight: nothing more"
+        );
+        let straight = h.label("Straight");
+        h.click(straight);
+        let circle = h.label("Circle");
+        h.click(circle);
+        let labels = h.frame(vec![]);
+        for want in ["Radius", "Position", "Other side", "Baseline shift"] {
+            assert!(labels.iter().any(|(t, _)| t == want), "{want}");
+        }
+        let p = &h.doc.layer(1).unwrap().text.as_ref().unwrap().path;
+        assert_eq!(p.kind, PathKind::Circle);
+        assert!(p.radius >= 1.0);
+        // Following a shape picks the first one.
+        let circle = h.label("Circle");
+        h.click(circle);
+        let shape_kind = h.label("Shape layer");
+        h.click(shape_kind);
+        let p = &h.doc.layer(1).unwrap().text.as_ref().unwrap().path;
+        assert_eq!((p.kind, p.shape), (PathKind::Shape, 2));
+        assert!(h.frame(vec![]).iter().any(|(t, _)| t == "Follows"));
     }
 }

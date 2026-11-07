@@ -61,13 +61,14 @@ fn drag_handle(ui: &mut Ui, active: bool) -> egui::Response {
 }
 
 /// Shows the effect stack of a layer. Returns true if it changed. With `px_mm`, the
-/// length of a layer pixel on the page, sizes in pixels are shown in mm: for text layers,
-/// whose pixels are a fraction of the font size (see `text::EM`).
+/// length of a layer pixel on the page and a tooltip saying how it changes, sizes in
+/// pixels are shown in mm: for text and shape layers, whose pixels are a fraction of the
+/// font size (see `text::EM`) or of a mm (see `shape::UNITS_PER_MM`).
 pub fn show(
     ui: &mut Ui,
     layer_id: u64,
     stack: &mut Vec<EffectInstance>,
-    px_mm: Option<f32>,
+    px_mm: Option<(f32, &str)>,
 ) -> bool {
     let mut added = None;
     let mut changed = false;
@@ -144,7 +145,7 @@ fn stack_ui(
     ui: &mut Ui,
     layer_id: u64,
     stack: &mut Vec<EffectInstance>,
-    px_mm: Option<f32>,
+    px_mm: Option<(f32, &str)>,
 ) -> bool {
     let mut changed = false;
     if stack.is_empty() {
@@ -285,7 +286,7 @@ fn params_ui(
     salt: (u64, usize),
     effect: &dyn Effect,
     inst: &mut EffectInstance,
-    px_mm: Option<f32>,
+    px_mm: Option<(f32, &str)>,
 ) -> bool {
     let specs = effect.params();
     if specs.is_empty() {
@@ -323,7 +324,7 @@ fn param_ui(
     spec: &ParamSpec,
     builtin: bool,
     p: &Params,
-    px_mm: Option<f32>,
+    px_mm: Option<(f32, &str)>,
 ) -> Option<Value> {
     let id = spec.id.as_str();
     // Pixel sizes shown in mm on the page, when asked.
@@ -341,7 +342,7 @@ fn param_ui(
             // logarithmic, the slider moves in fine steps there.
             let slider = Slider::new(&mut v, *min..=*max).logarithmic(unit.trim() == "px");
             let r = match in_mm(unit) {
-                Some(k) => {
+                Some((k, hint)) => {
                     let k = f64::from(k.max(1e-6));
                     ui.add(
                         slider
@@ -349,7 +350,7 @@ fn param_ui(
                             .custom_parser(move |s| s.trim().parse::<f64>().ok().map(|mm| mm / k))
                             .suffix(" mm"),
                     )
-                    .on_hover_text(tr!("TEXT_EFFECT_SIZE_HINT"))
+                    .on_hover_text(hint)
                 }
                 None => ui.add(slider.suffix(unit).fixed_decimals(*decimals)),
             };

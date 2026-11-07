@@ -9,6 +9,8 @@ use egui::{
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
+use crate::canvas_points;
+pub use crate::canvas_points::{Drawing, PointEdit};
 use crate::canvas_text;
 use crate::document::{
     Affine, Document, Homography, Layer, Node, P2, Transform, UNIT_CORNERS, is_convex,
@@ -158,6 +160,11 @@ pub struct CanvasState {
     panning: bool,
     /// Typing in a text layer on the canvas, after a double click on it.
     pub typing: Option<canvas_text::Typing>,
+    /// Editing the points of a line, polyline or polygon, after a double click on it.
+    pub points: Option<PointEdit>,
+    /// A line, polyline or polygon being drawn point by point, after picking it in the
+    /// Shape menu.
+    pub drawing: Option<Drawing>,
     group_previews: HashMap<u64, GroupPreview>,
 }
 
@@ -187,6 +194,8 @@ impl Default for CanvasState {
             drag: None,
             panning: false,
             typing: None,
+            points: None,
+            drawing: None,
             group_previews: HashMap::new(),
         }
     }
@@ -215,7 +224,11 @@ impl CanvasState {
 /// Points of a layer that snap to anchors: its center, then its drawn corners. The
 /// center is the middle of the drawn corners' bounds, as for Align: once the layer is
 /// distorted, that is where it looks centered, not the center of its undistorted frame.
-fn snap_points(layer: &Layer) -> [P2; 5] {
+/// A shape's are those of its geometry, its stroke left out (see `shape::snap_points`).
+fn snap_points(layer: &Layer) -> Vec<P2> {
+    if layer.shape.is_some() {
+        return crate::shape::snap_points(layer);
+    }
     let c = layer.corners();
     let (mut lo, mut hi) = (c[0], c[0]);
     for p in &c[1..] {
@@ -223,12 +236,12 @@ fn snap_points(layer: &Layer) -> [P2; 5] {
         hi = [hi[0].max(p[0]), hi[1].max(p[1])];
     }
     let middle = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0];
-    [middle, c[0], c[1], c[2], c[3]]
+    vec![middle, c[0], c[1], c[2], c[3]]
 }
 
 /// The anchor nearest to any of `points`, if within `reach` (mm): the offset that moves
 /// that point onto it, and the anchor.
-fn nearest_snap(anchors: &[P2], points: &[P2], reach: f32) -> Option<(P2, P2)> {
+pub(crate) fn nearest_snap(anchors: &[P2], points: &[P2], reach: f32) -> Option<(P2, P2)> {
     let mut best: Option<(f32, P2, P2)> = None;
     for &p in points {
         for &a in anchors {
@@ -389,11 +402,14 @@ pub fn show(
         (state.snap_to_anchors && !alt && !anchors.is_empty()).then_some(SNAP_RADIUS / cam.zoom);
     let mut snapped = None;
 
-    // Which handle (if any) of the selected layer is under a screen point.
+    // Which handle (if any) of the selected layer is under a screen point. A shape whose
+    // points are being edited shows those instead.
+    let editing_points = state.points.as_ref().map(|e| e.layer);
     let handle_at = |doc: &Document, sel: Option<u64>, p: Pos2| -> Option<(u64, DragKind)> {
         let id = sel?;
         let layer = doc.layer(id)?;
-        if doc.effectively_locked(id) || !doc.effectively_visible(id) {
+        if doc.effectively_locked(id) || !doc.effectively_visible(id) || editing_points == Some(id)
+        {
             return None;
         }
         let (corners, _, rot) = handles(&cam, rect, layer);
@@ -430,7 +446,43 @@ pub fn show(
         on_handle,
     );
 
-    if !space && !typing.took {
+    // Drawing a shape takes the left clicks; its points are edited once it is done.
+    let keys = canvas_points::Keys {
+        shift,
+        alt,
+        anchors: &anchors,
+        snap_reach,
+    };
+    let drawn = canvas_points::draw_input(
+        ui,
+        doc,
+        selected,
+        &mut state.drawing,
+        cam,
+        rect,
+        &response,
+        keys,
+    );
+    if state.drawing.is_some() {
+        state.points = None;
+    }
+    let mut points = canvas_points::input(
+        ui,
+        doc,
+        *selected,
+        &mut state.points,
+        cam,
+        rect,
+        &response,
+        keys,
+    );
+    points.took |= drawn.took;
+    points.changed |= drawn.changed;
+    points.snapped = points.snapped.or(drawn.snapped);
+    changed |= points.changed;
+    snapped = snapped.or(points.snapped);
+
+    if !space && !typing.took && !points.took {
         if response.drag_started_by(PointerButton::Primary) {
             let origin = ui
                 .input(|i| i.pointer.press_origin())
@@ -450,6 +502,20 @@ pub fn show(
                         }
                     },
                 };
+                // A text following a shape moves with it: the shape is moved.
+                let mut ids = ids;
+                if kind == DragKind::Move {
+                    let shapes: Vec<u64> = ids
+                        .iter()
+                        .filter_map(|&id| doc.layer(id).and_then(crate::text::followed_shape))
+                        .filter(|&s| !doc.effectively_locked(s))
+                        .collect();
+                    for s in shapes {
+                        if !ids.contains(&s) {
+                            ids.push(s);
+                        }
+                    }
+                }
                 let layers: Vec<(u64, Transform)> = ids
                     .into_iter()
                     .filter_map(|id| Some((id, doc.layer(id)?.transform)))
@@ -468,15 +534,24 @@ pub fn show(
         {
             *selected = topmost_hit(doc, cam.to_mm(rect, p));
         }
-        // A double click on a text layer starts typing in it, where it was clicked.
+        // A double click on a text layer starts typing in it, where it was clicked. Text
+        // on a path is typed in Properties.
         if response.double_clicked_by(PointerButton::Primary)
             && let Some(p) = response.interact_pointer_pos()
             && let Some(layer) = selected.and_then(|id| doc.layer(id))
-            && layer.text.is_some()
+            && crate::text::is_straight(layer)
             && !doc.effectively_locked(layer.id)
         {
             let i = canvas_text::index_at(layer, cam.to_mm(rect, p));
             canvas_text::begin(&mut state.typing, layer.id, i, i);
+        }
+        // On a line, polyline or polygon, it shows its points to edit them.
+        if response.double_clicked_by(PointerButton::Primary)
+            && let Some(id) = *selected
+            && state.points.is_none()
+            && canvas_points::can_edit(doc, id)
+        {
+            state.points = Some(PointEdit::new(id));
         }
     }
     changed |= canvas_text::field(ui, doc, &mut state.typing, cam, rect);
@@ -639,6 +714,8 @@ pub fn show(
     } else if let Some(p) = hover
         && !space
         && !typing.over_text
+        && !points.took
+        && !points.over_handle
     {
         match handle_at(doc, *selected, p) {
             Some((_, DragKind::Rotate)) => ui.ctx().set_cursor_icon(CursorIcon::Alias),
@@ -665,6 +742,13 @@ pub fn show(
     state.snapped = snapped;
     paint(ui, doc, elements, *selected, state, rect, distorting);
     canvas_text::paint(ui, doc, &state.typing, cam, rect);
+    let painter = ui.painter_at(rect);
+    let look = canvas_points::Look {
+        accent: ACCENT,
+        background: ui.visuals().extreme_bg_color,
+    };
+    canvas_points::paint(&painter, doc, &state.points, cam, rect, &look);
+    canvas_points::paint_drawing(&painter, doc, &state.drawing, cam, rect, hover, keys, &look);
     changed
 }
 
@@ -1103,7 +1187,11 @@ fn paint(
             ];
             painter.extend(Shape::dashed_line(&line, Stroke::new(1.5, color), 6.0, 4.0));
         }
-    } else if let Some(layer) = doc.layer(sel) {
+    } else if let Some(layer) = doc.layer(sel)
+        // Its points are being edited or drawn: they are shown instead.
+        && state.points.as_ref().is_none_or(|e| e.layer != sel)
+        && state.drawing.as_ref().is_none_or(|d| d.layer != Some(sel))
+    {
         let (corners, top_mid, rot) = handles(&cam, rect, layer);
         let stroke = Stroke::new(1.5, color);
         painter.add(Shape::closed_line(corners.to_vec(), stroke));
@@ -1390,6 +1478,483 @@ mod tests {
             (m[0] - 70.0).abs() < 1e-3 && (m[1] - 25.0).abs() < 1e-3,
             "{m:?}"
         );
+    }
+
+    #[test]
+    fn editing_a_polyline_s_points_on_the_canvas() {
+        use crate::shape::{self, ShapeKind};
+        let close = |a: P2, b: P2| (a[0] - b[0]).abs() < 0.05 && (a[1] - b[1]).abs() < 0.05;
+        let mut doc = Document {
+            layers: vec![Node::Layer(Box::new(shape::new_layer(
+                1,
+                ShapeKind::Polyline,
+                [100.0, 100.0],
+            )))],
+            ..Default::default()
+        };
+        let elements = anchors(&[[70.5, 120.5]]);
+        let ctx = egui::Context::default();
+        let mut state = CanvasState::default();
+        let mut selected = Some(1);
+        let mut time = 0.0;
+        let mut frame = |doc: &mut Document, state: &mut CanvasState, events: Vec<Event>| {
+            time += 0.02;
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 800.0))),
+                time: Some(time),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                show(ui, doc, &elements, &mut selected, state);
+                shape::sync(ui.ctx(), doc, !ui.input(|i| i.pointer.any_down()));
+            });
+            out.textures_delta.clear();
+        };
+        let button = |pos, pressed| Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        frame(&mut doc, &mut state, vec![]);
+        let (cam, rect) = (state.camera, state.rect);
+        let screen = |p: P2| cam.to_screen(rect, p);
+        let drag =
+            |doc: &mut Document,
+             state: &mut CanvasState,
+             from: P2,
+             to: P2,
+             frame: &mut dyn FnMut(&mut Document, &mut CanvasState, Vec<Event>)| {
+                let (from, to) = (screen(from), screen(to));
+                frame(doc, state, vec![Event::PointerMoved(from)]);
+                frame(doc, state, vec![button(from, true)]);
+                for k in 1..=4 {
+                    frame(
+                        doc,
+                        state,
+                        vec![Event::PointerMoved(from + (to - from) * (k as f32 / 4.0))],
+                    );
+                }
+                frame(doc, state, vec![button(to, false)]);
+                frame(doc, state, vec![]);
+            };
+
+        // A double click on the shape shows its points.
+        let c = screen([100.0, 100.0]);
+        frame(&mut doc, &mut state, vec![Event::PointerMoved(c)]);
+        for pressed in [true, false, true, false] {
+            frame(&mut doc, &mut state, vec![button(c, pressed)]);
+        }
+        assert_eq!(state.points.as_ref().map(|e| e.layer), Some(1));
+
+        // The first point dragged near the anchor lands on it; the others stay.
+        let before = shape::page_points(doc.layer(1).unwrap());
+        drag(&mut doc, &mut state, before[0], [72.0, 119.0], &mut frame);
+        let after = shape::page_points(doc.layer(1).unwrap());
+        assert!(close(after[0], [70.5, 120.5]), "{:?}", after[0]);
+        for k in 1..4 {
+            assert!(
+                close(after[k], before[k]),
+                "point {k}: {:?} {:?}",
+                after[k],
+                before[k]
+            );
+        }
+        assert_eq!(state.points.as_ref().unwrap().selected, Some(0));
+
+        // A double click on the first segment adds a point there.
+        let mid = [
+            (after[0][0] + after[1][0]) / 2.0,
+            (after[0][1] + after[1][1]) / 2.0,
+        ];
+        let m = screen(mid);
+        // Long enough after the last clicks not to make a triple click with them.
+        for _ in 0..20 {
+            frame(&mut doc, &mut state, vec![Event::PointerMoved(m)]);
+        }
+        for pressed in [true, false, true, false] {
+            frame(&mut doc, &mut state, vec![button(m, pressed)]);
+        }
+        frame(&mut doc, &mut state, vec![]);
+        let now = shape::page_points(doc.layer(1).unwrap());
+        assert_eq!(now.len(), 5);
+        assert!(close(now[1], mid), "{:?} {mid:?}", now[1]);
+        assert!(close(now[0], after[0]));
+        assert_eq!(state.points.as_ref().unwrap().selected, Some(1));
+
+        // Moving points again and again never adds any.
+        for round in 0..3 {
+            for i in [0usize, 2, 3, 4, 1] {
+                let p = shape::page_points(doc.layer(1).unwrap())[i];
+                let to = [p[0] + 3.0 + round as f32, p[1] - 2.0];
+                drag(&mut doc, &mut state, p, to, &mut frame);
+                let pts = shape::page_points(doc.layer(1).unwrap());
+                assert_eq!(pts.len(), 5, "round {round}, point {i}");
+                assert!(
+                    close(pts[i], to),
+                    "round {round}, point {i}: {:?} {to:?}",
+                    pts[i]
+                );
+            }
+        }
+
+        // Real mice: a move and the press in one frame, a click first, a pause.
+        for i in [0usize, 2, 3] {
+            let p = shape::page_points(doc.layer(1).unwrap())[i];
+            let sp = screen(p);
+            frame(
+                &mut doc,
+                &mut state,
+                vec![Event::PointerMoved(sp), button(sp, true)],
+            );
+            frame(&mut doc, &mut state, vec![button(sp, false)]);
+            frame(&mut doc, &mut state, vec![]);
+            let to = screen([p[0] + 4.0, p[1] + 4.0]);
+            frame(
+                &mut doc,
+                &mut state,
+                vec![
+                    Event::PointerMoved(sp + vec2(1.0, 1.0)),
+                    button(sp + vec2(1.0, 1.0), true),
+                ],
+            );
+            frame(&mut doc, &mut state, vec![Event::PointerMoved(to)]);
+            frame(
+                &mut doc,
+                &mut state,
+                vec![Event::PointerMoved(to), button(to, false)],
+            );
+            frame(&mut doc, &mut state, vec![]);
+            assert_eq!(
+                shape::page_points(doc.layer(1).unwrap()).len(),
+                5,
+                "point {i}"
+            );
+        }
+
+        // Escape stops editing.
+        frame(
+            &mut doc,
+            &mut state,
+            vec![Event::Key {
+                key: Key::Escape,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Default::default(),
+            }],
+        );
+        assert!(state.points.is_none());
+    }
+
+    #[test]
+    fn drawing_shapes_point_by_point() {
+        use crate::shape::{self, ShapeKind};
+        let close = |a: P2, b: P2| (a[0] - b[0]).abs() < 0.05 && (a[1] - b[1]).abs() < 0.05;
+        let elements = anchors(&[[150.5, 60.5]]);
+        let ctx = egui::Context::default();
+        let mut doc = Document::default();
+        let mut state = CanvasState::default();
+        let mut selected = None;
+        let mut time = 0.0;
+        let mut frame = |doc: &mut Document,
+                         state: &mut CanvasState,
+                         selected: &mut Option<u64>,
+                         events: Vec<Event>| {
+            // Apart enough that two clicks are not a double click.
+            time += 0.5;
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 800.0))),
+                time: Some(time),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                show(ui, doc, &elements, selected, state);
+                shape::sync(ui.ctx(), doc, !ui.input(|i| i.pointer.any_down()));
+            });
+            out.textures_delta.clear();
+        };
+        frame(&mut doc, &mut state, &mut selected, vec![]);
+        let (cam, rect) = (state.camera, state.rect);
+        let click = |p: P2| {
+            let s = cam.to_screen(rect, p);
+            let b = |pressed| Event::PointerButton {
+                pos: s,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers: Default::default(),
+            };
+            vec![Event::PointerMoved(s), b(true), b(false)]
+        };
+
+        // A polyline closed by a click on its first point becomes a polygon.
+        state.drawing = Some(Drawing::new(ShapeKind::Polyline));
+        for p in [
+            [100.0, 100.0],
+            [150.0, 61.0],
+            [180.0, 120.0],
+            [100.2, 100.2],
+        ] {
+            frame(&mut doc, &mut state, &mut selected, click(p));
+        }
+        assert!(state.drawing.is_none(), "done");
+        let id = selected.expect("the new shape is selected");
+        let l = doc.layer(id).unwrap();
+        let s = l.shape.as_ref().unwrap();
+        assert_eq!((s.kind, l.name.as_str()), (ShapeKind::Polygon, "Polygon"));
+        assert!(s.fill, "closed: filled");
+        let pts = shape::page_points(l);
+        assert_eq!(pts.len(), 3);
+        assert!(close(pts[0], [100.0, 100.0]));
+        assert!(close(pts[1], [150.5, 60.5]), "snapped: {:?}", pts[1]);
+
+        // Enter finishes an open polyline.
+        state.drawing = Some(Drawing::new(ShapeKind::Polyline));
+        for p in [[50.0, 50.0], [60.0, 70.0], [70.0, 50.0]] {
+            frame(&mut doc, &mut state, &mut selected, click(p));
+        }
+        frame(
+            &mut doc,
+            &mut state,
+            &mut selected,
+            vec![Event::Key {
+                key: Key::Enter,
+                physical_key: None,
+                pressed: true,
+                repeat: false,
+                modifiers: Default::default(),
+            }],
+        );
+        assert!(state.drawing.is_none());
+        let l = doc.layer(selected.unwrap()).unwrap();
+        let s = l.shape.as_ref().unwrap();
+        assert_eq!(
+            (s.kind, s.points.len(), s.fill),
+            (ShapeKind::Polyline, 3, false)
+        );
+
+        // A line is done at its second click.
+        state.drawing = Some(Drawing::new(ShapeKind::Line));
+        for p in [[20.0, 150.0], [80.0, 150.0]] {
+            frame(&mut doc, &mut state, &mut selected, click(p));
+        }
+        assert!(state.drawing.is_none());
+        let l = doc.layer(selected.unwrap()).unwrap();
+        assert_eq!(shape::page_points(l).len(), 2);
+        assert_eq!(doc.leaves().len(), 3);
+    }
+
+    /// Runs one canvas frame with these events, in the tests that need helpers.
+    type Frame<'a> = dyn FnMut(&mut Document, &mut CanvasState, &mut Option<u64>, Vec<Event>) + 'a;
+
+    #[test]
+    fn bezier_curves_on_the_canvas() {
+        use crate::shape::{self, ShapeKind};
+        let close = |a: P2, b: P2| (a[0] - b[0]).abs() < 0.1 && (a[1] - b[1]).abs() < 0.1;
+        let ctx = egui::Context::default();
+        let mut doc = Document::default();
+        let mut state = CanvasState::default();
+        let mut selected = None;
+        let mut time = 0.0;
+        let mut frame = |doc: &mut Document,
+                         state: &mut CanvasState,
+                         selected: &mut Option<u64>,
+                         events: Vec<Event>| {
+            time += 0.05;
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 800.0))),
+                time: Some(time),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                show(ui, doc, &[], selected, state);
+                shape::sync(ui.ctx(), doc, !ui.input(|i| i.pointer.any_down()));
+            });
+            out.textures_delta.clear();
+        };
+        frame(&mut doc, &mut state, &mut selected, vec![]);
+        let (cam, rect) = (state.camera, state.rect);
+        let s = |p: P2| cam.to_screen(rect, p);
+        let b = |p: P2, pressed, modifiers| Event::PointerButton {
+            pos: s(p),
+            button: PointerButton::Primary,
+            pressed,
+            modifiers,
+        };
+        let none = egui::Modifiers::NONE;
+        let idle = |frame: &mut Frame,
+                    doc: &mut Document,
+                    state: &mut CanvasState,
+                    selected: &mut Option<u64>| {
+            for _ in 0..10 {
+                frame(doc, state, selected, vec![]);
+            }
+        };
+
+        // Drawing: a click, a press dragged (a smooth point), a click, then Enter.
+        state.drawing = Some(Drawing::new(ShapeKind::Polyline));
+        frame(
+            &mut doc,
+            &mut state,
+            &mut selected,
+            vec![
+                Event::PointerMoved(s([100.0, 100.0])),
+                b([100.0, 100.0], true, none),
+                b([100.0, 100.0], false, none),
+            ],
+        );
+        idle(&mut frame, &mut doc, &mut state, &mut selected);
+        frame(
+            &mut doc,
+            &mut state,
+            &mut selected,
+            vec![
+                Event::PointerMoved(s([140.0, 100.0])),
+                b([140.0, 100.0], true, none),
+            ],
+        );
+        for x in [142.0, 146.0, 150.0] {
+            frame(
+                &mut doc,
+                &mut state,
+                &mut selected,
+                vec![Event::PointerMoved(s([x, 90.0]))],
+            );
+        }
+        frame(
+            &mut doc,
+            &mut state,
+            &mut selected,
+            vec![b([150.0, 90.0], false, none)],
+        );
+        idle(&mut frame, &mut doc, &mut state, &mut selected);
+        frame(
+            &mut doc,
+            &mut state,
+            &mut selected,
+            vec![
+                Event::PointerMoved(s([180.0, 100.0])),
+                b([180.0, 100.0], true, none),
+                b([180.0, 100.0], false, none),
+            ],
+        );
+        let enter = Event::Key {
+            key: Key::Enter,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: none,
+        };
+        frame(&mut doc, &mut state, &mut selected, vec![enter]);
+        assert!(state.drawing.is_none());
+        let id = selected.unwrap();
+        let l = doc.layer(id).unwrap();
+        let sh = l.shape.as_ref().unwrap();
+        assert_eq!(sh.points.len(), 3);
+        assert!(sh.is_smooth(1), "{:?}", sh.handles);
+        let [hin, hout] = shape::page_handles(l, 1);
+        assert!(close(hout.unwrap(), [150.0, 90.0]), "{hout:?}");
+        assert!(close(hin.unwrap(), [130.0, 110.0]), "mirrored: {hin:?}");
+        assert!(
+            sh.handle(0) == [[0.0; 2]; 2] && sh.handle(2) == [[0.0; 2]; 2],
+            "clicks: sharp"
+        );
+
+        // Editing: dragging the out handle turns the in handle with it...
+        state.points = Some(PointEdit::new(id));
+        let p1 = shape::page_points(l)[1];
+        let click = |p: P2| {
+            vec![
+                Event::PointerMoved(s(p)),
+                b(p, true, none),
+                b(p, false, none),
+            ]
+        };
+        frame(&mut doc, &mut state, &mut selected, click(p1));
+        idle(&mut frame, &mut doc, &mut state, &mut selected);
+        let drag = |frame: &mut Frame,
+                    doc: &mut Document,
+                    state: &mut CanvasState,
+                    selected: &mut Option<u64>,
+                    from: P2,
+                    to: P2,
+                    m: egui::Modifiers| {
+            frame(
+                doc,
+                state,
+                selected,
+                vec![
+                    Event::ModifiersChanged(m),
+                    Event::PointerMoved(s(from)),
+                    b(from, true, m),
+                ],
+            );
+            for k in 1..=4 {
+                let t = k as f32 / 4.0;
+                let p = [
+                    from[0] + (to[0] - from[0]) * t,
+                    from[1] + (to[1] - from[1]) * t,
+                ];
+                frame(doc, state, selected, vec![Event::PointerMoved(s(p))]);
+            }
+            frame(
+                doc,
+                state,
+                selected,
+                vec![
+                    b(to, false, m),
+                    Event::ModifiersChanged(egui::Modifiers::NONE),
+                ],
+            );
+            for _ in 0..10 {
+                frame(doc, state, selected, vec![]);
+            }
+        };
+        drag(
+            &mut frame,
+            &mut doc,
+            &mut state,
+            &mut selected,
+            [150.0, 90.0],
+            [140.0, 85.0],
+            none,
+        );
+        let l = doc.layer(id).unwrap();
+        let [hin, hout] = shape::page_handles(l, 1);
+        assert!(close(hout.unwrap(), [140.0, 85.0]), "{hout:?}");
+        assert!(l.shape.as_ref().unwrap().is_smooth(1));
+        assert_eq!(shape::page_points(l).len(), 3, "no point added");
+        // ...unless Alt is held.
+        drag(
+            &mut frame,
+            &mut doc,
+            &mut state,
+            &mut selected,
+            [140.0, 85.0],
+            [150.0, 100.0],
+            egui::Modifiers::ALT,
+        );
+        let l = doc.layer(id).unwrap();
+        assert!(!l.shape.as_ref().unwrap().is_smooth(1));
+        let still = shape::page_handles(l, 1)[0].unwrap();
+        assert!(close(still, hin.unwrap()), "the in handle stayed");
+
+        // A double click on the point makes it sharp: no handles left at all.
+        let p1 = shape::page_points(l)[1];
+        for pressed in [true, false, true, false] {
+            frame(
+                &mut doc,
+                &mut state,
+                &mut selected,
+                vec![Event::PointerMoved(s(p1)), b(p1, pressed, none)],
+            );
+        }
+        let sh = doc.layer(id).unwrap().shape.as_ref().unwrap();
+        assert!(sh.handles.is_empty(), "{:?}", sh.handles);
+        assert!(state.points.is_some(), "still editing");
     }
 
     #[test]

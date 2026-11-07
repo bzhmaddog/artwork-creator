@@ -8,6 +8,7 @@ use egui::{
     Color32, ColorImage, Key, KeyboardShortcut, Modifiers, RichText, TextureFilter, TextureOptions,
 };
 
+use crate::canvas_points;
 use crate::document::{Document, Layer, Node, Orientation, P2, PageSize};
 use crate::effects::cache::EffectCache;
 use crate::export::{self, ExportSettings};
@@ -18,6 +19,7 @@ use crate::layers_ui::{self, LayersPanel};
 use crate::project;
 use crate::recent::{self, RecentFiles};
 use crate::render::{self, PlacedElement, Scene};
+use crate::shape::{self, ShapeKind};
 use crate::template::{self, ElementKind, Template, TemplateEntry};
 use crate::text::{self, FontLibrary};
 use crate::view::{self, CanvasState, REAL_SIZE_ZOOM};
@@ -52,6 +54,8 @@ const SHORTCUT_EXPORT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMA
 const SHORTCUT_DUPLICATE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::D);
 const SHORTCUT_TEXT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::T);
 const SHORTCUT_IMAGE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::I);
+/// Adds a shape of the kind added last.
+const SHORTCUT_SHAPE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::R);
 const SHORTCUT_GROUP: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::G);
 const SHORTCUT_UNGROUP: KeyboardShortcut =
     KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::G);
@@ -412,6 +416,27 @@ impl ArtworkApp {
         }
     }
 
+    /// Adds a shape layer of `kind` above the selection, centered on the template. Lines,
+    /// polylines and polygons are drawn point by point on the canvas instead.
+    fn add_shape(&mut self, ctx: &egui::Context, kind: ShapeKind) {
+        self.layers_panel.shape_kind = kind;
+        if kind.has_points() {
+            self.canvas.drawing = Some(view::Drawing::new(kind));
+            self.canvas.points = None;
+            self.layers_panel.edit_points = None;
+            return;
+        }
+        let id = self.doc.alloc_id();
+        let center = Self::outline_bounds(&self.elements())
+            .map(|(c, _)| c)
+            .unwrap_or_else(|| self.doc.page_center());
+        let layer = shape::new_layer(id, kind, center);
+        let at = layers_ui::insertion_path(&mut self.doc, self.selected);
+        self.doc.insert(&at, Node::Layer(Box::new(layer)));
+        self.selected = Some(id);
+        shape::sync(ctx, &mut self.doc, true);
+    }
+
     /// Adds one layer per image file, fitted to the page, above the selection.
     fn add_images(&mut self, ctx: &egui::Context, paths: Vec<PathBuf>) {
         for path in paths {
@@ -617,7 +642,7 @@ impl ArtworkApp {
                 self.doc = doc;
                 let mut missing = Vec::new();
                 self.doc.for_each_layer_mut(|layer| {
-                    if layer.text.is_some() {
+                    if layer.is_drawn() {
                         return;
                     }
                     if Self::load_image(ctx, layer).is_err() {
@@ -629,7 +654,8 @@ impl ArtworkApp {
                     self.messages
                         .push(tr!("IMAGES_NOT_LOADED", files = missing.join("\n")));
                 }
-                // Text is laid out now, so opening doesn't count as a change.
+                // Text and shapes are laid out now, so opening doesn't count as a change.
+                shape::sync(ctx, &mut self.doc, true);
                 text::sync(ctx, &mut self.doc, &self.fonts);
                 let mut fonts = Vec::new();
                 for leaf in self.doc.leaves() {
@@ -740,9 +766,11 @@ impl ArtworkApp {
     /// Renders and writes the export on a background thread.
     fn start_export(&mut self, base: PathBuf) {
         let colors = self.canvas.element_color.map(|c| [c.r(), c.g(), c.b()]);
-        // Text is drawn again at the export resolution.
+        // Text and shapes are drawn again at the export resolution.
         let mut doc = self.doc.clone();
-        text::prepare_export(&mut doc, self.export_settings.dpi.clamp(72, 1200) as f32);
+        let dpi = self.export_settings.dpi.clamp(72, 1200) as f32;
+        text::prepare_export(&mut doc, dpi);
+        shape::prepare_export(&mut doc, dpi);
         let scene = Scene::new(
             &doc,
             self.template.as_ref(),
@@ -1156,6 +1184,16 @@ impl ArtworkApp {
                 ui.separator();
                 ui.label(format!("x {x:.1}  y {y:.1} mm"));
             }
+            if let Some(d) = &self.canvas.drawing {
+                ui.separator();
+                ui.colored_label(
+                    ui.visuals().selection.stroke.color,
+                    match d.kind {
+                        ShapeKind::Line => tr!("DRAW_LINE_HINT"),
+                        _ => tr!("DRAW_POINTS_HINT"),
+                    },
+                );
+            }
             if let Some((c, s)) = Self::outline_bounds(elements) {
                 let off = c[0] - s[0] / 2.0 < -0.01
                     || c[1] - s[1] / 2.0 < -0.01
@@ -1178,6 +1216,9 @@ impl ArtworkApp {
     fn sync_effects(&mut self, ctx: &egui::Context) {
         // Quick, smaller results while a slider or value is being dragged.
         let quick = ctx.input(|i| i.pointer.any_down());
+        // A scale given to a shape by its handles goes into its geometry once the drag
+        // is over. Shapes first: texts can follow them.
+        shape::sync(ctx, &mut self.doc, !quick);
         text::sync(ctx, &mut self.doc, &self.fonts);
         self.effect_cache.sync(ctx, &mut self.doc, quick);
     }
@@ -1437,6 +1478,9 @@ impl ArtworkApp {
         if pressed(&SHORTCUT_IMAGE) {
             self.pick_images(ctx);
         }
+        if pressed(&SHORTCUT_SHAPE) {
+            self.add_shape(ctx, self.layers_panel.shape_kind);
+        }
         if pressed(&SHORTCUT_DUPLICATE) {
             self.dirty |= layers_ui::duplicate(&mut self.doc, &mut self.selected);
         }
@@ -1465,14 +1509,28 @@ impl ArtworkApp {
                 d,
             )
         });
+        // While a shape's points are edited, the keys act on the point picked last.
+        let point = self
+            .canvas
+            .points
+            .as_ref()
+            .is_some_and(|e| e.selected.is_some());
         if del {
-            self.dirty |= layers_ui::delete(&mut self.doc, &mut self.selected);
+            self.dirty |= if point {
+                canvas_points::delete_selected(&mut self.canvas.points, &mut self.doc)
+            } else {
+                layers_ui::delete(&mut self.doc, &mut self.selected)
+            };
         }
         if fit {
             self.canvas.fit_pending = true;
         }
         if arrows != [0.0, 0.0] {
-            self.dirty |= layers_ui::nudge(&mut self.doc, self.selected, arrows);
+            self.dirty |= if point {
+                canvas_points::nudge_selected(&self.canvas.points, &mut self.doc, arrows)
+            } else {
+                layers_ui::nudge(&mut self.doc, self.selected, arrows)
+            };
         }
     }
 
@@ -1601,6 +1659,9 @@ impl eframe::App for ArtworkApp {
                 if out.add_text {
                     self.add_text(&ctx);
                 }
+                if let Some(kind) = out.add_shape {
+                    self.add_shape(&ctx, kind);
+                }
             });
 
         // Show effect changes made in the layer panel on this frame's canvas.
@@ -1610,6 +1671,11 @@ impl eframe::App for ArtworkApp {
         let elements = self.elements();
         self.canvas.distort_mode = self.layers_panel.distort;
         self.canvas.cuts = self.export_settings.cuts;
+        // Edit points is turned on and off in Properties as well as on the canvas.
+        let panel_points = self.layers_panel.edit_points;
+        if panel_points != self.canvas.points.as_ref().map(|e| e.layer) {
+            self.canvas.points = panel_points.map(view::PointEdit::new);
+        }
         egui::CentralPanel::no_frame().show(ui, |ui| {
             self.dirty |= view::show(
                 ui,
@@ -1619,6 +1685,7 @@ impl eframe::App for ArtworkApp {
                 &mut self.canvas,
             );
         });
+        self.layers_panel.edit_points = self.canvas.points.as_ref().map(|e| e.layer);
 
         self.export_window(&ctx);
         self.export_progress_window(&ctx);
@@ -1629,8 +1696,13 @@ impl eframe::App for ArtworkApp {
         self.message_modal(&ctx);
         self.close_modal(&ctx);
 
-        // Record a step once the edit is over: no button held, no text being typed.
+        // Record a step once the edit is over: no button held, no text being typed. A
+        // shape scaled by a drag that just ended takes its new size first, so the drag
+        // and that are one step.
         let finished = !ctx.input(|i| i.pointer.any_down()) && !ctx.egui_wants_keyboard_input();
+        shape::sync(&ctx, &mut self.doc, !ctx.input(|i| i.pointer.any_down()));
+        // Texts following a shape edited on the canvas go with it in the same step.
+        text::sync(&ctx, &mut self.doc, &self.fonts);
         self.history.update(&self.doc, finished);
         self.dirty = self.history.is_modified();
         self.update_title(&ctx);

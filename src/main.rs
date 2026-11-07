@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod canvas_points;
 mod canvas_text;
 mod document;
 mod effects;
@@ -14,6 +15,7 @@ mod layers_ui;
 mod project;
 mod recent;
 mod render;
+mod shape;
 mod template;
 mod text;
 mod theme;

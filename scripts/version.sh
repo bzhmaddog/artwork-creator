@@ -12,7 +12,11 @@
 #       one) under the new version, then commit and tag vX.Y.Z (and sdk-vX.Y.Z). Asks
 #       before committing. Nothing is pushed.
 #
-# How the next version is suggested, from the commit messages since the last tag:
+# Only commits that change what is shipped count: the paths in APP_PATHS (the app code,
+# translations, templates, plugin SDK and dependencies). Commits that only touch tooling,
+# CI, docs or tests are listed apart and never call for a release.
+#
+# How the next version is suggested, from the messages of those commits:
 #   - breaking change: a message containing "BREAKING", a "type!:" prefix, or a change
 #     of ABI_VERSION in the plugin SDK -> major (minor while below 1.0.0);
 #   - new feature: a message with a word such as "add", "new", "feat", "implement",
@@ -27,6 +31,7 @@ APP_TOML=Cargo.toml
 SDK_TOML=plugin-sdk/Cargo.toml
 ABI_FILE=plugin-sdk/src/abi.rs
 CHANGELOG=CHANGELOG.md
+APP_PATHS='src locales templates plugin-sdk Cargo.toml Cargo.lock'
 FEATURE_WORDS='add|added|adds|adding|new|feat|feature|features|implement|implemented|support|supports'
 
 die() {
@@ -90,7 +95,14 @@ analyse() {
         return
     fi
 
-    messages=$(git log --format='%s%n%b' "$range")
+    # shellcheck disable=SC2086 # APP_PATHS is a list of paths
+    if [ -z "$(git rev-list "$range" -- $APP_PATHS)" ]; then
+        level=
+        reason="no app changes since $tag, only tooling, CI, docs or tests"
+        return
+    fi
+    # shellcheck disable=SC2086
+    messages=$(git log --format='%s%n%b' "$range" -- $APP_PATHS)
     if git diff "$range" -- "$ABI_FILE" | grep -Eq '^[+-]pub const ABI_VERSION'; then
         level=major
         reason="the plugin interface (ABI_VERSION) changed"
@@ -99,7 +111,7 @@ analyse() {
         reason="a commit is marked as breaking"
     elif echo "$messages" | grep -Eiwq "$FEATURE_WORDS"; then
         level=minor
-        reason="new features: $(git log --format='%s' "$range" | grep -Eiw "$FEATURE_WORDS" | head -n 3 | sed 's/^/"/; s/$/"/' | paste -sd, - | sed 's/,/, /g')"
+        reason="new features: $(git log --format='%s' "$range" -- $APP_PATHS | grep -Eiw "$FEATURE_WORDS" | head -n 3 | sed 's/^/"/; s/$/"/' | paste -sd, - | sed 's/,/, /g')"
     else
         level=patch
         reason="fixes and changes only"
@@ -137,7 +149,15 @@ cmd_suggest() {
         count=$(git rev-list --count "$range")
         echo
         echo "$count commit(s) since $tag:"
-        git log --format='  %h %s' "$range"
+        # shellcheck disable=SC2086
+        app=$(git rev-list "$range" -- $APP_PATHS)
+        for c in $(git rev-list "$range"); do
+            if echo "$app" | grep -q "$c"; then
+                git log -1 --format='  %h %s' "$c"
+            else
+                git log -1 --format='  %h %s  (not in the app)' "$c"
+            fi
+        done
     fi
     echo
     next=$(suggested_version)

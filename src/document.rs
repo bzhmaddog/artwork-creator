@@ -8,6 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::effects::EffectInstance;
 use crate::effects::cache::Processed;
+use crate::i18n::tr;
 
 /// A 2D point or vector, usually in page millimetres.
 pub type P2 = [f32; 2];
@@ -536,7 +537,7 @@ pub struct Group {
 #[serde(untagged)]
 pub enum Node {
     Group(Group),
-    Layer(Layer),
+    Layer(Box<Layer>),
 }
 
 impl Node {
@@ -910,7 +911,7 @@ impl Document {
     /// loaded yet.
     pub fn load(path: &Path) -> Result<Self, String> {
         let text = std::fs::read_to_string(path)
-            .map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
+            .map_err(|e| tr!("Cannot read {path}: {e}", path = path.display(), e = e))?;
         let mut doc = Self::from_json(&text)?;
         let base = path.parent().unwrap_or(Path::new(""));
         doc.for_each_layer_mut(|layer| {
@@ -924,7 +925,7 @@ impl Document {
     /// Parses a project description, making sure new ids won't clash with saved ones.
     pub fn from_json(text: &str) -> Result<Self, String> {
         let mut doc: Document =
-            serde_json::from_str(text).map_err(|e| format!("Invalid project file: {e}"))?;
+            serde_json::from_str(text).map_err(|e| tr!("Invalid project file: {e}", e = e))?;
         let mut max_id = 0;
         for n in &mut doc.layers {
             n.for_each_node_mut(&mut |n| max_id = max_id.max(n.id()));
@@ -1056,7 +1057,7 @@ mod tests {
         layer.opacity = 0.5;
         let gid = d.alloc_id();
         let inner = Layer::new(d.alloc_id(), "inner".into(), dir.join("inner.png"));
-        d.layers.push(Node::Layer(layer));
+        d.layers.push(Node::Layer(Box::new(layer)));
         d.layers.push(Node::Group(Group {
             id: gid,
             name: "g".into(),
@@ -1064,7 +1065,7 @@ mod tests {
             locked: false,
             opacity: 0.25,
             expanded: true,
-            children: vec![Node::Layer(inner)],
+            children: vec![Node::Layer(Box::new(inner))],
         }));
         std::fs::write(&project, d.to_json_relative(&dir).unwrap()).unwrap();
         let text = std::fs::read_to_string(&project).unwrap();
@@ -1115,7 +1116,7 @@ mod tests {
         let mut d = Document::default();
         let a = Layer::new(1, "a".into(), "a.png".into());
         let b = Layer::new(2, "b".into(), "b.png".into());
-        d.layers.push(Node::Layer(a));
+        d.layers.push(Node::Layer(Box::new(a)));
         d.layers.push(Node::Group(Group {
             id: 3,
             name: "g".into(),
@@ -1123,7 +1124,7 @@ mod tests {
             locked: true,
             opacity: 1.0,
             expanded: true,
-            children: vec![Node::Layer(b)],
+            children: vec![Node::Layer(Box::new(b))],
         }));
         assert_eq!(d.path_of(2), Some(vec![1, 0]));
         assert!(d.is_within(2, 3) && !d.is_within(1, 3));

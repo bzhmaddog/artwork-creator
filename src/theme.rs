@@ -6,6 +6,8 @@
 
 use egui::{Theme, ThemePreference};
 
+use crate::i18n::tr;
+
 /// Asks the desktop for its colour scheme in the background, and makes it egui's fallback
 /// theme (used only while the window system reports none).
 pub fn detect_in_background(ctx: &egui::Context) {
@@ -88,10 +90,10 @@ fn parse_gsettings_scheme(out: &str) -> Option<Theme> {
 pub fn menu(ui: &mut egui::Ui) {
     let mut pref = ui.ctx().options(|o| o.theme_preference);
     let before = pref;
-    ui.radio_value(&mut pref, ThemePreference::System, "System")
-        .on_hover_text("Follow the operating system's light or dark setting");
-    ui.radio_value(&mut pref, ThemePreference::Light, "Light");
-    ui.radio_value(&mut pref, ThemePreference::Dark, "Dark");
+    ui.radio_value(&mut pref, ThemePreference::System, tr!("System"))
+        .on_hover_text(tr!("Follow the operating system's light or dark setting"));
+    ui.radio_value(&mut pref, ThemePreference::Light, tr!("Light"));
+    ui.radio_value(&mut pref, ThemePreference::Dark, tr!("Dark"));
     if pref != before {
         ui.ctx().set_theme(pref);
     }

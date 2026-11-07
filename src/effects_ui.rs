@@ -8,6 +8,7 @@ use serde_json::Value;
 use crate::effects::{
     Effect, EffectInstance, ParamKind, ParamSpec, Params, color_to_hex, registry,
 };
+use crate::i18n::{tr, tr_n, translate};
 use crate::layers_ui::{self, Tool};
 
 /// Drag-and-drop payload: the index of the dragged effect in the layer's stack.
@@ -35,7 +36,7 @@ const DROP_MARGIN: f32 = 16.0;
 fn drag_handle(ui: &mut Ui, active: bool) -> egui::Response {
     let size = vec2(12.0, ui.spacing().interact_size.y);
     let (rect, r) = ui.allocate_exact_size(size, Sense::drag());
-    let r = r.on_hover_text("Drag to reorder");
+    let r = r.on_hover_text(tr!("Drag to reorder"));
     if r.dragged() {
         ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
     } else if r.hovered() {
@@ -64,8 +65,8 @@ pub fn show(ui: &mut Ui, layer_id: u64, stack: &mut Vec<EffectInstance>) -> bool
     let mut added = None;
     let mut changed = false;
     let title = match stack.len() {
-        0 => "Effects".to_owned(),
-        n => format!("Effects ({n})"),
+        0 => tr!("Effects").to_owned(),
+        n => tr!("Effects ({n})", n = n),
     };
     layers_ui::section(
         ui,
@@ -88,7 +89,7 @@ pub fn show(ui: &mut Ui, layer_id: u64, stack: &mut Vec<EffectInstance>) -> bool
 /// The "Add effect" menu. Returns the effect picked.
 fn add_menu(ui: &mut Ui) -> Option<EffectInstance> {
     let mut added = None;
-    let button = layers_ui::tool_icon(ui, Tool::Add, true, "Add effect");
+    let button = layers_ui::tool_icon(ui, Tool::Add, true, tr!("Add effect"));
     egui::Popup::menu(&button).show(|ui| {
         let reg = registry();
         let mut add = |ui: &mut Ui, effect: &dyn Effect| {
@@ -112,8 +113,10 @@ fn add_menu(ui: &mut Ui) -> Option<EffectInstance> {
             }
             ui.separator();
             let title = format!("{} {}", plugin.name, plugin.version);
-            ui.weak(title.trim_end())
-                .on_hover_text(format!("Plugin loaded from {}", plugin.path.display()));
+            ui.weak(title.trim_end()).on_hover_text(tr!(
+                "Plugin loaded from {path}",
+                path = plugin.path.display()
+            ));
             for effect in effects {
                 add(ui, effect);
             }
@@ -123,8 +126,8 @@ fn add_menu(ui: &mut Ui) -> Option<EffectInstance> {
             let n = reg.errors.len();
             ui.label(
                 RichText::new(format!(
-                    "⚠ {n} plugin problem{}",
-                    if n == 1 { "" } else { "s" }
+                    "⚠ {}",
+                    tr_n!("{n} plugin problem", "{n} plugin problems", n)
                 ))
                 .color(ui.visuals().warn_fg_color),
             )
@@ -140,12 +143,14 @@ fn stack_ui(ui: &mut Ui, layer_id: u64, stack: &mut Vec<EffectInstance>) -> bool
     if stack.is_empty() {
         // Centred, every wrapped line too.
         ui.vertical_centered(|ui| {
-            ui.weak("Effects change how the image looks without changing its file.");
+            ui.weak(tr!(
+                "Effects change how the image looks without changing its file."
+            ));
         });
         return changed;
     }
     if stack.len() > 1 {
-        ui.weak("Applied top to bottom. Drag the dots to reorder.");
+        ui.weak(tr!("Applied top to bottom. Drag the dots to reorder."));
     }
 
     let mut remove = None;
@@ -164,7 +169,9 @@ fn stack_ui(ui: &mut Ui, layer_id: u64, stack: &mut Vec<EffectInstance>) -> bool
                 layer: layer_id,
                 index: i,
             });
-            let name = effect.map_or("Missing effect", |e| e.name()).to_owned();
+            let name = effect
+                .map_or(tr!("Missing effect"), |e| e.name())
+                .to_owned();
             if handle.dragged()
                 && let Some(p) = ui.ctx().pointer_interact_pos()
             {
@@ -182,7 +189,7 @@ fn stack_ui(ui: &mut Ui, layer_id: u64, stack: &mut Vec<EffectInstance>) -> bool
                     .show_header(ui, |ui| {
                         changed |= ui
                             .checkbox(&mut inst.enabled, "")
-                            .on_hover_text("Apply this effect")
+                            .on_hover_text(tr!("Apply this effect"))
                             .changed();
                         let (text, tip) = match effect {
                             Some(e) => {
@@ -191,11 +198,12 @@ fn stack_ui(ui: &mut Ui, layer_id: u64, stack: &mut Vec<EffectInstance>) -> bool
                                 (t, e.description().to_owned())
                             }
                             None => (
-                                RichText::new("Missing effect").color(ui.visuals().warn_fg_color),
-                                format!(
-                                    "\"{}\" is not available: its plugin may not be installed.\n\
-                                 It is kept in the project but not applied.",
-                                    inst.effect
+                                RichText::new(tr!("Missing effect"))
+                                    .color(ui.visuals().warn_fg_color),
+                                tr!(
+                                    "\"{id}\" is not available: its plugin may not be installed.\n\
+                                     It is kept in the project but not applied.",
+                                    id = inst.effect
                                 ),
                             ),
                         };
@@ -206,19 +214,19 @@ fn stack_ui(ui: &mut Ui, layer_id: u64, stack: &mut Vec<EffectInstance>) -> bool
                         r.context_menu(|ui| {
                             if let Some(e) = effect
                                 && !e.params().is_empty()
-                                && ui.button("Reset to defaults").clicked()
+                                && ui.button(tr!("Reset to defaults")).clicked()
                             {
                                 let enabled = inst.enabled;
                                 *inst = EffectInstance::new(e);
                                 inst.enabled = enabled;
                                 changed = true;
                             }
-                            if ui.button("Remove").clicked() {
+                            if ui.button(tr!("Remove")).clicked() {
                                 remove = Some(i);
                             }
                         });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if layers_ui::tool_button(ui, Tool::Delete, true, "Remove") {
+                            if layers_ui::tool_button(ui, Tool::Delete, true, tr!("Remove")) {
                                 remove = Some(i);
                             }
                         });
@@ -281,13 +289,16 @@ fn params_ui(
         return false;
     }
     let mut changed = false;
+    // Built-in labels are translated; plugins' are shown as they give them.
+    let builtin = effect.plugin().is_none();
     egui::Grid::new(("effect_params", salt))
         .num_columns(2)
         .spacing([8.0, 4.0])
         .show(ui, |ui| {
             for spec in specs {
-                ui.label(&spec.label);
-                if let Some(v) = param_ui(ui, salt, spec, &Params::new(specs, &inst.params)) {
+                ui.label(label_text(builtin, &spec.label));
+                let params = Params::new(specs, &inst.params);
+                if let Some(v) = param_ui(ui, salt, spec, builtin, &params) {
                     inst.params.insert(spec.id.clone(), v);
                     changed = true;
                 }
@@ -297,8 +308,19 @@ fn params_ui(
     changed
 }
 
+/// A parameter or option label, translated for a built-in effect.
+fn label_text(builtin: bool, text: &str) -> &str {
+    if builtin { translate(text) } else { text }
+}
+
 /// One parameter's control. Returns the new value if it changed.
-fn param_ui(ui: &mut Ui, salt: (u64, usize), spec: &ParamSpec, p: &Params) -> Option<Value> {
+fn param_ui(
+    ui: &mut Ui,
+    salt: (u64, usize),
+    spec: &ParamSpec,
+    builtin: bool,
+    p: &Params,
+) -> Option<Value> {
     let id = spec.id.as_str();
     match &spec.kind {
         ParamKind::Float {
@@ -338,13 +360,17 @@ fn param_ui(ui: &mut Ui, salt: (u64, usize), spec: &ParamSpec, p: &Params) -> Op
             let label = options
                 .iter()
                 .find(|(o, _)| *o == current)
-                .map_or(current.as_str(), |(_, l)| l.as_str());
+                .map_or(current.as_str(), |(_, l)| label_text(builtin, l));
             let mut picked = None;
             ComboBox::from_id_salt(("effect_choice", salt, id))
                 .selected_text(label)
                 .show_ui(ui, |ui| {
                     for (o, l) in options {
-                        if ui.selectable_label(*o == current, l).clicked() && *o != current {
+                        if ui
+                            .selectable_label(*o == current, label_text(builtin, l))
+                            .clicked()
+                            && *o != current
+                        {
                             picked = Some(Value::from(o.clone()));
                         }
                     }

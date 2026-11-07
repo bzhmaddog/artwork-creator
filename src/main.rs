@@ -8,6 +8,7 @@ mod effects_ui;
 mod export;
 mod file_dialog;
 mod history;
+mod i18n;
 mod layers_ui;
 mod project;
 mod recent;

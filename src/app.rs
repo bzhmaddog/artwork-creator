@@ -13,6 +13,7 @@ use crate::effects::cache::EffectCache;
 use crate::export::{self, ExportSettings};
 use crate::file_dialog::{self, FileBrowser, Filter, Purpose, Request};
 use crate::history::History;
+use crate::i18n::{self, tr, tr_n, tr_noop, translate};
 use crate::layers_ui::{self, LayersPanel};
 use crate::project;
 use crate::recent::{self, RecentFiles};
@@ -27,17 +28,23 @@ const MAX_PREVIEW_SIDE: u32 = 2048;
 /// Width of the preview in the Export window, in points.
 const EXPORT_PREVIEW_WIDTH: f32 = 360.0;
 const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp", "gif"];
-const IMAGE_FILTERS: &[Filter] = &[Filter::new("Images", IMAGE_EXTENSIONS)];
+const IMAGE_FILTERS: &[Filter] = &[Filter::new(tr_noop!("Images"), IMAGE_EXTENSIONS)];
 const EXPORT_FILTERS: &[Filter] = &[Filter::new("PNG / PDF", &["png", "pdf"])];
 /// Projects that can be opened: archives and linked JSON projects.
 const OPEN_PROJECT_FILTERS: &[Filter] = &[Filter::new(
-    "Artwork project",
+    tr_noop!("Artwork project"),
     &[project::EXTENSION, "json"],
 )];
 /// The two formats a project can be saved in, the default first.
 const SAVE_PROJECT_FILTERS: &[Filter] = &[
-    Filter::new("Artwork project, images included", &[project::EXTENSION]),
-    Filter::new("Linked JSON project, images as separate files", &["json"]),
+    Filter::new(
+        tr_noop!("Artwork project, images included"),
+        &[project::EXTENSION],
+    ),
+    Filter::new(
+        tr_noop!("Linked JSON project, images as separate files"),
+        &["json"],
+    ),
 ];
 
 const SHORTCUT_NEW: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::N);
@@ -92,6 +99,8 @@ pub struct ArtworkApp {
     /// Modification times of the current template's files, to reload on change.
     template_stamp: Vec<Option<SystemTime>>,
     last_template_check: Instant,
+    /// Interface language: the system's or a chosen one.
+    language: i18n::Preference,
 }
 
 /// A save or export held until the user agrees to replace existing files.
@@ -127,6 +136,8 @@ impl ArtworkApp {
             o.input_options.surrender_focus_on = egui::SurrenderFocusOn::Presses;
         });
         crate::theme::detect_in_background(&cc.egui_ctx);
+        let language = i18n::Preference::load(cc.storage);
+        i18n::set(language.language());
         let templates_dir = template::templates_dir();
         let templates = templates_dir
             .as_deref()
@@ -135,9 +146,11 @@ impl ArtworkApp {
         let mut messages = Vec::new();
         if templates.is_empty() {
             messages.push(
-                "No controller templates found. Put a folder containing a .dxf file in a \"templates\" \
-                 folder next to the program."
-                    .to_owned(),
+                tr!(
+                    "No controller templates found. Put a folder containing a .dxf file in a \
+                     \"templates\" folder next to the program."
+                )
+                .to_owned(),
             );
         }
         let mut app = Self {
@@ -166,6 +179,7 @@ impl ArtworkApp {
             overwrite: None,
             template_stamp: Vec::new(),
             last_template_check: Instant::now(),
+            language,
         };
         log::info!("native file dialogs: {}", app.native_dialogs);
         if let Some(first) = app.templates.first().map(|t| t.id.clone()) {
@@ -233,12 +247,13 @@ impl ArtworkApp {
         let Some(id) = id else { return };
         let Some(entry) = self.templates.iter().find(|t| t.id == id) else {
             self.messages
-                .push(format!("Template \"{id}\" is not installed."));
+                .push(tr!("Template \"{id}\" is not installed.", id = id));
             return;
         };
         if let Some(e) = &entry.config_error {
-            self.messages.push(format!(
-                "Invalid template configuration, using defaults.\n{e}"
+            self.messages.push(tr!(
+                "Invalid template configuration, using defaults.\n{e}",
+                e = e
             ));
         }
         match template::load(entry) {
@@ -330,17 +345,28 @@ impl ArtworkApp {
         let data = match &layer.data {
             Some(data) => data.clone(),
             None => {
-                let bytes = std::fs::read(&layer.source)
-                    .map_err(|e| format!("Cannot open {}: {e}", layer.source.display()))?;
+                let bytes = std::fs::read(&layer.source).map_err(|e| {
+                    tr!(
+                        "Cannot open {path}: {e}",
+                        path = layer.source.display(),
+                        e = e
+                    )
+                })?;
                 let data = Arc::new(bytes);
                 layer.data = Some(data.clone());
                 data
             }
         };
         let img = image::load_from_memory(&data)
-            .map_err(|e| format!("Cannot open {}: {e}", layer.source.display()))?
+            .map_err(|e| {
+                tr!(
+                    "Cannot open {path}: {e}",
+                    path = layer.source.display(),
+                    e = e
+                )
+            })?
             .to_rgba8();
-        let invalid = || format!("{} has no pixels", layer.source.display());
+        let invalid = || tr!("{path} has no pixels", path = layer.source.display());
         let (w, h) = img.dimensions();
         layer.size_px = [w, h];
         let display = render::downscale(&img, MAX_TEXTURE_SIDE);
@@ -370,13 +396,13 @@ impl ArtworkApp {
             let name = path
                 .file_stem()
                 .map(|s| s.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "Image".into());
+                .unwrap_or_else(|| tr!("Image").into());
             let mut layer = Layer::new(id, name, path);
             match Self::load_image(ctx, &mut layer) {
                 Ok(()) => {
                     layer.fit_to(self.doc.page_center(), self.doc.page_mm(), false);
                     let at = layers_ui::insertion_path(&mut self.doc, self.selected);
-                    self.doc.insert(&at, Node::Layer(layer));
+                    self.doc.insert(&at, Node::Layer(Box::new(layer)));
                     self.selected = Some(id);
                     self.dirty = true;
                 }
@@ -492,19 +518,24 @@ impl ArtworkApp {
         let response = egui::Modal::new(egui::Id::unique("overwrite")).show(ctx, |ui| {
             ui.set_max_width(420.0);
             ui.strong(if names.len() == 1 {
-                "Replace the existing file?"
+                tr!("Replace the existing file?")
             } else {
-                "Replace the existing files?"
+                tr!("Replace the existing files?")
             });
             ui.add_space(6.0);
             for name in &names {
                 ui.label(name);
             }
-            ui.weak(format!("already exists in {folder}"));
+            ui.weak(tr_n!(
+                "already exists in {folder}",
+                "already exist in {folder}",
+                names.len(),
+                folder = folder
+            ));
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                replace |= ui.button("Replace").clicked();
-                cancel |= ui.button("Cancel").clicked();
+                replace |= ui.button(tr!("Replace")).clicked();
+                cancel |= ui.button(tr!("Cancel")).clicked();
             });
         });
         cancel |= response.should_close();
@@ -523,7 +554,7 @@ impl ArtworkApp {
             ctx,
             Request {
                 purpose: Purpose::AddImages,
-                title: "Add images",
+                title: tr!("Add images"),
                 save: false,
                 multiple: true,
                 filters: IMAGE_FILTERS,
@@ -552,7 +583,7 @@ impl ArtworkApp {
             ctx,
             Request {
                 purpose: Purpose::OpenProject,
-                title: "Open project",
+                title: tr!("Open project"),
                 save: false,
                 multiple: false,
                 filters: OPEN_PROJECT_FILTERS,
@@ -574,9 +605,9 @@ impl ArtworkApp {
                     }
                 });
                 if !missing.is_empty() {
-                    self.messages.push(format!(
-                        "These images could not be loaded:\n{}",
-                        missing.join("\n")
+                    self.messages.push(tr!(
+                        "These images could not be loaded:\n{files}",
+                        files = missing.join("\n")
                     ));
                 }
                 let template = self.doc.template.clone();
@@ -605,7 +636,7 @@ impl ArtworkApp {
                 ctx,
                 Request {
                     purpose: Purpose::SaveProject,
-                    title: "Save project",
+                    title: tr!("Save project"),
                     save: true,
                     multiple: false,
                     filters: SAVE_PROJECT_FILTERS,
@@ -639,10 +670,10 @@ impl ArtworkApp {
         match saved {
             Ok(missing) => {
                 if !missing.is_empty() {
-                    self.messages.push(format!(
+                    self.messages.push(tr!(
                         "Saved, but the image files of these layers are missing, so \
-                         the saved project can't show them:\n{}",
-                        missing.join("\n")
+                         the saved project can't show them:\n{layers}",
+                        layers = missing.join("\n")
                     ));
                 }
                 self.recent.add(&path);
@@ -666,7 +697,7 @@ impl ArtworkApp {
                     .trim_end_matches(".artwork")
                     .to_owned()
             })
-            .unwrap_or_else(|| "Untitled".into())
+            .unwrap_or_else(|| tr!("Untitled").into())
     }
 
     // ---- Export ----
@@ -703,10 +734,12 @@ impl ArtworkApp {
             // Success is silent: the progress window closing is enough.
             Some(Ok(Ok(paths))) => log::info!("exported {paths:?}"),
             Some(Ok(Err(e))) if e == render::CANCELLED => {
-                self.messages.push("Export cancelled.".into())
+                self.messages.push(tr!("Export cancelled.").into())
             }
-            Some(Ok(Err(e))) => self.messages.push(format!("Export failed: {e}")),
-            Some(Err(_)) => self.messages.push("Export failed unexpectedly.".into()),
+            Some(Ok(Err(e))) => self.messages.push(tr!("Export failed: {e}", e = e)),
+            Some(Err(_)) => self
+                .messages
+                .push(tr!("Export failed unexpectedly.").into()),
             None => {}
         }
     }
@@ -721,21 +754,21 @@ impl ArtworkApp {
             let exists = path.is_file();
             // The format, shown on the right like a shortcut.
             let kind = if project::is_archive(path) {
-                "Artwork"
+                tr!("Artwork")
             } else {
-                "Linked JSON"
+                tr!("Linked JSON")
             };
             let button = egui::Button::new(recent::label(path)).shortcut_text(kind);
             let r = ui
                 .add_enabled(exists, button)
                 .on_hover_text(path.display().to_string())
-                .on_disabled_hover_text(format!("Not found: {}", path.display()));
+                .on_disabled_hover_text(tr!("Not found: {path}", path = path.display()));
             if r.clicked() {
                 open = Some(path.clone());
             }
         }
         ui.separator();
-        if ui.button("Clear list").clicked() {
+        if ui.button(tr!("Clear list")).clicked() {
             self.recent.clear();
         }
         if let Some(path) = open {
@@ -747,7 +780,7 @@ impl ArtworkApp {
     /// File, Edit and View menus.
     fn menu_bar(&mut self, ui: &mut egui::Ui) {
         egui::MenuBar::new().ui(ui, |ui| {
-            ui.menu_button("File", |ui| {
+            ui.menu_button(tr!("File"), |ui| {
                 let ctx = ui.ctx().clone();
                 let item = |ui: &mut egui::Ui, label: &str, sc: Option<&KeyboardShortcut>| {
                     let mut b = egui::Button::new(label);
@@ -756,60 +789,61 @@ impl ArtworkApp {
                     }
                     ui.add(b).clicked()
                 };
-                if item(ui, "New", Some(&SHORTCUT_NEW)) {
+                if item(ui, tr!("New"), Some(&SHORTCUT_NEW)) {
                     self.new_project();
                 }
-                if item(ui, "Open…", Some(&SHORTCUT_OPEN)) {
+                if item(ui, tr!("Open…"), Some(&SHORTCUT_OPEN)) {
                     self.open_project(&ctx);
                 }
                 ui.add_enabled_ui(!self.recent.paths().is_empty(), |ui| {
-                    ui.menu_button("Open Recent", |ui| self.recent_menu(ui));
+                    ui.menu_button(tr!("Open Recent"), |ui| self.recent_menu(ui));
                 });
-                if item(ui, "Save", Some(&SHORTCUT_SAVE)) {
+                if item(ui, tr!("Save"), Some(&SHORTCUT_SAVE)) {
                     self.save_project(&ctx, false);
                 }
-                if item(ui, "Save As…", None) {
+                if item(ui, tr!("Save As…"), None) {
                     self.save_project(&ctx, true);
                 }
                 ui.separator();
-                if item(ui, "Export…", Some(&SHORTCUT_EXPORT)) {
+                if item(ui, tr!("Export…"), Some(&SHORTCUT_EXPORT)) {
                     self.export_open = true;
                 }
                 ui.separator();
-                if item(ui, "Quit", None) {
+                if item(ui, tr!("Quit"), None) {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             });
-            ui.menu_button("Edit", |ui| {
+            ui.menu_button(tr!("Edit"), |ui| {
                 let ctx = ui.ctx().clone();
-                let undo =
-                    egui::Button::new("Undo").shortcut_text(ctx.format_shortcut(&SHORTCUT_UNDO));
+                let undo = egui::Button::new(tr!("Undo"))
+                    .shortcut_text(ctx.format_shortcut(&SHORTCUT_UNDO));
                 if ui.add_enabled(self.history.can_undo(), undo).clicked() {
                     self.undo();
                 }
-                let redo =
-                    egui::Button::new("Redo").shortcut_text(ctx.format_shortcut(&SHORTCUT_REDO));
+                let redo = egui::Button::new(tr!("Redo"))
+                    .shortcut_text(ctx.format_shortcut(&SHORTCUT_REDO));
                 if ui.add_enabled(self.history.can_redo(), redo).clicked() {
                     self.redo();
                 }
             });
-            ui.menu_button("View", |ui| {
-                if ui.button("Fit page").clicked() {
+            ui.menu_button(tr!("View"), |ui| {
+                if ui.button(tr!("Fit page")).clicked() {
                     self.canvas.fit_pending = true;
                 }
-                if ui.button("Real size (100%)").clicked() {
+                if ui.button(tr!("Real size (100%)")).clicked() {
                     self.canvas.set_zoom(REAL_SIZE_ZOOM);
                 }
-                ui.checkbox(&mut self.canvas.show_template, "Show template lines");
-                ui.checkbox(&mut self.canvas.preview_cuts, "Preview cuts");
+                ui.checkbox(&mut self.canvas.show_template, tr!("Show template lines"));
+                ui.checkbox(&mut self.canvas.preview_cuts, tr!("Preview cuts"));
                 ui.separator();
-                ui.menu_button("Theme", crate::theme::menu);
+                ui.menu_button(tr!("Theme"), crate::theme::menu);
+                ui.menu_button(tr!("Language"), |ui| i18n::menu(ui, &mut self.language));
             });
-            ui.menu_button("Tools", |ui| {
-                ui.menu_button("Templates", |ui| {
+            ui.menu_button(tr!("Tools"), |ui| {
+                ui.menu_button(tr!("Templates"), |ui| {
                     if ui
-                        .button("Rescan templates")
-                        .on_hover_text("Look again for templates added, changed or removed")
+                        .button(tr!("Rescan templates"))
+                        .on_hover_text(tr!("Look again for templates added, changed or removed"))
                         .clicked()
                     {
                         self.rescan_templates();
@@ -833,17 +867,17 @@ impl ArtworkApp {
 
     /// Left panel: template, page, background, template placement and elements.
     fn settings_panel(&mut self, ui: &mut egui::Ui) {
-        ui.heading("Controller");
+        ui.heading(tr!("Controller"));
         let current = self
             .current_entry()
             .map(|t| t.name.clone())
-            .unwrap_or_else(|| "None".into());
+            .unwrap_or_else(|| tr!("None").into());
         let mut choice = self.doc.template.clone();
         egui::ComboBox::from_id_salt("template")
             .width(ui.available_width())
             .selected_text(current)
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut choice, None, "None");
+                ui.selectable_value(&mut choice, None, tr!("None"));
                 for t in &self.templates {
                     ui.selectable_value(&mut choice, Some(t.id.clone()), &t.name);
                 }
@@ -853,7 +887,7 @@ impl ArtworkApp {
         }
 
         ui.separator();
-        ui.heading("Page");
+        ui.heading(tr!("Page"));
         let before = (self.doc.page, self.doc.orientation);
         egui::ComboBox::from_id_salt("page")
             .width(ui.available_width())
@@ -867,9 +901,13 @@ impl ArtworkApp {
             ui.radio_value(
                 &mut self.doc.orientation,
                 Orientation::Landscape,
-                "Landscape",
+                tr!("Landscape"),
             );
-            ui.radio_value(&mut self.doc.orientation, Orientation::Portrait, "Portrait");
+            ui.radio_value(
+                &mut self.doc.orientation,
+                Orientation::Portrait,
+                tr!("Portrait"),
+            );
         });
         if before != (self.doc.page, self.doc.orientation) {
             if let (Some(t), Some(e)) = (&self.template, self.current_entry()) {
@@ -879,7 +917,7 @@ impl ArtworkApp {
             self.dirty = true;
         }
         ui.horizontal(|ui| {
-            ui.label("Background");
+            ui.label(tr!("Background"));
             let [r, g, b] = self.doc.background;
             let mut c = Color32::from_rgb(r, g, b);
             if ui.color_edit_button_srgba(&mut c).changed() {
@@ -892,7 +930,7 @@ impl ArtworkApp {
             crate::layers_ui::section(
                 ui,
                 "template",
-                RichText::new("Template").heading(),
+                RichText::new(tr!("Template")).heading(),
                 |_| false,
                 |ui| self.template_settings(ui),
             );
@@ -910,7 +948,7 @@ impl ArtworkApp {
         let before = self.doc.template_placement;
         let p = &mut self.doc.template_placement;
         ui.horizontal(|ui| {
-            ui.label("Rotation");
+            ui.label(tr!("Rotation"));
             for deg in [0, 90, 180, 270] {
                 if ui
                     .selectable_label(p.rotation == deg, format!("{deg}°"))
@@ -921,12 +959,12 @@ impl ArtworkApp {
             }
         });
         ui.horizontal(|ui| {
-            ui.label("Flip");
-            ui.checkbox(&mut p.flip_x, "Horizontal");
-            ui.checkbox(&mut p.flip_y, "Vertical");
+            ui.label(tr!("Flip"));
+            ui.checkbox(&mut p.flip_x, tr!("Horizontal"));
+            ui.checkbox(&mut p.flip_y, tr!("Vertical"));
         });
         ui.horizontal(|ui| {
-            ui.label("Offset");
+            ui.label(tr!("Offset"));
             ui.add(
                 egui::DragValue::new(&mut p.offset_mm[0])
                     .speed(0.2)
@@ -942,33 +980,29 @@ impl ArtworkApp {
                     .suffix(" mm"),
             );
         });
-        if ui.small_button("Centre on page").clicked() {
+        if ui.small_button(tr!("Centre on page")).clicked() {
             p.offset_mm = [0.0, 0.0];
         }
 
         ui.add_space(4.0);
-        ui.strong("Elements");
+        ui.strong(tr!("Elements"));
         for e in &t.elements {
             let k = e.kind.index();
             ui.horizontal(|ui| {
                 ui.add_enabled_ui(self.canvas.show_template, |ui| {
                     ui.checkbox(&mut self.canvas.element_show[k], "")
-                        .on_hover_text("Show its lines on the canvas");
+                        .on_hover_text(tr!("Show its lines on the canvas"));
                 });
                 ui.color_edit_button_srgba(&mut self.canvas.element_color[k])
-                    .on_hover_text("Line colour, on screen and in the export");
-                ui.label(&e.name);
-                ui.weak(format!(
-                    "{} shape{}",
-                    e.polylines.len(),
-                    if e.polylines.len() == 1 { "" } else { "s" }
-                ));
+                    .on_hover_text(tr!("Line colour, on screen and in the export"));
+                ui.label(translate(&e.name));
+                ui.weak(tr_n!("{n} shape", "{n} shapes", e.polylines.len()));
             });
         }
-        ui.checkbox(&mut self.canvas.preview_cuts, "Preview cuts")
-            .on_hover_text(
-                "Cover what the export leaves blank: outside the outline and inside holes",
-            );
+        ui.checkbox(&mut self.canvas.preview_cuts, tr!("Preview cuts"))
+            .on_hover_text(tr!(
+                "Cover what the export leaves blank: outside the outline and inside holes"
+            ));
 
         ui.add_space(4.0);
         let page = self.doc.page_mm();
@@ -980,9 +1014,9 @@ impl ArtworkApp {
             if ui
                 .add_enabled(
                     default.is_some_and(|d| d != current),
-                    egui::Button::new("Reset to default").small(),
+                    egui::Button::new(tr!("Reset to default")).small(),
                 )
-                .on_hover_text("Use the placement from template.json")
+                .on_hover_text(tr!("Use the placement from template.json"))
                 .clicked()
                 && let Some(d) = default
             {
@@ -991,9 +1025,11 @@ impl ArtworkApp {
             if ui
                 .add_enabled(
                     default.is_some_and(|d| d != current),
-                    egui::Button::new("Save as default").small(),
+                    egui::Button::new(tr!("Save as default")).small(),
                 )
-                .on_hover_text("Write this placement into the template's template.json")
+                .on_hover_text(tr!(
+                    "Write this placement into the template's template.json"
+                ))
                 .clicked()
             {
                 let id = self.doc.template.clone();
@@ -1010,7 +1046,7 @@ impl ArtworkApp {
             }
         });
         if let Some(e) = self.current_entry() {
-            ui.weak(format!("Config: {}", e.config_path().display()));
+            ui.weak(tr!("Config: {path}", path = e.config_path().display()));
         }
         if self.doc.template_placement != before {
             self.dirty = true;
@@ -1021,29 +1057,41 @@ impl ArtworkApp {
     /// Bottom bar: zoom, page size, cursor position and warnings.
     fn status_bar(&mut self, ui: &mut egui::Ui, elements: &[PlacedElement]) {
         ui.horizontal(|ui| {
-            if ui.small_button("−").on_hover_text("Zoom out").clicked() {
+            if ui
+                .small_button("−")
+                .on_hover_text(tr!("Zoom out"))
+                .clicked()
+            {
                 self.canvas.zoom_centered(1.0 / 1.25);
             }
             ui.label(format!(
                 "{:.0}%",
                 self.canvas.camera.zoom / REAL_SIZE_ZOOM * 100.0
             ));
-            if ui.small_button("+").on_hover_text("Zoom in").clicked() {
+            if ui.small_button("+").on_hover_text(tr!("Zoom in")).clicked() {
                 self.canvas.zoom_centered(1.25);
             }
             if ui
-                .small_button("Fit")
-                .on_hover_text("Fit page (F)")
+                .small_button(tr!("Fit"))
+                .on_hover_text(tr!("Fit page (F)"))
                 .clicked()
             {
                 self.canvas.fit_pending = true;
             }
-            if ui.small_button("100%").on_hover_text("Real size").clicked() {
+            if ui
+                .small_button("100%")
+                .on_hover_text(tr!("Real size"))
+                .clicked()
+            {
                 self.canvas.set_zoom(REAL_SIZE_ZOOM);
             }
             ui.separator();
             let [pw, ph] = self.doc.page_mm();
-            ui.label(format!("Page {pw:.0} x {ph:.0} mm"));
+            ui.label(tr!(
+                "Page {w} x {h} mm",
+                w = format!("{pw:.0}"),
+                h = format!("{ph:.0}")
+            ));
             if let Some([x, y]) = self.canvas.cursor_mm {
                 ui.separator();
                 ui.label(format!("x {x:.1}  y {y:.1} mm"));
@@ -1057,14 +1105,14 @@ impl ArtworkApp {
                     ui.separator();
                     ui.colored_label(
                         ui.visuals().warn_fg_color,
-                        "Template does not fit on this page",
+                        tr!("Template does not fit on this page"),
                     );
                 }
             }
             if self.export_job.is_some() {
                 ui.separator();
                 ui.spinner();
-                ui.label("Exporting…");
+                ui.label(tr!("Exporting…"));
             }
         });
     }
@@ -1132,10 +1180,10 @@ impl ArtworkApp {
         let cancelling = self.export_progress.is_cancelled();
         egui::Modal::new(egui::Id::unique("export-progress")).show(ctx, |ui| {
             ui.set_width(320.0);
-            ui.heading("Exporting");
+            ui.heading(tr!("Exporting"));
             ui.add_space(4.0);
             ui.label(if cancelling {
-                "Cancelling…"
+                tr!("Cancelling…")
             } else {
                 stage.as_str()
             });
@@ -1152,7 +1200,7 @@ impl ArtworkApp {
                 ));
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if ui
-                        .add_enabled(!cancelling, egui::Button::new("Cancel"))
+                        .add_enabled(!cancelling, egui::Button::new(tr!("Cancel")))
                         .clicked()
                     {
                         self.export_progress.cancel();
@@ -1176,7 +1224,7 @@ impl ArtworkApp {
             .map(|(_, t)| (t.id(), t.size_vec2()));
         let mut open = self.export_open;
         let mut go = false;
-        egui::Window::new("Export")
+        egui::Window::new(tr!("Export"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
@@ -1188,7 +1236,7 @@ impl ArtworkApp {
                             egui::Frame::new()
                                 .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
                                 .show(ui, |ui| ui.image((tex, size)));
-                            ui.weak("Preview");
+                            ui.weak(tr!("Preview"));
                         });
                         ui.add_space(8.0);
                     }
@@ -1198,12 +1246,12 @@ impl ArtworkApp {
                         ui.set_min_width(250.0);
                         let s = &mut self.export_settings;
                         ui.horizontal(|ui| {
-                            ui.label("Formats");
+                            ui.label(tr!("Formats"));
                             ui.checkbox(&mut s.png, "PNG");
                             ui.checkbox(&mut s.pdf, "PDF");
                         });
                         ui.horizontal(|ui| {
-                            ui.label("Resolution");
+                            ui.label(tr!("Resolution"));
                             ui.add(
                                 egui::DragValue::new(&mut s.dpi)
                                     .range(72..=1200)
@@ -1214,38 +1262,49 @@ impl ArtworkApp {
                         let has = |k: ElementKind| template.is_some_and(|t| t.has(k));
                         if template.is_some() {
                             ui.add_space(4.0);
-                            ui.strong("Template");
+                            ui.strong(tr!("Template"));
                             ui.horizontal(|ui| {
-                                ui.label("Print lines");
+                                ui.label(tr!("Print lines"));
                                 for k in ElementKind::ALL.into_iter().filter(|&k| has(k)) {
-                                    ui.checkbox(&mut s.print_lines[k.index()], k.label());
+                                    ui.checkbox(
+                                        &mut s.print_lines[k.index()],
+                                        translate(k.label()),
+                                    );
                                 }
                             });
                             ui.add_enabled(
                                 has(ElementKind::Outline),
                                 egui::Checkbox::new(
                                     &mut s.cuts.clip_to_outline,
-                                    "Leave blank outside the outline",
+                                    tr!("Leave blank outside the outline"),
                                 ),
                             );
                             if has(ElementKind::Buttons) || has(ElementKind::Cutouts) {
                                 ui.horizontal(|ui| {
-                                    ui.label("Leave blank inside");
+                                    ui.label(tr!("Leave blank inside"));
                                     if has(ElementKind::Buttons) {
-                                        ui.checkbox(&mut s.cuts.blank_buttons, "Buttons");
+                                        ui.checkbox(&mut s.cuts.blank_buttons, tr!("Buttons"));
                                     }
                                     if has(ElementKind::Cutouts) {
-                                        ui.checkbox(&mut s.cuts.blank_cutouts, "Cutouts");
+                                        ui.checkbox(&mut s.cuts.blank_cutouts, tr!("Cutouts"));
                                     }
                                 });
                             }
                             ui.add_space(4.0);
                         }
                         let [w, h] = render::pixel_size(self.doc.page_mm(), s.dpi as f32);
-                        ui.weak(format!("{} at {w} x {h} px", self.doc.page.label()));
+                        ui.weak(tr!(
+                            "{page} at {w} x {h} px",
+                            page = self.doc.page.label(),
+                            w = w,
+                            h = h
+                        ));
                         ui.add_space(6.0);
                         let can = (s.png || s.pdf) && self.export_job.is_none();
-                        if ui.add_enabled(can, egui::Button::new("Export…")).clicked() {
+                        if ui
+                            .add_enabled(can, egui::Button::new(tr!("Export…")))
+                            .clicked()
+                        {
                             go = true;
                         }
                     });
@@ -1258,7 +1317,7 @@ impl ArtworkApp {
                 ctx,
                 Request {
                     purpose: Purpose::Export,
-                    title: "Export artwork",
+                    title: tr!("Export artwork"),
                     save: true,
                     multiple: false,
                     filters: EXPORT_FILTERS,
@@ -1365,6 +1424,7 @@ impl eframe::App for ArtworkApp {
     /// Keeps app settings between sessions (eframe also stores the theme and window).
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         self.recent.save(storage);
+        self.language.save(storage);
     }
 
     /// One frame: input, panels, canvas and dialogs, then an undo step if the project

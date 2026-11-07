@@ -41,6 +41,8 @@ layers panel on the right](doc/capture.png)
   that only exist inside an archive are then written to an "*name* images" folder next to
   it.
   **File > Open Recent** lists the last 10 projects.
+- **English and French** interface. It follows the system language by default; choose
+  another in **View > Language**.
 
 ## Building
 
@@ -73,6 +75,12 @@ cd artwork-creator
 # Install hooks
 make hooks
 ```
+
+Before each commit, the hook runs the CI checks: `cargo fmt --check`, clippy for Linux and
+Windows (some lints only fire on one of them), and the tests on Linux. The Windows check
+is skipped if the `x86_64-pc-windows-gnu` target is not installed. Run them by hand with
+`make pre-commit`, or for one target with `make pre-commit ARGS=--linux` or
+`ARGS=--windows`.
 
 ## Templates
 
@@ -136,6 +144,18 @@ and values are passed as JSON.
 Effect ids are saved in projects, so keep them stable and prefix them with something
 unique to your plugin (`builtin.` is reserved). Effects may run on several threads at
 once.
+
+## Translations
+
+Texts are written in English in the code with `tr!("…")` (or `tr_n!` for counts, and
+`tr_noop!` where a text is defined apart from where it is shown); the English text is the
+key. Translations live in `locales/<code>.json` and are built into the program; a text
+missing there shows in English. The tests check that every marked text has a French
+translation with the same `{placeholders}`, and that `locales/fr.json` has no leftovers.
+Effects from plugins show their own names.
+
+To add a language: add a `Language` variant and its table in `src/i18n.rs`, and a
+`locales/<code>.json` file.
 
 ## Shortcuts
 

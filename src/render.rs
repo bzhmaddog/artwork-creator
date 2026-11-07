@@ -9,6 +9,7 @@ use tiny_skia::{
 
 use crate::document::{Affine, Document, Homography, Node, P2};
 use crate::effects::{self, EffectInstance};
+use crate::i18n::tr;
 use crate::template::{ElementKind, Polyline, Template};
 
 /// Width of printed cut lines.
@@ -477,7 +478,7 @@ fn draw_warped(
         {
             break;
         }
-        let next = halve(cur).ok_or("Cannot allocate a reduced image")?;
+        let next = halve(cur).ok_or(tr!("Cannot allocate a reduced image"))?;
         k *= 2.0;
         level = Some(next);
     }
@@ -485,7 +486,7 @@ fn draw_warped(
     let (sw, sh) = (src.width() as i64, src.height() as i64);
     let inv = map
         .inverse()
-        .ok_or("Degenerate perspective")?
+        .ok_or(tr!("Degenerate perspective"))?
         .then_affine(Affine::scale(1.0 / k, 1.0 / k));
 
     let (tw, th) = (target.width() as i64, target.height() as i64);
@@ -572,7 +573,7 @@ fn draw_nodes(target: &mut PixmapMut, nodes: &[SceneNode], to_px: Affine) -> Res
                     (&l.pixmap, l.map)
                 } else {
                     let (pm, pad) = effects::apply_pixmap(&l.pixmap, &l.effects, l.effects_scale)
-                        .ok_or("Cannot apply the effects of a layer")?;
+                        .ok_or(tr!("Cannot apply the effects of a layer"))?;
                     processed = Arc::new(pm);
                     // The margins the effects added lie left of and above the image.
                     let shift = Affine::translate(-(pad[0] as f32), -(pad[1] as f32));
@@ -612,7 +613,7 @@ fn draw_nodes(target: &mut PixmapMut, nodes: &[SceneNode], to_px: Affine) -> Res
                 }
                 let (w, h) = ((x1 - x0) as u32, (y1 - y0) as u32);
                 let mut buf = Pixmap::new(w, h)
-                    .ok_or_else(|| format!("Cannot allocate a {w} x {h} group buffer"))?;
+                    .ok_or_else(|| tr!("Cannot allocate a {w} x {h} group buffer", w = w, h = h))?;
                 let shift = Affine::translate(-x0 as f32, -y0 as f32);
                 draw_nodes(&mut buf.as_mut(), children, to_px.then(shift))?;
                 let paint = PixmapPaint {
@@ -644,7 +645,7 @@ pub fn compose_region(
 ) -> Result<Pixmap, String> {
     let [w, h] = size_px;
     let mut pixmap =
-        Pixmap::new(w, h).ok_or_else(|| format!("Cannot allocate a {w} x {h} image"))?;
+        Pixmap::new(w, h).ok_or_else(|| tr!("Cannot allocate a {w} x {h} image", w = w, h = h))?;
     let to_px =
         Affine::translate(-origin_mm[0], -origin_mm[1]).then(Affine::scale(px_per_mm, px_per_mm));
     draw_nodes(&mut pixmap.as_mut(), nodes, to_px)?;
@@ -674,7 +675,7 @@ pub fn compose_artwork(
 ) -> Result<Pixmap, String> {
     let [w, h] = pixel_size(scene.page_mm, dpi);
     let mut pixmap =
-        Pixmap::new(w, h).ok_or_else(|| format!("Cannot allocate a {w} x {h} image"))?;
+        Pixmap::new(w, h).ok_or_else(|| tr!("Cannot allocate a {w} x {h} image", w = w, h = h))?;
     let [r, g, b] = scene.background;
     pixmap.fill(tiny_skia::Color::from_rgba8(r, g, b, 255));
 
@@ -752,7 +753,7 @@ mod tests {
         l.size_px = [10, 10];
         l.transform.center = center;
         l.pixmap = Some(Arc::new(premultiplied_pixmap(&img).unwrap()));
-        Node::Layer(l)
+        Node::Layer(Box::new(l))
     }
 
     fn group(id: u64, opacity: f32, children: Vec<Node>) -> Node {
@@ -861,7 +862,7 @@ mod tests {
         l.transform.distort = [[0.1, 0.0], [-0.1, 0.0], [0.0, 0.0], [0.0, 0.0]];
         l.pixmap = Some(Arc::new(premultiplied_pixmap(&img).unwrap()));
         let doc = Document {
-            layers: vec![Node::Layer(l)],
+            layers: vec![Node::Layer(Box::new(l))],
             ..Default::default()
         };
         let scene = Scene::new(&doc, None, [[0; 3]; 3], [true; 3], Cuts::default());
@@ -900,7 +901,7 @@ mod tests {
         let mut scene = Scene {
             page_mm: [100.0, 50.0],
             background: [255, 0, 0],
-            layers: scene_nodes(&[Node::Layer(l)], false),
+            layers: scene_nodes(&[Node::Layer(Box::new(l))], false),
             elements: vec![
                 element(
                     ElementKind::Outline,
@@ -992,7 +993,7 @@ mod tests {
         let scene = Scene {
             page_mm: [10.0, 10.0],
             background: [255, 255, 255],
-            layers: scene_nodes(&[Node::Layer(l)], false),
+            layers: scene_nodes(&[Node::Layer(Box::new(l))], false),
             elements: Vec::new(),
             cuts: Cuts::default(),
         };

@@ -241,7 +241,7 @@ mod tests {
         l.data = Some(Arc::new(png));
         l.pixmap = Some(Arc::new(render::premultiplied_pixmap(&img).unwrap()));
         Document {
-            layers: vec![Node::Layer(l)],
+            layers: vec![Node::Layer(Box::new(l))],
             next_id: 2,
             ..Default::default()
         }
@@ -288,7 +288,7 @@ mod tests {
         // A duplicate shares the source and keeps its original's result.
         let mut copy = doc.layer(1).unwrap().clone();
         copy.id = 2;
-        doc.layers.push(Node::Layer(copy));
+        doc.layers.push(Node::Layer(Box::new(copy)));
         assert!(!cache.sync(&ctx, &mut doc, false));
         assert!(Arc::ptr_eq(
             &doc.layer(2).unwrap().fx.as_ref().unwrap().preview,
@@ -335,7 +335,7 @@ mod shadow_tests {
         }
         l.effects.push(shadow);
         let mut doc = Document {
-            layers: vec![Node::Layer(l)],
+            layers: vec![Node::Layer(Box::new(l))],
             next_id: 2,
             ..Default::default()
         };

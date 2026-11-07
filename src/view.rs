@@ -988,7 +988,7 @@ mod tests {
             let mut l = Layer::new(id, format!("l{id}"), "x.png".into());
             l.size_px = [10, 10];
             l.transform.center = [x, 50.0];
-            Node::Layer(l)
+            Node::Layer(Box::new(l))
         };
         let mut doc = Document {
             layers: vec![
@@ -1073,7 +1073,7 @@ mod tests {
         l.transform.center = [100.0, 100.0];
         l.transform.rotation_deg = 30.0;
         let mut doc = Document {
-            layers: vec![Node::Layer(l)],
+            layers: vec![Node::Layer(Box::new(l))],
             ..Default::default()
         };
         let ctx = egui::Context::default();
@@ -1184,7 +1184,7 @@ mod tests {
             l.transform.center = [100.0, 100.0];
             l.transform.rotation_deg = rotation;
             Document {
-                layers: vec![Node::Layer(l)],
+                layers: vec![Node::Layer(Box::new(l))],
                 ..Default::default()
             }
         };
@@ -1239,7 +1239,7 @@ mod tests {
             l.size_px = [100, 50];
             l.transform.center = [100.0, 100.0];
             Document {
-                layers: vec![Node::Layer(l)],
+                layers: vec![Node::Layer(Box::new(l))],
                 ..Default::default()
             }
         };

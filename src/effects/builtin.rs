@@ -3,6 +3,7 @@
 use image::RgbaImage;
 
 use super::{Effect, ParamSpec, Params, par_pixels, par_rows};
+use crate::i18n::{tr_noop, translate};
 
 type ApplyFn = fn(&mut RgbaImage, &Params, f32) -> Result<(), String>;
 type PaddingFn = fn(&Params) -> [f32; 4];
@@ -22,10 +23,10 @@ impl Effect for Builtin {
         self.id
     }
     fn name(&self) -> &str {
-        self.name
+        translate(self.name)
     }
     fn description(&self) -> &str {
-        self.description
+        translate(self.description)
     }
     fn params(&self) -> &[ParamSpec] {
         &self.params
@@ -66,93 +67,99 @@ pub fn all() -> Vec<Box<dyn Effect>> {
     vec![
         effect(
             "builtin.brightness_contrast",
-            "Brightness / Contrast",
-            "Lighten or darken, and increase or reduce contrast",
+            tr_noop!("Brightness / Contrast"),
+            tr_noop!("Lighten or darken, and increase or reduce contrast"),
             vec![
-                percent("brightness", "Brightness", -100.0, 100.0, 0.0),
-                percent("contrast", "Contrast", -100.0, 100.0, 0.0),
+                percent("brightness", tr_noop!("Brightness"), -100.0, 100.0, 0.0),
+                percent("contrast", tr_noop!("Contrast"), -100.0, 100.0, 0.0),
             ],
             brightness_contrast,
         ),
         effect(
             "builtin.hue_saturation",
-            "Hue / Saturation",
-            "Shift colours around the colour wheel and change their intensity",
+            tr_noop!("Hue / Saturation"),
+            tr_noop!("Shift colours around the colour wheel and change their intensity"),
             vec![
-                ParamSpec::float("hue", "Hue", -180.0, 180.0, 0.0)
+                ParamSpec::float("hue", tr_noop!("Hue"), -180.0, 180.0, 0.0)
                     .unit("°")
                     .decimals(0),
-                percent("saturation", "Saturation", -100.0, 100.0, 0.0),
-                percent("lightness", "Lightness", -100.0, 100.0, 0.0),
+                percent("saturation", tr_noop!("Saturation"), -100.0, 100.0, 0.0),
+                percent("lightness", tr_noop!("Lightness"), -100.0, 100.0, 0.0),
             ],
             hue_saturation,
         ),
         effect(
             "builtin.grayscale",
-            "Grayscale",
-            "Remove colour",
-            vec![percent("amount", "Amount", 0.0, 100.0, 100.0)],
+            tr_noop!("Grayscale"),
+            tr_noop!("Remove colour"),
+            vec![percent("amount", tr_noop!("Amount"), 0.0, 100.0, 100.0)],
             grayscale,
         ),
         effect(
             "builtin.sepia",
-            "Sepia",
-            "Old photograph tones",
-            vec![percent("amount", "Amount", 0.0, 100.0, 100.0)],
+            tr_noop!("Sepia"),
+            tr_noop!("Old photograph tones"),
+            vec![percent("amount", tr_noop!("Amount"), 0.0, 100.0, 100.0)],
             sepia,
         ),
         effect(
             "builtin.tint",
-            "Tint",
-            "Colour the image with one colour",
+            tr_noop!("Tint"),
+            tr_noop!("Colour the image with one colour"),
             vec![
-                ParamSpec::color("color", "Colour", [255, 140, 0, 255]),
+                ParamSpec::color("color", tr_noop!("Colour"), [255, 140, 0, 255]),
                 ParamSpec::choice(
                     "mode",
-                    "Mode",
+                    tr_noop!("Mode"),
                     &[
-                        ("colorize", "Colorize"),
-                        ("multiply", "Multiply"),
-                        ("screen", "Screen"),
+                        ("colorize", tr_noop!("Colorize")),
+                        ("multiply", tr_noop!("Multiply")),
+                        ("screen", tr_noop!("Screen")),
                     ],
                     "colorize",
                 ),
-                percent("amount", "Amount", 0.0, 100.0, 100.0),
+                percent("amount", tr_noop!("Amount"), 0.0, 100.0, 100.0),
             ],
             tint,
         ),
-        effect("builtin.invert", "Invert", "Negative image", vec![], invert),
+        effect(
+            "builtin.invert",
+            tr_noop!("Invert"),
+            tr_noop!("Negative image"),
+            vec![],
+            invert,
+        ),
         effect(
             "builtin.posterize",
-            "Posterize",
-            "Reduce each channel to a few levels",
-            vec![ParamSpec::int("levels", "Levels", 2, 64, 4)],
+            tr_noop!("Posterize"),
+            tr_noop!("Reduce each channel to a few levels"),
+            vec![ParamSpec::int("levels", tr_noop!("Levels"), 2, 64, 4)],
             posterize,
         ),
         effect(
             "builtin.threshold",
-            "Threshold",
-            "Pure black and white",
+            tr_noop!("Threshold"),
+            tr_noop!("Pure black and white"),
             vec![
-                ParamSpec::int("level", "Level", 0, 255, 128),
-                ParamSpec::bool("invert", "White on black", false),
+                ParamSpec::int("level", tr_noop!("Level"), 0, 255, 128),
+                ParamSpec::bool("invert", tr_noop!("White on black"), false),
             ],
             threshold,
         ),
         Box::new(Builtin {
             id: "builtin.drop_shadow",
-            name: "Drop shadow",
-            description: "A soft shadow cast behind the image, outside its edges too",
+            name: tr_noop!("Drop shadow"),
+            description: tr_noop!("A soft shadow cast behind the image, outside its edges too"),
             params: vec![
-                ParamSpec::color("color", "Colour", [0, 0, 0, 255]),
-                percent("opacity", "Opacity", 0.0, 100.0, 60.0),
-                ParamSpec::float("angle", "Light angle", -180.0, 180.0, 135.0)
+                ParamSpec::color("color", tr_noop!("Colour"), [0, 0, 0, 255]),
+                percent("opacity", tr_noop!("Opacity"), 0.0, 100.0, 60.0),
+                ParamSpec::float("angle", tr_noop!("Light angle"), -180.0, 180.0, 135.0)
                     .unit("°")
                     .decimals(0),
-                ParamSpec::float("distance", "Distance", 0.0, 1000.0, 20.0)
+                ParamSpec::float("distance", tr_noop!("Distance"), 0.0, 1000.0, 20.0)
                     .unit(" px")
                     .decimals(0),
-                ParamSpec::float("softness", "Softness", 0.0, 200.0, 10.0)
+                ParamSpec::float("softness", tr_noop!("Softness"), 0.0, 200.0, 10.0)
                     .unit(" px")
                     .decimals(1),
             ],
@@ -161,34 +168,34 @@ pub fn all() -> Vec<Box<dyn Effect>> {
         }),
         Box::new(Builtin {
             id: "builtin.outline",
-            name: "Outline",
-            description: "A line along the edge of the image's shape: its visible pixels",
+            name: tr_noop!("Outline"),
+            description: tr_noop!("A line along the edge of the image's shape: its visible pixels"),
             params: vec![
-                ParamSpec::color("color", "Colour", [255, 255, 255, 255]),
-                ParamSpec::float("width", "Width", 0.0, 500.0, 8.0)
+                ParamSpec::color("color", tr_noop!("Colour"), [255, 255, 255, 255]),
+                ParamSpec::float("width", tr_noop!("Width"), 0.0, 500.0, 8.0)
                     .unit(" px")
                     .decimals(1),
                 ParamSpec::choice(
                     "position",
-                    "Position",
+                    tr_noop!("Position"),
                     &[
-                        ("outside", "Outside"),
-                        ("center", "Centre"),
-                        ("inside", "Inside"),
+                        ("outside", tr_noop!("Outside")),
+                        ("center", tr_noop!("Centre")),
+                        ("inside", tr_noop!("Inside")),
                     ],
                     "outside",
                 ),
-                percent("opacity", "Opacity", 0.0, 100.0, 100.0),
+                percent("opacity", tr_noop!("Opacity"), 0.0, 100.0, 100.0),
             ],
             apply: outline,
             padding: outline_padding,
         }),
         effect(
             "builtin.blur",
-            "Gaussian blur",
-            "Soften the image",
+            tr_noop!("Gaussian blur"),
+            tr_noop!("Soften the image"),
             vec![
-                ParamSpec::float("radius", "Radius", 0.0, 200.0, 4.0)
+                ParamSpec::float("radius", tr_noop!("Radius"), 0.0, 200.0, 4.0)
                     .unit(" px")
                     .decimals(1),
             ],
@@ -196,14 +203,14 @@ pub fn all() -> Vec<Box<dyn Effect>> {
         ),
         effect(
             "builtin.sharpen",
-            "Sharpen",
-            "Unsharp mask: strengthen edges",
+            tr_noop!("Sharpen"),
+            tr_noop!("Unsharp mask: strengthen edges"),
             vec![
-                percent("amount", "Amount", 0.0, 500.0, 100.0),
-                ParamSpec::float("radius", "Radius", 0.1, 50.0, 2.0)
+                percent("amount", tr_noop!("Amount"), 0.0, 500.0, 100.0),
+                ParamSpec::float("radius", tr_noop!("Radius"), 0.1, 50.0, 2.0)
                     .unit(" px")
                     .decimals(1),
-                ParamSpec::int("threshold", "Threshold", 0, 255, 0),
+                ParamSpec::int("threshold", tr_noop!("Threshold"), 0, 255, 0),
             ],
             sharpen,
         ),

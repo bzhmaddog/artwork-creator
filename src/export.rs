@@ -8,6 +8,7 @@ use printpdf::{
     RawImageData, RawImageFormat, Rgb, XObjectTransform,
 };
 
+use crate::i18n::tr;
 use crate::render::{self, Cuts, OUTLINE_WIDTH_MM, Scene};
 
 /// Options of the Export window.
@@ -108,9 +109,9 @@ fn write_all(
     written: &mut Vec<PathBuf>,
 ) -> Result<(), String> {
     let dpi = settings.dpi.clamp(72, 1200) as f32;
-    progress.set("Rendering", 0.0);
+    progress.set(tr!("Rendering"), 0.0);
     let artwork = render::compose_artwork(scene, dpi, &mut |f| {
-        progress.set("Rendering", f * RENDER_SHARE);
+        progress.set(tr!("Rendering"), f * RENDER_SHARE);
         !progress.is_cancelled()
     })?;
     let saves = settings.png as u32 + settings.pdf as u32;
@@ -125,7 +126,7 @@ fn write_all(
         Ok(())
     };
     if settings.png {
-        step("Saving PNG")?;
+        step(tr!("Saving PNG"))?;
         let path = base.with_extension("png");
         let mut pixmap = artwork.clone();
         render::draw_lines(&mut pixmap, scene, dpi);
@@ -133,19 +134,20 @@ fn write_all(
         write_png(&pixmap, dpi, &path)?;
     }
     if settings.pdf {
-        step("Saving PDF")?;
+        step(tr!("Saving PDF"))?;
         let path = base.with_extension("pdf");
         // Cut lines go in as vectors so they stay sharp at any zoom.
         written.push(path.clone());
         write_pdf(scene, &artwork, dpi, &path)?;
     }
-    progress.set("Done", 1.0);
+    progress.set(tr!("Done"), 1.0);
     Ok(())
 }
 
 /// Saves an opaque RGB PNG that records its DPI, so it prints at true size.
 fn write_png(pixmap: &tiny_skia::Pixmap, dpi: f32, path: &Path) -> Result<(), String> {
-    let err = |e: &dyn std::fmt::Display| format!("Cannot write {}: {e}", path.display());
+    let err =
+        |e: &dyn std::fmt::Display| tr!("Cannot write {path}: {e}", path = path.display(), e = e);
     let file = std::fs::File::create(path).map_err(|e| err(&e))?;
     let mut enc = png::Encoder::new(
         std::io::BufWriter::new(file),
@@ -180,7 +182,7 @@ fn write_pdf(
     dpi: f32,
     path: &Path,
 ) -> Result<(), String> {
-    let mut doc = PdfDocument::new("Controller artwork");
+    let mut doc = PdfDocument::new(tr!("Controller artwork"));
     let image = RawImage {
         pixels: RawImageData::U8(render::to_rgb(pixmap)),
         width: pixmap.width() as usize,
@@ -238,7 +240,8 @@ fn write_pdf(
     let bytes = doc
         .with_pages(vec![page])
         .save(&PdfSaveOptions::default(), &mut Vec::new());
-    std::fs::write(path, bytes).map_err(|e| format!("Cannot write {}: {e}", path.display()))
+    std::fs::write(path, bytes)
+        .map_err(|e| tr!("Cannot write {path}: {e}", path = path.display(), e = e))
 }
 
 #[cfg(test)]

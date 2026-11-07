@@ -11,6 +11,7 @@ use dxf::enums::Units;
 use serde::{Deserialize, Serialize};
 
 use crate::document::{P2, TemplatePlacement};
+use crate::i18n::{tr, tr_noop};
 
 /// Name of the optional per-template configuration file.
 pub const CONFIG_FILE: &str = "template.json";
@@ -39,12 +40,12 @@ impl ElementKind {
         self as usize
     }
 
-    /// Name shown in the app.
+    /// Name shown in the app, in English: translate it with `i18n::translate`.
     pub fn label(self) -> &'static str {
         match self {
-            ElementKind::Outline => "Outline",
-            ElementKind::Buttons => "Buttons",
-            ElementKind::Cutouts => "Cutouts",
+            ElementKind::Outline => tr_noop!("Outline"),
+            ElementKind::Buttons => tr_noop!("Buttons"),
+            ElementKind::Cutouts => tr_noop!("Cutouts"),
         }
     }
 
@@ -158,7 +159,7 @@ impl TemplateEntry {
         let json = serde_json::to_string_pretty(&self.config).map_err(|e| e.to_string())?;
         let path = self.config_path();
         std::fs::write(&path, json + "\n")
-            .map_err(|e| format!("Cannot write {}: {e}", path.display()))
+            .map_err(|e| tr!("Cannot write {path}: {e}", path = path.display(), e = e))
     }
 }
 
@@ -190,9 +191,10 @@ pub fn read_entry(folder: &Path) -> Option<TemplateEntry> {
         let color = e.color.as_deref().and_then(|c| {
             let parsed = parse_color(c);
             if parsed.is_none() {
-                config_error.get_or_insert(format!(
-                    "{}: invalid colour \"{c}\" (expected #rrggbb)",
-                    folder.join(CONFIG_FILE).display()
+                config_error.get_or_insert(tr!(
+                    "{path}: invalid colour \"{c}\" (expected #rrggbb)",
+                    path = folder.join(CONFIG_FILE).display(),
+                    c = c
                 ));
             }
             parsed
@@ -399,7 +401,7 @@ type RawPath = (Vec<[f64; 2]>, bool);
 /// Paths of one DXF file in mm, y up.
 fn read_dxf(path: &Path, units: Option<f64>) -> Result<Vec<RawPath>, String> {
     let drawing = dxf::Drawing::load_file(path)
-        .map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
+        .map_err(|e| tr!("Cannot read {path}: {e}", path = path.display(), e = e))?;
 
     // Raw paths in drawing units, y up.
     let mut raw: Vec<RawPath> = Vec::new();
@@ -503,7 +505,11 @@ fn join_paths(paths: Vec<RawPath>) -> Vec<RawPath> {
 pub fn load(entry: &TemplateEntry) -> Result<Template, String> {
     let units = match &entry.config.units {
         Some(u) => Some(units_override(u).ok_or_else(|| {
-            format!("Unknown units \"{u}\" in {}", entry.config_path().display())
+            tr!(
+                "Unknown units \"{u}\" in {path}",
+                u = u,
+                path = entry.config_path().display()
+            )
         })?),
         None => None,
     };
@@ -529,7 +535,10 @@ pub fn load(entry: &TemplateEntry) -> Result<Template, String> {
             .iter()
             .map(|s| s.path.display().to_string())
             .collect();
-        return Err(format!("No template geometry in {}", files.join(", ")));
+        return Err(tr!(
+            "No template geometry in {files}",
+            files = files.join(", ")
+        ));
     }
     let elements = elements
         .into_iter()

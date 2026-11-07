@@ -13,6 +13,7 @@ use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::document::Document;
+use crate::i18n::tr;
 
 /// Extension of project archives.
 pub const EXTENSION: &str = "artwork";
@@ -31,12 +32,18 @@ pub fn is_archive(path: &Path) -> bool {
 /// in each layer's `data`, with `source` set to their name inside the archive; images
 /// of JSON projects are read from disk later.
 pub fn load(path: &Path) -> Result<Document, String> {
-    let bytes = std::fs::read(path).map_err(|e| format!("Cannot read {}: {e}", path.display()))?;
+    let bytes = std::fs::read(path)
+        .map_err(|e| tr!("Cannot read {path}: {e}", path = path.display(), e = e))?;
     if !bytes.starts_with(b"PK\x03\x04") {
         return Document::load(path);
     }
-    let invalid =
-        |e: &dyn std::fmt::Display| format!("Invalid project file {}: {e}", path.display());
+    let invalid = |e: &dyn std::fmt::Display| {
+        tr!(
+            "Invalid project file {path}: {e}",
+            path = path.display(),
+            e = e
+        )
+    };
     let mut zip = ZipArchive::new(Cursor::new(bytes)).map_err(|e| invalid(&e))?;
     let json = read_entry(&mut zip, JSON_ENTRY).map_err(|e| invalid(&e))?;
     let text = String::from_utf8(json).map_err(|e| invalid(&e))?;
@@ -112,7 +119,13 @@ pub fn save_json(doc: &Document, path: &Path) -> Result<Vec<String>, String> {
         let written = file.is_file()
             || std::fs::create_dir_all(&folder)
                 .and_then(|()| std::fs::write(&file, data.as_slice()))
-                .map_err(|e| error.get_or_insert(format!("Cannot write {}: {e}", file.display())))
+                .map_err(|e| {
+                    error.get_or_insert(tr!(
+                        "Cannot write {path}: {e}",
+                        path = file.display(),
+                        e = e
+                    ))
+                })
                 .is_ok();
         if written {
             layer.source = file;
@@ -140,7 +153,11 @@ fn write_safely(
     let result = write(&tmp).and_then(|()| std::fs::rename(&tmp, path).map_err(|e| e.to_string()));
     if let Err(e) = result {
         std::fs::remove_file(&tmp).ok();
-        return Err(format!("Cannot write {}: {e}", path.display()));
+        return Err(tr!(
+            "Cannot write {path}: {e}",
+            path = path.display(),
+            e = e
+        ));
     }
     Ok(())
 }
@@ -199,7 +216,7 @@ mod tests {
     fn layer(id: u64, name: &str, data: Option<&Arc<Vec<u8>>>) -> Node {
         let mut l = Layer::new(id, name.into(), format!("/elsewhere/{name}.png").into());
         l.data = data.cloned();
-        Node::Layer(l)
+        Node::Layer(Box::new(l))
     }
 
     #[test]
@@ -274,9 +291,9 @@ mod tests {
                 {
                     let mut l = Layer::new(1, "red".into(), "images/abc.png".into());
                     l.data = Some(red.clone());
-                    Node::Layer(l)
+                    Node::Layer(Box::new(l))
                 },
-                Node::Layer(linked),
+                Node::Layer(Box::new(linked)),
                 layer(4, "lost", None),
             ],
             next_id: 5,

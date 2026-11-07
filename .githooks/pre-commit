@@ -1,7 +1,34 @@
 #!/bin/sh
 # Runs the same checks as the Quality workflow before each commit.
 # Install with `make hooks`; skip once with `git commit --no-verify`.
+# Run by hand with `make pre-commit`.
+#
+# Usage: pre-commit [--linux] [--windows]
+#   With no option, clippy checks both targets, like the Linux and Windows CI jobs.
+#   Some lints depend on the target (type sizes differ), so a Linux-only check can pass
+#   where the Windows job fails. Tests run on Linux only, since the Windows build can't
+#   run here.
 set -e
+
+LINUX=x86_64-unknown-linux-gnu
+WINDOWS=x86_64-pc-windows-gnu
+
+linux=0
+windows=0
+for arg in "$@"; do
+    case "$arg" in
+        --linux) linux=1 ;;
+        --windows) windows=1 ;;
+        *)
+            echo "pre-commit: unknown option $arg (use --linux and/or --windows)" >&2
+            exit 2
+            ;;
+    esac
+done
+if [ $linux = 0 ] && [ $windows = 0 ]; then
+    linux=1
+    windows=1
+fi
 
 echo "pre-commit: cargo fmt --check"
 cargo fmt --all --check || {
@@ -9,8 +36,22 @@ cargo fmt --all --check || {
     exit 1
 }
 
-echo "pre-commit: cargo clippy"
-cargo clippy --workspace --all-targets --locked -q -- -D warnings
+if [ $linux = 1 ]; then
+    echo "pre-commit: cargo clippy (Linux)"
+    cargo clippy --workspace --all-targets --locked -q --target $LINUX -- -D warnings
+fi
 
-echo "pre-commit: cargo test"
-cargo test --workspace --locked -q
+if [ $windows = 1 ]; then
+    if rustup target list --installed 2>/dev/null | grep -qx $WINDOWS; then
+        echo "pre-commit: cargo clippy (Windows)"
+        cargo clippy --workspace --all-targets --locked -q --target $WINDOWS -- -D warnings
+    else
+        echo "pre-commit: Windows target not installed, skipping its clippy" \
+            "(rustup target add $WINDOWS)" >&2
+    fi
+fi
+
+if [ $linux = 1 ]; then
+    echo "pre-commit: cargo test"
+    cargo test --workspace --locked -q
+fi

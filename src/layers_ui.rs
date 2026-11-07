@@ -8,6 +8,7 @@ use egui::{
 
 use crate::document::{Document, Group, Node, P2};
 use crate::effects_ui;
+use crate::i18n::{tr, tr_n};
 
 /// Width of one nesting level in the layer list.
 const INDENT: f32 = 14.0;
@@ -57,12 +58,12 @@ impl Align {
     /// Tooltip of its button.
     fn tip(self) -> &'static str {
         match self {
-            Align::Left => "Align left edges",
-            Align::CenterX => "Centre horizontally",
-            Align::Right => "Align right edges",
-            Align::Top => "Align top edges",
-            Align::CenterY => "Centre vertically",
-            Align::Bottom => "Align bottom edges",
+            Align::Left => tr!("Align left edges"),
+            Align::CenterX => tr!("Centre horizontally"),
+            Align::Right => tr!("Align right edges"),
+            Align::Top => tr!("Align top edges"),
+            Align::CenterY => tr!("Centre vertically"),
+            Align::Bottom => tr!("Align bottom edges"),
         }
     }
 }
@@ -146,7 +147,7 @@ pub fn duplicate(doc: &mut Document, selected: &mut Option<u64>) -> bool {
         l.transform.center[1] += 5.0;
     });
     let name = name_mut(&mut copy);
-    *name = format!("{name} copy");
+    *name = tr!("{name} copy", name = name);
     *selected = Some(copy.id());
     *path.last_mut().unwrap() += 1;
     doc.insert(&path, copy);
@@ -253,7 +254,7 @@ pub fn group(doc: &mut Document, selected: &mut Option<u64>) -> bool {
     let count = count(&doc.layers);
     let mut group = Group {
         id,
-        name: format!("Group {}", count + 1),
+        name: tr!("Group {n}", n = count + 1),
         visible: true,
         locked: false,
         opacity: 1.0,
@@ -437,7 +438,7 @@ fn eye_toggle(ui: &mut Ui, visible: &mut bool, dim: bool) -> Response {
             p.line_segment([base, base + vec2(lx, 2.5)], stroke);
         }
     }
-    r.on_hover_text(if *visible { "Hide" } else { "Show" })
+    r.on_hover_text(if *visible { tr!("Hide") } else { tr!("Show") })
 }
 
 /// A padlock that toggles `locked`.
@@ -449,7 +450,11 @@ fn lock_toggle(ui: &mut Ui, locked: &mut bool, dim: bool) -> Response {
     }
     let c = icon_color(ui, &r, *locked, dim);
     paint_lock(ui.painter(), rect, *locked, c);
-    r.on_hover_text(if *locked { "Unlock" } else { "Lock position" })
+    r.on_hover_text(if *locked {
+        tr!("Unlock")
+    } else {
+        tr!("Lock position")
+    })
 }
 
 /// A padlock centred in `rect`, closed when `locked`.
@@ -492,9 +497,9 @@ fn aspect_lock(ui: &mut Ui, free_aspect: &mut bool) -> Response {
         paint_lock(ui.painter(), rect, locked, c);
     }
     r.on_hover_text(if locked {
-        "Aspect ratio locked: width and height change together. Click to unlock."
+        tr!("Aspect ratio locked: width and height change together. Click to unlock.")
     } else {
-        "Aspect ratio unlocked: width and height change separately. Click to lock."
+        tr!("Aspect ratio unlocked: width and height change separately. Click to lock.")
     })
 }
 
@@ -764,7 +769,7 @@ pub fn show(
     template_bounds: Option<(P2, P2)>,
 ) -> LayersOutput {
     let mut out = LayersOutput::default();
-    ui.heading("Layers");
+    ui.heading(tr!("Layers"));
 
     let sel = selected.filter(|&id| doc.path_of(id).is_some());
     let has = sel.is_some();
@@ -778,7 +783,7 @@ pub fn show(
         .max_height(ui.available_height() * 0.5)
         .show(ui, |ui| {
             if doc.layers.is_empty() {
-                ui.weak("No layers yet. Click Add… or drop images here.");
+                ui.weak(tr!("No layers yet. Click Add… or drop images here."));
             }
             let full = ui.max_rect();
             for row in rows(doc) {
@@ -847,7 +852,7 @@ pub fn show(
                         r.dnd_set_drag_payload(DraggedNode(row.id));
                         r.context_menu(|ui| {
                             if ui
-                                .add(Button::new("Duplicate").shortcut_text("Ctrl+D"))
+                                .add(Button::new(tr!("Duplicate")).shortcut_text("Ctrl+D"))
                                 .clicked()
                             {
                                 pending_duplicate = Some(row.id);
@@ -866,7 +871,7 @@ pub fn show(
                                 });
                         }
                         let r = match &missing {
-                            Some(path) => r.on_hover_text(format!("Missing file: {path}")),
+                            Some(path) => r.on_hover_text(tr!("Missing file: {path}", path = path)),
                             None => r,
                         };
                         if r.clicked() {
@@ -952,7 +957,7 @@ pub fn show(
             ui,
             Tool::Add,
             true,
-            "Add image layers (or drop files on the window)",
+            tr!("Add image layers (or drop files on the window)"),
         ) {
             out.add_images = true;
         }
@@ -960,31 +965,41 @@ pub fn show(
             ui,
             Tool::Group,
             true,
-            "Group: put the selection in a new group, or add an empty group (Ctrl+G)",
+            tr!("Group: put the selection in a new group, or add an empty group (Ctrl+G)"),
         ) {
             out.changed |= group(doc, selected);
         }
-        if tool_button(ui, Tool::Ungroup, is_group, "Ungroup (Ctrl+Shift+G)") {
+        if tool_button(ui, Tool::Ungroup, is_group, tr!("Ungroup (Ctrl+Shift+G)")) {
             out.changed |= ungroup(doc, selected);
         }
-        if tool_button(ui, Tool::Duplicate, has, "Duplicate (Ctrl+D)") {
+        if tool_button(ui, Tool::Duplicate, has, tr!("Duplicate (Ctrl+D)")) {
             out.changed |= duplicate(doc, selected);
         }
         ui.add_space(6.0);
-        if tool_button(ui, Tool::Top, has, "Bring to the top of its group") {
+        if tool_button(ui, Tool::Top, has, tr!("Bring to the top of its group")) {
             out.changed |= move_to_end(doc, id, true);
         }
-        if tool_button(ui, Tool::Up, has && can_step(doc, id, true), "Move up") {
+        if tool_button(ui, Tool::Up, has && can_step(doc, id, true), tr!("Move up")) {
             out.changed |= move_step(doc, id, true);
         }
-        if tool_button(ui, Tool::Down, has && can_step(doc, id, false), "Move down") {
+        if tool_button(
+            ui,
+            Tool::Down,
+            has && can_step(doc, id, false),
+            tr!("Move down"),
+        ) {
             out.changed |= move_step(doc, id, false);
         }
-        if tool_button(ui, Tool::Bottom, has, "Send to the bottom of its group") {
+        if tool_button(
+            ui,
+            Tool::Bottom,
+            has,
+            tr!("Send to the bottom of its group"),
+        ) {
             out.changed |= move_to_end(doc, id, false);
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if tool_button(ui, Tool::Delete, has, "Delete (Del)") {
+            if tool_button(ui, Tool::Delete, has, tr!("Delete (Del)")) {
                 out.changed |= delete(doc, selected);
             }
         });
@@ -1042,7 +1057,7 @@ fn properties(
     out: &mut LayersOutput,
 ) {
     let Some(id) = sel else {
-        ui.weak("Select a layer to edit it.");
+        ui.weak(tr!("Select a layer to edit it."));
         return;
     };
     let page_center = doc.page_center();
@@ -1051,20 +1066,20 @@ fn properties(
     // Align the selection with the page or the template outline.
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 2.0;
-        ui.label("Align to");
+        ui.label(tr!("Align to"));
         if template_bounds.is_none() {
             state.align_to = AlignTo::Page;
         }
         egui::ComboBox::from_id_salt("align_to")
             .width(80.0)
             .selected_text(match state.align_to {
-                AlignTo::Page => "Page",
-                AlignTo::Template => "Template",
+                AlignTo::Page => tr!("Page"),
+                AlignTo::Template => tr!("Template"),
             })
             .show_ui(ui, |ui| {
-                ui.selectable_value(&mut state.align_to, AlignTo::Page, "Page");
+                ui.selectable_value(&mut state.align_to, AlignTo::Page, tr!("Page"));
                 ui.add_enabled_ui(template_bounds.is_some(), |ui| {
-                    ui.selectable_value(&mut state.align_to, AlignTo::Template, "Template");
+                    ui.selectable_value(&mut state.align_to, AlignTo::Template, tr!("Template"));
                 });
             });
         ui.add_space(4.0);
@@ -1098,31 +1113,28 @@ fn properties(
             section(
                 ui,
                 "group_props",
-                RichText::new("Group").strong(),
+                RichText::new(tr!("Group")).strong(),
                 |_| false,
                 |ui| {
                     egui::Grid::new("group_props")
                         .num_columns(2)
                         .spacing([8.0, 6.0])
                         .show(ui, |ui| {
-                            ui.label("Name");
+                            ui.label(tr!("Name"));
                             out.changed |= ui.text_edit_singleline(&mut g.name).changed();
                             ui.end_row();
 
-                            ui.label("Opacity");
+                            ui.label(tr!("Opacity"));
                             out.changed |= ui
                                 .add(Slider::new(&mut g.opacity, 0.0..=1.0).fixed_decimals(2))
-                                .on_hover_text("Applied to the group as a whole")
+                                .on_hover_text(tr!("Applied to the group as a whole"))
                                 .changed();
                             ui.end_row();
                         });
-                    ui.weak(format!(
-                        "{layer_count} image layer{}",
-                        if layer_count == 1 { "" } else { "s" }
+                    ui.weak(tr_n!("{n} image layer", "{n} image layers", layer_count));
+                    ui.weak(tr!(
+                        "Drag on the canvas inside the group to move it, or use the arrow keys."
                     ));
-                    ui.weak(
-                        "Drag on the canvas inside the group to move it, or use the arrow keys.",
-                    );
                 },
             );
         }
@@ -1130,24 +1142,24 @@ fn properties(
             section(
                 ui,
                 "layer_props",
-                RichText::new("Properties").strong(),
+                RichText::new(tr!("Properties")).strong(),
                 |_| false,
                 |ui| {
                     egui::Grid::new("layer_props")
                         .num_columns(2)
                         .spacing([8.0, 6.0])
                         .show(ui, |ui| {
-                            ui.label("Name");
+                            ui.label(tr!("Name"));
                             out.changed |= ui.text_edit_singleline(&mut layer.name).changed();
                             ui.end_row();
 
-                            ui.label("Opacity");
+                            ui.label(tr!("Opacity"));
                             out.changed |= ui
                                 .add(Slider::new(&mut layer.opacity, 0.0..=1.0).fixed_decimals(2))
                                 .changed();
                             ui.end_row();
 
-                            ui.add_enabled_ui(!locked, |ui| ui.label("Position"));
+                            ui.add_enabled_ui(!locked, |ui| ui.label(tr!("Position")));
                             ui.add_enabled_ui(!locked, |ui| {
                                 ui.horizontal(|ui| {
                                     let t = &mut layer.transform;
@@ -1173,7 +1185,7 @@ fn properties(
                             });
                             ui.end_row();
 
-                            ui.label("Size");
+                            ui.label(tr!("Size"));
                             ui.add_enabled_ui(!locked, |ui| {
                                 ui.horizontal(|ui| {
                                     let [px_w, px_h] = layer.size_px.map(|v| v.max(1) as f32);
@@ -1183,7 +1195,7 @@ fn properties(
                                             .fixed_decimals(1)
                                             .speed(0.5)
                                             .range(0.1..=5000.0)
-                                            .prefix("w ")
+                                            .prefix(format!("{} ", tr!("w")))
                                             .suffix(" mm"),
                                     );
                                     let rh = ui.add(
@@ -1191,7 +1203,7 @@ fn properties(
                                             .fixed_decimals(1)
                                             .speed(0.5)
                                             .range(0.1..=5000.0)
-                                            .prefix("h ")
+                                            .prefix(format!("{} ", tr!("h")))
                                             .suffix(" mm"),
                                     );
                                     aspect_lock(ui, &mut state.free_aspect);
@@ -1216,7 +1228,7 @@ fn properties(
                             });
                             ui.end_row();
 
-                            ui.label("Rotation");
+                            ui.label(tr!("Rotation"));
                             ui.add_enabled_ui(!locked, |ui| {
                                 out.changed |= ui
                                     .add(
@@ -1237,16 +1249,19 @@ fn properties(
                         ui.horizontal_wrapped(|ui| {
                             ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
                             if ui
-                                .button("Fit page")
-                                .on_hover_text("Cover the whole page")
+                                .button(tr!("Fit page"))
+                                .on_hover_text(tr!("Cover the whole page"))
                                 .clicked()
                             {
                                 layer.fit_to(page_center, page, true);
                                 out.changed = true;
                             }
                             if ui
-                                .add_enabled(template_bounds.is_some(), Button::new("Fit template"))
-                                .on_hover_text("Cover the template outline")
+                                .add_enabled(
+                                    template_bounds.is_some(),
+                                    Button::new(tr!("Fit template")),
+                                )
+                                .on_hover_text(tr!("Cover the template outline"))
                                 .clicked()
                             {
                                 let (c, s) = template_bounds.unwrap_or((page_center, page));
@@ -1254,8 +1269,8 @@ fn properties(
                                 out.changed = true;
                             }
                             if ui
-                                .button("Reset")
-                                .on_hover_text("Fit inside the page, no rotation")
+                                .button(tr!("Reset"))
+                                .on_hover_text(tr!("Fit inside the page, no rotation"))
                                 .clicked()
                             {
                                 layer.fit_to(page_center, page, false);
@@ -1264,11 +1279,11 @@ fn properties(
                                 layer.transform.distort = Default::default();
                                 out.changed = true;
                             }
-                            if ui.button("Flip H").clicked() {
+                            if ui.button(tr!("Flip H")).clicked() {
                                 layer.transform.flip_x ^= true;
                                 out.changed = true;
                             }
-                            if ui.button("Flip V").clicked() {
+                            if ui.button(tr!("Flip V")).clicked() {
                                 layer.transform.flip_y ^= true;
                                 out.changed = true;
                             }
@@ -1283,12 +1298,12 @@ fn properties(
                             // while held.
                             let ctrl = ui.input(|i| i.modifiers.command);
                             if ui
-                                .selectable_label(state.distort != ctrl, "Distort")
-                                .on_hover_text(
+                                .selectable_label(state.distort != ctrl, tr!("Distort"))
+                                .on_hover_text(tr!(
                                     "On: drag each corner on its own to fake perspective.\n\
-                                 Off: corners resize the image.\n\
-                                 Holding Ctrl while dragging a corner swaps the two.",
-                                )
+                                     Off: corners resize the image.\n\
+                                     Holding Ctrl while dragging a corner swaps the two."
+                                ))
                                 .clicked()
                             {
                                 state.distort = !state.distort;
@@ -1296,7 +1311,7 @@ fn properties(
                             if ui
                                 .add_enabled(
                                     layer.transform.is_distorted(),
-                                    Button::new("Reset distortion"),
+                                    Button::new(tr!("Reset distortion")),
                                 )
                                 .clicked()
                             {
@@ -1310,18 +1325,19 @@ fn properties(
                     let [w_mm, h_mm] = layer.size_mm();
                     let dpi = (layer.size_px[0] as f32 / (w_mm / 25.4))
                         .min(layer.size_px[1] as f32 / (h_mm / 25.4));
-                    let text = format!("Print resolution: {dpi:.0} DPI");
+                    let shown = format!("{dpi:.0}");
                     if dpi < 150.0 {
                         ui.colored_label(
                             ui.visuals().warn_fg_color,
-                            format!("{text} (may look blurry)"),
+                            tr!("Print resolution: {dpi} DPI (may look blurry)", dpi = shown),
                         );
                     } else {
-                        ui.weak(text);
+                        ui.weak(tr!("Print resolution: {dpi} DPI", dpi = shown));
                     }
-                    ui.weak(format!(
-                        "Source: {} x {} px",
-                        layer.size_px[0], layer.size_px[1]
+                    ui.weak(tr!(
+                        "Source: {w} x {h} px",
+                        w = layer.size_px[0],
+                        h = layer.size_px[1]
                     ));
                 },
             );
@@ -1337,7 +1353,7 @@ mod tests {
     use crate::document::Layer;
 
     fn layer(id: u64) -> Node {
-        Node::Layer(Layer::new(id, format!("l{id}"), "x.png".into()))
+        Node::Layer(Box::new(Layer::new(id, format!("l{id}"), "x.png".into())))
     }
 
     /// Ids in the tree, as "id" or "id[children]", bottom first.
@@ -1530,7 +1546,7 @@ mod tests {
     }
 
     fn named(id: u64, name: &str) -> Node {
-        Node::Layer(Layer::new(id, name.into(), "x.png".into()))
+        Node::Layer(Box::new(Layer::new(id, name.into(), "x.png".into())))
     }
 
     #[test]
@@ -1843,7 +1859,7 @@ mod tests {
             let mut l = crate::document::Layer::new(id, format!("l{id}"), "x.png".into());
             l.size_px = [20, 10];
             l.transform.center = center;
-            Node::Layer(l)
+            Node::Layer(Box::new(l))
         };
         let page = ([0.0, 0.0], [297.0, 210.0]);
         let mut d = doc_with(vec![sized(1, [50.0, 50.0])]);

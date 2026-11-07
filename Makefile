@@ -13,6 +13,8 @@
 #   make run-windows  run the Windows debug build (from WSL)
 #   make test         run the test suite
 #   make hooks        run fmt, clippy and tests before each git commit
+#   make pre-commit   run those checks now: clippy for Linux and Windows, tests on Linux;
+#                     ARGS=--linux or ARGS=--windows checks one target only
 #   make plugins      build the example plugins for Linux and Windows into plugins/
 #   make dist         package each release build with its templates folder into dist/
 #   make clean        remove build outputs
@@ -32,7 +34,7 @@ PLUGINS     := halftone
 PLUGINS_DIR := plugins
 
 .PHONY: all linux windows debug debug-linux debug-windows run run-windows \
-        test check fmt clippy hooks plugins dist dist-linux dist-windows clean
+        test check fmt clippy hooks pre-commit plugins dist dist-linux dist-windows clean
 
 all: linux windows
 
@@ -71,6 +73,11 @@ plugins:
 hooks:
 	git config core.hooksPath .githooks
 
+# The hook's checks, without committing. Options go through ARGS, e.g.
+#   make pre-commit ARGS=--windows
+pre-commit:
+	sh .githooks/pre-commit $(ARGS)
+
 check:
 	$(CARGO) check --workspace --target $(LINUX)
 	$(CARGO) check --workspace --target $(WINDOWS)
@@ -79,8 +86,8 @@ fmt:
 	$(CARGO) fmt
 
 clippy:
-	$(CARGO) clippy --workspace --target $(LINUX) -- -D warnings
-	$(CARGO) clippy --workspace --target $(WINDOWS) -- -D warnings
+	$(CARGO) clippy --workspace --all-targets --target $(LINUX) -- -D warnings
+	$(CARGO) clippy --workspace --all-targets --target $(WINDOWS) -- -D warnings
 
 # The app looks for templates/ next to the executable, so ship them together.
 dist: dist-linux dist-windows

@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 
 use egui::{Key, RichText};
 
+use crate::i18n::{tr, translate};
+
 /// What the dialog was opened for; returned with the chosen paths.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Purpose {
@@ -18,7 +20,7 @@ pub enum Purpose {
 /// A file type offered by a dialog.
 #[derive(Clone, Copy, Debug)]
 pub struct Filter {
-    /// Label, e.g. "Images".
+    /// Label, e.g. "Images", marked with `tr_noop!` and translated when shown.
     pub name: &'static str,
     /// Lower-case extensions without dots. Empty means any file.
     pub extensions: &'static [&'static str],
@@ -41,9 +43,13 @@ impl Filter {
     /// Label with its extensions, e.g. "Images (*.png, *.jpg)".
     fn label(&self) -> String {
         if self.extensions.is_empty() {
-            format!("{} (all files)", self.name)
+            tr!("{name} (all files)", name = translate(self.name))
         } else {
-            format!("{} (*.{})", self.name, self.extensions.join(", *."))
+            format!(
+                "{} (*.{})",
+                translate(self.name),
+                self.extensions.join(", *.")
+            )
         }
     }
 }
@@ -102,7 +108,7 @@ pub fn native_available() -> bool {
 pub fn native(req: &Request) -> Vec<PathBuf> {
     let mut d = rfd::FileDialog::new().set_title(req.title);
     for f in req.filters.iter().filter(|f| !f.extensions.is_empty()) {
-        d = d.add_filter(f.name, f.extensions);
+        d = d.add_filter(translate(f.name), f.extensions);
     }
     if req.save {
         d.set_file_name(&req.default_name)
@@ -160,16 +166,21 @@ impl Default for FileBrowser {
 fn places() -> Vec<(String, PathBuf)> {
     let mut out = Vec::new();
     if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
-        out.push(("Home".to_owned(), home.clone()));
-        for sub in ["Desktop", "Documents", "Pictures", "Downloads"] {
+        out.push((tr!("Home").to_owned(), home.clone()));
+        for (sub, label) in [
+            ("Desktop", tr!("Desktop")),
+            ("Documents", tr!("Documents")),
+            ("Pictures", tr!("Pictures")),
+            ("Downloads", tr!("Downloads")),
+        ] {
             let p = home.join(sub);
             if p.is_dir() {
-                out.push((sub.to_owned(), p));
+                out.push((label.to_owned(), p));
             }
         }
     }
     if let Ok(cwd) = std::env::current_dir() {
-        out.push(("Current folder".to_owned(), cwd));
+        out.push((tr!("Current folder").to_owned(), cwd));
     }
     // Windows drives inside WSL.
     if let Ok(read) = std::fs::read_dir("/mnt") {
@@ -285,7 +296,9 @@ impl FileBrowser {
                 self.selected.clear();
                 self.error = None;
             }
-            Err(e) => self.error = Some(format!("Cannot open {}: {e}", dir.display())),
+            Err(e) => {
+                self.error = Some(tr!("Cannot open {path}: {e}", path = dir.display(), e = e))
+            }
         }
     }
 
@@ -350,7 +363,7 @@ impl FileBrowser {
         let mut cancel = ui.input(|i| i.key_pressed(Key::Escape));
 
         ui.horizontal(|ui| {
-            if ui.button("Up").clicked()
+            if ui.button(tr!("Up")).clicked()
                 && let Some(parent) = self.dir.parent()
             {
                 go_to = Some(parent.to_path_buf());
@@ -371,17 +384,17 @@ impl FileBrowser {
             ui.add_space(4.0);
             ui.horizontal(|ui| {
                 if save {
-                    ui.label("File name");
+                    ui.label(tr!("File name"));
                     let r = ui
                         .add(egui::TextEdit::singleline(&mut self.file_name).desired_width(260.0));
                     if r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
                         confirm = !self.file_name.trim().is_empty();
                     }
                 } else if multiple {
-                    ui.weak("Ctrl+click to select several files");
+                    ui.weak(tr!("Ctrl+click to select several files"));
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    let ok_label = if save { "Save" } else { "Open" };
+                    let ok_label = if save { tr!("Save") } else { tr!("Open") };
                     let can = if save {
                         !self.file_name.trim().is_empty()
                     } else {
@@ -390,17 +403,17 @@ impl FileBrowser {
                     if ui.add_enabled(can, egui::Button::new(ok_label)).clicked() {
                         confirm = true;
                     }
-                    if ui.button("Cancel").clicked() {
+                    if ui.button(tr!("Cancel")).clicked() {
                         cancel = true;
                     }
                 });
             });
             // File type: a choice when there are several.
             ui.horizontal(|ui| {
-                ui.label("Type");
+                ui.label(tr!("Type"));
                 match filters {
                     [] => {
-                        ui.weak("All files");
+                        ui.weak(tr!("All files"));
                     }
                     [only] => {
                         ui.weak(only.label());
@@ -442,7 +455,7 @@ impl FileBrowser {
                     // One entry per row, full width.
                     ui.with_layout(egui::Layout::top_down_justified(egui::Align::Min), |ui| {
                         if self.entries.is_empty() {
-                            ui.weak("No matching files here.");
+                            ui.weak(tr!("No matching files here."));
                         }
                         for e in &self.entries {
                             let is_sel = self.selected.contains(&e.path);

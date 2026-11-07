@@ -131,7 +131,7 @@ mod tests {
         let mut l = Layer::new(1, "a".into(), "a.png".into());
         l.size_px = [10, 10];
         Document {
-            layers: vec![Node::Layer(l)],
+            layers: vec![Node::Layer(Box::new(l))],
             next_id: 2,
             ..Default::default()
         }

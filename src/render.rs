@@ -184,7 +184,7 @@ impl Default for Cuts {
 pub struct SceneElement {
     /// Its shapes on the page.
     pub placed: PlacedElement,
-    /// Line colour (RGB).
+    /// Line color (RGB).
     pub color: [u8; 3],
     /// Its lines are printed.
     pub print: bool,
@@ -194,7 +194,7 @@ pub struct SceneElement {
 pub struct Scene {
     /// Page size in mm.
     pub page_mm: P2,
-    /// Page colour (RGB).
+    /// Page color (RGB).
     pub background: [u8; 3],
     /// What to draw, bottom first.
     pub layers: Vec<SceneNode>,
@@ -500,7 +500,7 @@ fn draw_warped(
         {
             break;
         }
-        let next = halve(cur).ok_or(tr!("Cannot allocate a reduced image"))?;
+        let next = halve(cur).ok_or(tr!("CANNOT_ALLOCATE_REDUCED_IMAGE"))?;
         k *= 2.0;
         level = Some(next);
     }
@@ -508,7 +508,7 @@ fn draw_warped(
     let (sw, sh) = (src.width() as i64, src.height() as i64);
     let inv = map
         .inverse()
-        .ok_or(tr!("Degenerate perspective"))?
+        .ok_or(tr!("DEGENERATE_PERSPECTIVE"))?
         .then_affine(Affine::scale(1.0 / k, 1.0 / k));
 
     let (tw, th) = (target.width() as i64, target.height() as i64);
@@ -561,7 +561,7 @@ fn draw_warped(
             if cover <= 0.0 {
                 continue;
             }
-            // Bilinear sample, relative to texel centres.
+            // Bilinear sample, relative to texel centers.
             let (u, v) = (u - 0.5, v - 0.5);
             let (iu, iv) = (u.floor() as i64, v.floor() as i64);
             let (fu, fv) = (u - iu as f32, v - iv as f32);
@@ -595,7 +595,7 @@ fn draw_nodes(target: &mut PixmapMut, nodes: &[SceneNode], to_px: Affine) -> Res
                     (&l.pixmap, l.map)
                 } else {
                     let (pm, pad) = effects::apply_pixmap(&l.pixmap, &l.effects, l.effects_scale)
-                        .ok_or(tr!("Cannot apply the effects of a layer"))?;
+                        .ok_or(tr!("CANNOT_APPLY_EFFECTS"))?;
                     processed = Arc::new(pm);
                     // The margins the effects added lie left of and above the image.
                     let shift = Affine::translate(-(pad[0] as f32), -(pad[1] as f32));
@@ -635,7 +635,7 @@ fn draw_nodes(target: &mut PixmapMut, nodes: &[SceneNode], to_px: Affine) -> Res
                 }
                 let (w, h) = ((x1 - x0) as u32, (y1 - y0) as u32);
                 let mut buf = Pixmap::new(w, h)
-                    .ok_or_else(|| tr!("Cannot allocate a {w} x {h} group buffer", w = w, h = h))?;
+                    .ok_or_else(|| tr!("CANNOT_ALLOCATE_GROUP_BUFFER", w = w, h = h))?;
                 let shift = Affine::translate(-x0 as f32, -y0 as f32);
                 draw_nodes(&mut buf.as_mut(), children, to_px.then(shift))?;
                 let paint = PixmapPaint {
@@ -666,16 +666,15 @@ pub fn compose_region(
     px_per_mm: f32,
 ) -> Result<Pixmap, String> {
     let [w, h] = size_px;
-    let mut pixmap =
-        Pixmap::new(w, h).ok_or_else(|| tr!("Cannot allocate a {w} x {h} image", w = w, h = h))?;
+    let mut pixmap = Pixmap::new(w, h).ok_or_else(|| tr!("CANNOT_ALLOCATE_IMAGE", w = w, h = h))?;
     let to_px =
         Affine::translate(-origin_mm[0], -origin_mm[1]).then(Affine::scale(px_per_mm, px_per_mm));
     draw_nodes(&mut pixmap.as_mut(), nodes, to_px)?;
     Ok(pixmap)
 }
 
-/// Error returned when an export is cancelled.
-pub const CANCELLED: &str = "Export cancelled";
+/// Error returned when an export is canceled.
+pub const CANCELED: &str = "Export canceled";
 
 /// Renders the page at `dpi`, cut by the template. With `lines`, also draws the lines of
 /// the elements marked for printing. The background is opaque, so every output pixel is.
@@ -689,15 +688,14 @@ pub fn compose(scene: &Scene, dpi: f32, lines: bool) -> Result<Pixmap, String> {
 
 /// Renders the background and layers at `dpi`, cut by the template, without lines.
 /// `progress` gets the fraction done after each top-level layer or group; returning
-/// false cancels with the `CANCELLED` error.
+/// false cancels with the `CANCELED` error.
 pub fn compose_artwork(
     scene: &Scene,
     dpi: f32,
     progress: &mut dyn FnMut(f32) -> bool,
 ) -> Result<Pixmap, String> {
     let [w, h] = pixel_size(scene.page_mm, dpi);
-    let mut pixmap =
-        Pixmap::new(w, h).ok_or_else(|| tr!("Cannot allocate a {w} x {h} image", w = w, h = h))?;
+    let mut pixmap = Pixmap::new(w, h).ok_or_else(|| tr!("CANNOT_ALLOCATE_IMAGE", w = w, h = h))?;
     let [r, g, b] = scene.background;
     pixmap.fill(tiny_skia::Color::from_rgba8(r, g, b, 255));
 
@@ -706,12 +704,12 @@ pub fn compose_artwork(
     let steps = scene.layers.len() as f32 + 1.0;
     for (i, node) in scene.layers.iter().enumerate() {
         if !progress(i as f32 / steps) {
-            return Err(CANCELLED.into());
+            return Err(CANCELED.into());
         }
         draw_nodes(&mut pixmap.as_mut(), std::slice::from_ref(node), mm_to_px)?;
     }
     if !progress((steps - 1.0) / steps) {
-        return Err(CANCELLED.into());
+        return Err(CANCELED.into());
     }
 
     let placed: Vec<PlacedElement> = scene.elements.iter().map(|e| e.placed.clone()).collect();
@@ -768,7 +766,7 @@ mod tests {
     use super::*;
     use crate::document::{Group, Layer, Orientation, PageSize};
 
-    /// A 10 x 10 mm square layer of `rgb`, centred at `center`, at 1 px per mm.
+    /// A 10 x 10 mm square layer of `rgb`, centered at `center`, at 1 px per mm.
     fn square(id: u64, rgb: [u8; 3], center: P2) -> Node {
         let img = image::RgbaImage::from_pixel(10, 10, image::Rgba([rgb[0], rgb[1], rgb[2], 255]));
         let mut l = Layer::new(id, format!("l{id}"), "x.png".into());
@@ -874,7 +872,7 @@ mod tests {
         let pm = compose(&scene, 254.0, false).unwrap(); // 10 px per mm
         let blue = |x: u32, y: u32| pm.pixel(x, y).unwrap().red() < 10;
         let white = |x: u32, y: u32| pm.pixel(x, y).unwrap().red() > 245;
-        assert!(blue(150, 105) && blue(150, 195), "centre column");
+        assert!(blue(150, 105) && blue(150, 195), "center column");
         assert!(white(115, 105), "top-left corner was cut away");
         assert!(white(185, 105), "top-right corner too");
         assert!(
@@ -890,7 +888,7 @@ mod tests {
 
     #[test]
     fn large_reductions_are_averaged() {
-        // A 1 px checkerboard squeezed to a fraction of its size averages to grey.
+        // A 1 px checkerboard squeezed to a fraction of its size averages to gray.
         let img = image::RgbaImage::from_fn(400, 400, |x, y| {
             let v = if (x + y) % 2 == 0 { 0 } else { 255 };
             image::Rgba([v, v, v, 255])
@@ -1096,7 +1094,7 @@ mod tests {
         let scene = Scene {
             page_mm: [100.0, 50.0],
             background: [255, 255, 255],
-            // A 10 mm blue square centred at (25, 25).
+            // A 10 mm blue square centered at (25, 25).
             layers: vec![SceneNode::Image(SceneLayer {
                 pixmap: Arc::new(premultiplied_pixmap(&img).unwrap()),
                 map: Affine::translate(-5.0, -5.0)

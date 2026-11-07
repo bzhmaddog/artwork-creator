@@ -12,6 +12,11 @@ members = [".", "plugin-sdk", "plugin-examples/halftone"]
 
 [dependencies]
 artwork-plugin-sdk = { path = "plugin-sdk" }
+# Text layers: system fonts, shaping and glyph outlines; the same crates egui uses.
+epaint_default_fonts = "0.37"
+fontique = { version = "0.11.1", default-features = false, features = ["system", "fontconfig-dlopen"] }
+harfrust = { version = "0.12", default-features = false, features = ["std"] }
+skrifa = { version = "0.44", default-features = false, features = ["std"] }
 eframe = { version = "0.37", default-features = false, features = [
     "accesskit",
     "clipboard",
@@ -38,10 +43,20 @@ serde_json = "1"
 sys-locale = "0.3"
 zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 
+# On Wayland (e.g. WSLg) the window draws its own title bar. eframe leaves out winit's
+# decorations, so without this the bar has no title text.
+[target.'cfg(target_os = "linux")'.dependencies]
+winit = { version = "0.30.13", default-features = false, features = ["wayland-csd-adwaita"] }
+
 [profile.release]
 opt-level = 3
 lto = "thin"
 strip = true
+
+# Debug builds lightly optimized: effects and text are computed on the CPU while you
+# edit, and unoptimized they take seconds on large layers. Set 0 for the best debugging.
+[profile.dev]
+opt-level = 1
 
 # Keep rendering fast in debug builds: the canvas composites semi-transparent groups on the CPU.
 [profile.dev.package.tiny-skia]

@@ -7,22 +7,32 @@ work goes on.
 
 ### Text layers
 
+Done:
+
 - Text layer type, placed and transformed on the canvas like image layers (move, scale,
-  rotate).
+  rotate, distort, snap).
 - Font choice from the system fonts, plus fonts kept inside the `.artwork` archive so a
   shared project looks the same elsewhere.
-- Size in pt or mm, bold / italic, alignment, letter spacing, line height, multi-line text.
-- Fill colour and outline (stroke width and colour).
-- Layer effects work on text too (drop shadow, outline, plugins...).
-- Editing the text in place on the canvas, and in the Properties panel.
-- PDF export keeps text as vectors.
+- Size in pt, bold / italic, alignment, letter spacing, line spacing, multi-line text.
+- Fill color and outline (width and color).
+- Layer effects work on text too.
+- Text edited in the Properties panel; double-clicking a text layer on the canvas jumps
+  there.
+- Drawn at the export resolution, so text prints sharp at any DPI.
+
+Still to do:
+
+- Editing the text in place on the canvas.
+- PDF export keeps text as vectors (today the whole artwork is one image in the PDF).
+- Characters missing from the chosen font taken from another font.
+- Text along a path.
 
 ### Shape layers
 
 - Shapes: rectangle (with optional rounded corners), ellipse / circle, line, polyline,
   polygon, regular polygon and star.
-- Stroke: width, colour, opacity, dashes, line caps and joins.
-- Fill: colour and opacity, or no fill.
+- Stroke: width, color, opacity, dashes, line caps and joins.
+- Fill: color and opacity, or no fill.
 - Edit points on the canvas for lines, polylines and polygons; snap them to template
   anchors.
 - Layer effects work on shapes too.
@@ -35,7 +45,7 @@ work goes on.
 - Buttons: place holes by standard size (24 mm, 30 mm, custom), one by one or from layout
   presets, with numeric position, spacing and alignment.
 - Cutouts and fastener holes, with the same tools.
-- Anchors generated from the button centres.
+- Anchors generated from the button centers.
 - Saves the DXF files and `template.json` into a new folder under `templates`.
 - Edit an existing template.
 
@@ -59,10 +69,10 @@ work goes on.
 - **Clipping masks**: clip a layer to the shape of the layer below it, or to a group.
 - **Blend modes** (multiply, screen, overlay...).
 - **Gradient and pattern fills** for shapes, text and a background layer.
-- **Background colour** layer filling the whole outline.
+- **Background color** layer filling the whole outline.
 - **Flip** layers horizontally and vertically.
 - **Rulers and guides** dragged from the rulers, with snapping.
-- **Eyedropper** to pick a colour from the canvas.
+- **Eyedropper** to pick a color from the canvas.
 - **Copy and paste effects** from one layer to others.
 - **Per-button artwork**: fill or ring around a single button hole, and export of round
   artwork for clear button caps.
@@ -82,5 +92,5 @@ work goes on.
 
 ### Interface
 
-- **Customisable shortcuts**.
+- **Customizable shortcuts**.
 - **More languages**.

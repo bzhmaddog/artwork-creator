@@ -36,7 +36,7 @@ const DROP_MARGIN: f32 = 16.0;
 fn drag_handle(ui: &mut Ui, active: bool) -> egui::Response {
     let size = vec2(12.0, ui.spacing().interact_size.y);
     let (rect, r) = ui.allocate_exact_size(size, Sense::drag());
-    let r = r.on_hover_text(tr!("Drag to reorder"));
+    let r = r.on_hover_text(tr!("DRAG_TO_REORDER"));
     if r.dragged() {
         ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
     } else if r.hovered() {
@@ -60,13 +60,20 @@ fn drag_handle(ui: &mut Ui, active: bool) -> egui::Response {
     r
 }
 
-/// Shows the effect stack of a layer. Returns true if it changed.
-pub fn show(ui: &mut Ui, layer_id: u64, stack: &mut Vec<EffectInstance>) -> bool {
+/// Shows the effect stack of a layer. Returns true if it changed. With `px_mm`, the
+/// length of a layer pixel on the page, sizes in pixels are shown in mm: for text layers,
+/// whose pixels are a fraction of the font size (see `text::EM`).
+pub fn show(
+    ui: &mut Ui,
+    layer_id: u64,
+    stack: &mut Vec<EffectInstance>,
+    px_mm: Option<f32>,
+) -> bool {
     let mut added = None;
     let mut changed = false;
     let title = match stack.len() {
-        0 => tr!("Effects").to_owned(),
-        n => tr!("Effects ({n})", n = n),
+        0 => tr!("EFFECTS_SECTION").to_owned(),
+        n => tr!("EFFECTS_SECTION_WITH_COUNT", n = n),
     };
     layers_ui::section(
         ui,
@@ -76,7 +83,7 @@ pub fn show(ui: &mut Ui, layer_id: u64, stack: &mut Vec<EffectInstance>) -> bool
             added = add_menu(ui);
             added.is_some()
         },
-        |ui| changed = stack_ui(ui, layer_id, stack),
+        |ui| changed = stack_ui(ui, layer_id, stack, px_mm),
     );
     // Added after the list was shown: it appears on the next frame.
     if let Some(e) = added {
@@ -89,7 +96,7 @@ pub fn show(ui: &mut Ui, layer_id: u64, stack: &mut Vec<EffectInstance>) -> bool
 /// The "Add effect" menu. Returns the effect picked.
 fn add_menu(ui: &mut Ui) -> Option<EffectInstance> {
     let mut added = None;
-    let button = layers_ui::tool_icon(ui, Tool::Add, true, tr!("Add effect"));
+    let button = layers_ui::tool_icon(ui, Tool::Add, true, tr!("ADD_EFFECT"));
     egui::Popup::menu(&button).show(|ui| {
         let reg = registry();
         let mut add = |ui: &mut Ui, effect: &dyn Effect| {
@@ -113,10 +120,8 @@ fn add_menu(ui: &mut Ui) -> Option<EffectInstance> {
             }
             ui.separator();
             let title = format!("{} {}", plugin.name, plugin.version);
-            ui.weak(title.trim_end()).on_hover_text(tr!(
-                "Plugin loaded from {path}",
-                path = plugin.path.display()
-            ));
+            ui.weak(title.trim_end())
+                .on_hover_text(tr!("PLUGIN_LOADED_FROM", path = plugin.path.display()));
             for effect in effects {
                 add(ui, effect);
             }
@@ -125,11 +130,8 @@ fn add_menu(ui: &mut Ui) -> Option<EffectInstance> {
             ui.separator();
             let n = reg.errors.len();
             ui.label(
-                RichText::new(format!(
-                    "⚠ {}",
-                    tr_n!("{n} plugin problem", "{n} plugin problems", n)
-                ))
-                .color(ui.visuals().warn_fg_color),
+                RichText::new(format!("⚠ {}", tr_n!("PLUGIN_PROBLEM_COUNT", n)))
+                    .color(ui.visuals().warn_fg_color),
             )
             .on_hover_text(reg.errors.join("\n"));
         }
@@ -138,19 +140,22 @@ fn add_menu(ui: &mut Ui) -> Option<EffectInstance> {
 }
 
 /// The effects of the stack, with their controls. Returns true if it changed.
-fn stack_ui(ui: &mut Ui, layer_id: u64, stack: &mut Vec<EffectInstance>) -> bool {
+fn stack_ui(
+    ui: &mut Ui,
+    layer_id: u64,
+    stack: &mut Vec<EffectInstance>,
+    px_mm: Option<f32>,
+) -> bool {
     let mut changed = false;
     if stack.is_empty() {
-        // Centred, every wrapped line too.
+        // Centered, every wrapped line too.
         ui.vertical_centered(|ui| {
-            ui.weak(tr!(
-                "Effects change how the image looks without changing its file."
-            ));
+            ui.weak(tr!("EFFECTS_INTRO"));
         });
         return changed;
     }
     if stack.len() > 1 {
-        ui.weak(tr!("Applied top to bottom. Drag the dots to reorder."));
+        ui.weak(tr!("EFFECTS_ORDER_HINT"));
     }
 
     let mut remove = None;
@@ -170,7 +175,7 @@ fn stack_ui(ui: &mut Ui, layer_id: u64, stack: &mut Vec<EffectInstance>) -> bool
                 index: i,
             });
             let name = effect
-                .map_or(tr!("Missing effect"), |e| e.name())
+                .map_or(tr!("MISSING_EFFECT"), |e| e.name())
                 .to_owned();
             if handle.dragged()
                 && let Some(p) = ui.ctx().pointer_interact_pos()
@@ -189,7 +194,7 @@ fn stack_ui(ui: &mut Ui, layer_id: u64, stack: &mut Vec<EffectInstance>) -> bool
                     .show_header(ui, |ui| {
                         changed |= ui
                             .checkbox(&mut inst.enabled, "")
-                            .on_hover_text(tr!("Apply this effect"))
+                            .on_hover_text(tr!("ENABLE_EFFECT"))
                             .changed();
                         let (text, tip) = match effect {
                             Some(e) => {
@@ -198,13 +203,9 @@ fn stack_ui(ui: &mut Ui, layer_id: u64, stack: &mut Vec<EffectInstance>) -> bool
                                 (t, e.description().to_owned())
                             }
                             None => (
-                                RichText::new(tr!("Missing effect"))
+                                RichText::new(tr!("MISSING_EFFECT"))
                                     .color(ui.visuals().warn_fg_color),
-                                tr!(
-                                    "\"{id}\" is not available: its plugin may not be installed.\n\
-                                     It is kept in the project but not applied.",
-                                    id = inst.effect
-                                ),
+                                tr!("MISSING_EFFECT_HINT", id = inst.effect),
                             ),
                         };
                         let mut r = ui.add(egui::Label::new(text).sense(Sense::click()));
@@ -214,19 +215,20 @@ fn stack_ui(ui: &mut Ui, layer_id: u64, stack: &mut Vec<EffectInstance>) -> bool
                         r.context_menu(|ui| {
                             if let Some(e) = effect
                                 && !e.params().is_empty()
-                                && ui.button(tr!("Reset to defaults")).clicked()
+                                && ui.button(tr!("RESET_EFFECT_PARAMS")).clicked()
                             {
                                 let enabled = inst.enabled;
                                 *inst = EffectInstance::new(e);
                                 inst.enabled = enabled;
                                 changed = true;
                             }
-                            if ui.button(tr!("Remove")).clicked() {
+                            if ui.button(tr!("REMOVE_EFFECT")).clicked() {
                                 remove = Some(i);
                             }
                         });
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            if layers_ui::tool_button(ui, Tool::Delete, true, tr!("Remove")) {
+                            if layers_ui::tool_button(ui, Tool::Delete, true, tr!("REMOVE_EFFECT"))
+                            {
                                 remove = Some(i);
                             }
                         });
@@ -234,7 +236,7 @@ fn stack_ui(ui: &mut Ui, layer_id: u64, stack: &mut Vec<EffectInstance>) -> bool
                     .body(|ui| {
                         if let Some(e) = effect {
                             ui.add_enabled_ui(inst.enabled, |ui| {
-                                changed |= params_ui(ui, (layer_id, i), e, inst);
+                                changed |= params_ui(ui, (layer_id, i), e, inst, px_mm);
                             });
                         }
                     });
@@ -283,6 +285,7 @@ fn params_ui(
     salt: (u64, usize),
     effect: &dyn Effect,
     inst: &mut EffectInstance,
+    px_mm: Option<f32>,
 ) -> bool {
     let specs = effect.params();
     if specs.is_empty() {
@@ -298,7 +301,7 @@ fn params_ui(
             for spec in specs {
                 ui.label(label_text(builtin, &spec.label));
                 let params = Params::new(specs, &inst.params);
-                if let Some(v) = param_ui(ui, salt, spec, builtin, &params) {
+                if let Some(v) = param_ui(ui, salt, spec, builtin, &params, px_mm) {
                     inst.params.insert(spec.id.clone(), v);
                     changed = true;
                 }
@@ -320,8 +323,11 @@ fn param_ui(
     spec: &ParamSpec,
     builtin: bool,
     p: &Params,
+    px_mm: Option<f32>,
 ) -> Option<Value> {
     let id = spec.id.as_str();
+    // Pixel sizes shown in mm on the page, when asked.
+    let in_mm = |unit: &str| px_mm.filter(|_| unit.trim() == "px");
     match &spec.kind {
         ParamKind::Float {
             min,
@@ -331,13 +337,23 @@ fn param_ui(
             ..
         } => {
             let mut v = p.f32(id);
-            ui.add(
-                Slider::new(&mut v, *min..=*max)
-                    .suffix(unit)
-                    .fixed_decimals(*decimals),
-            )
-            .changed()
-            .then(|| Value::from(v))
+            // Sizes in pixels span a wide range where small values matter most:
+            // logarithmic, the slider moves in fine steps there.
+            let slider = Slider::new(&mut v, *min..=*max).logarithmic(unit.trim() == "px");
+            let r = match in_mm(unit) {
+                Some(k) => {
+                    let k = f64::from(k.max(1e-6));
+                    ui.add(
+                        slider
+                            .custom_formatter(move |n, _| format!("{:.2}", n * k))
+                            .custom_parser(move |s| s.trim().parse::<f64>().ok().map(|mm| mm / k))
+                            .suffix(" mm"),
+                    )
+                    .on_hover_text(tr!("TEXT_EFFECT_SIZE_HINT"))
+                }
+                None => ui.add(slider.suffix(unit).fixed_decimals(*decimals)),
+            };
+            r.changed().then(|| Value::from(v))
         }
         ParamKind::Int { min, max, unit, .. } => {
             let mut v = p.i32(id);

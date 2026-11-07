@@ -28,10 +28,12 @@ const MIN_STRETCH_MM: f32 = 0.5;
 /// Grid cells per side when drawing a distorted layer, so the preview is close to a
 /// true perspective (a single textured quad bends along its diagonal).
 const WARP_GRID: usize = 16;
-const ACCENT: Color32 = Color32::from_rgb(0, 160, 255);
+/// Color of the selection and of the anchor an image snapped to: crimson, apart from
+/// the template elements' default colors (magenta, blue, orange, green).
+const ACCENT: Color32 = Color32::from_rgb(220, 20, 60);
 /// Longest side of the offscreen render of a semi-transparent group.
 const MAX_GROUP_PREVIEW_SIDE: f32 = 2048.0;
-/// How close (screen points) an image's centre or corner must come to an anchor to snap.
+/// How close (screen points) an image's center or corner must come to an anchor to snap.
 const SNAP_RADIUS: f32 = 10.0;
 /// Half the size of the cross marking an anchor, in screen points.
 const ANCHOR_MARK: f32 = 5.0;
@@ -70,7 +72,7 @@ impl Camera {
         self.pan = anchor - rect.min - vec2(mm[0], mm[1]) * self.zoom;
     }
 
-    /// Zooms and centres so the whole page fits, with a margin.
+    /// Zooms and centers so the whole page fits, with a margin.
     pub fn fit(&mut self, rect: Rect, page: P2) {
         let margin = 0.92;
         self.zoom = (rect.width() / page[0])
@@ -127,21 +129,23 @@ pub struct CanvasState {
     pub fit_pending: bool,
     /// Draw the template's lines at all.
     pub show_template: bool,
-    /// Per element kind (`ElementKind::index`): lines shown, and their colour.
+    /// Per element kind (`ElementKind::index`): lines shown, and their color.
     pub element_show: [bool; KINDS],
-    /// Line colour per element kind.
+    /// Line color per element kind.
     pub element_color: [Color32; KINDS],
-    /// Grey out what the template cuts away, as the export leaves it blank.
+    /// Gray out what the template cuts away, as the export leaves it blank.
     pub preview_cuts: bool,
     /// What the export cuts; set by the app from the export settings.
     pub cuts: Cuts,
+    /// Opacity of the cut preview: below 1, what will be cut stays faintly visible.
+    pub cut_opacity: f32,
     cut_preview: Option<CutPreview>,
     /// Mouse position on the page, for the status bar.
     pub cursor_mm: Option<P2>,
     /// Corner handles distort the selected layer instead of scaling it. Holding Ctrl
     /// swaps the two.
     pub distort_mode: bool,
-    /// Image centres and corners snap to the template's anchors while dragged. Holding Alt
+    /// Image centers and corners snap to the template's anchors while dragged. Holding Alt
     /// turns it off for the drag.
     pub snap_to_anchors: bool,
     /// The anchor the dragged image snapped to this frame, in page mm, to highlight it.
@@ -150,6 +154,8 @@ pub struct CanvasState {
     drag: Option<Drag>,
     /// A left drag that started on empty canvas pans the view.
     panning: bool,
+    /// A text layer was double-clicked: the app puts the keyboard in its text.
+    pub edit_text: bool,
     group_previews: HashMap<u64, GroupPreview>,
 }
 
@@ -169,6 +175,7 @@ impl Default for CanvasState {
             }),
             preview_cuts: true,
             cuts: Cuts::default(),
+            cut_opacity: 0.8,
             cut_preview: None,
             cursor_mm: None,
             distort_mode: false,
@@ -177,29 +184,38 @@ impl Default for CanvasState {
             rect: Rect::NOTHING,
             drag: None,
             panning: false,
+            edit_text: false,
             group_previews: HashMap::new(),
         }
     }
 }
 
 impl CanvasState {
-    /// Zooms around the centre of the canvas (toolbar buttons).
+    /// Zooms around the center of the canvas (toolbar buttons).
     pub fn zoom_centered(&mut self, factor: f32) {
         if self.rect.is_positive() {
             self.camera.zoom_at(self.rect, self.rect.center(), factor);
         }
     }
 
-    /// Sets an absolute zoom around the centre of the canvas.
+    /// Sets an absolute zoom around the center of the canvas.
     pub fn set_zoom(&mut self, zoom: f32) {
         self.zoom_centered(zoom / self.camera.zoom);
     }
 }
 
-/// Points of a layer that snap to anchors: its centre, then its drawn corners.
+/// Points of a layer that snap to anchors: its center, then its drawn corners. The
+/// center is the middle of the drawn corners' bounds, as for Align: once the layer is
+/// distorted, that is where it looks centered, not the center of its undistorted frame.
 fn snap_points(layer: &Layer) -> [P2; 5] {
     let c = layer.corners();
-    [layer.transform.center, c[0], c[1], c[2], c[3]]
+    let (mut lo, mut hi) = (c[0], c[0]);
+    for p in &c[1..] {
+        lo = [lo[0].min(p[0]), lo[1].min(p[1])];
+        hi = [hi[0].max(p[0]), hi[1].max(p[1])];
+    }
+    let middle = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0];
+    [middle, c[0], c[1], c[2], c[3]]
 }
 
 /// The anchor nearest to any of `points`, if within `reach` (mm): the offset that moves
@@ -289,7 +305,7 @@ pub fn show(
     let response = ui.allocate_rect(rect, Sense::click_and_drag());
     let mut changed = false;
 
-    // Keep the view centred when the window resizes, and fit on demand.
+    // Keep the view centered when the window resizes, and fit on demand.
     if state.fit_pending || !state.rect.is_positive() {
         state.camera.fit(rect, doc.page_mm());
         state.fit_pending = false;
@@ -430,6 +446,14 @@ pub fn show(
         {
             *selected = topmost_hit(doc, cam.to_mm(rect, p));
         }
+        // A double click on a text layer goes to its text.
+        if response.double_clicked_by(PointerButton::Primary)
+            && selected
+                .and_then(|id| doc.layer(id))
+                .is_some_and(|l| l.text.is_some())
+        {
+            state.edit_text = true;
+        }
     }
 
     if let Some(drag) = &state.drag {
@@ -444,7 +468,7 @@ pub fn show(
                     layer.transform.center = [start.center[0] + d[0], start.center[1] + d[1]];
                 }
             }
-            // The centre or corner nearest an anchor lands on it; everything moves along.
+            // The center or corner nearest an anchor lands on it; everything moves along.
             if let Some(reach) = snap_reach {
                 let points: Vec<P2> = drag
                     .layers
@@ -477,7 +501,7 @@ pub fn show(
             match drag.kind {
                 DragKind::Move => {}
                 DragKind::Stretch(edge) => {
-                    // The opposite edge stays put; with Alt, both move (centre fixed).
+                    // The opposite edge stays put; with Alt, both move (center fixed).
                     let (dir, extent) = edge_axis(s, layer.size_px, edge);
                     let axis = if edge % 2 == 0 { 1 } else { 0 };
                     let px = layer.size_px[axis].max(1) as f32;
@@ -514,7 +538,7 @@ pub fn show(
                     };
                     t.scale = [(s.scale[0] * f).max(1e-4), (s.scale[1] * f).max(1e-4)];
                     // The dragged corner snaps: scaled so it comes as close as it can to
-                    // the anchor along its diagonal, the centre staying put.
+                    // the anchor along its diagonal, the center staying put.
                     if let Some(reach) = snap_reach {
                         let start = corners_of(s, layer.size_px);
                         let i = (0..4)
@@ -849,8 +873,9 @@ impl Painting<'_> {
     }
 }
 
-/// Covers what the template cuts away (outside the outline, inside holes) with paper,
-/// exactly as the export leaves it blank.
+/// Covers what the template cuts away (outside the outline, inside holes) with paper, as
+/// the export leaves it blank; with `cut_opacity` below 1, what will be cut shows through
+/// faintly.
 fn paint_cuts(
     ctx: &egui::Context,
     painter: &egui::Painter,
@@ -917,7 +942,7 @@ fn paint_cuts(
     if let Some(c) = &state.cut_preview {
         let corners =
             [[0.0, 0.0], [page[0], 0.0], page, [0.0, page[1]]].map(|p| cam.to_screen(rect, p));
-        paint_quad(painter, c.texture.id(), corners, 1.0);
+        paint_quad(painter, c.texture.id(), corners, state.cut_opacity);
     }
 }
 
@@ -1298,7 +1323,7 @@ mod tests {
         frame(doc, &mut state, vec![button(to, false)]);
     }
 
-    /// A 100 x 50 mm image centred at (100, 100): corners (50, 75) to (150, 125).
+    /// A 100 x 50 mm image centered at (100, 100): corners (50, 75) to (150, 125).
     fn snap_doc() -> Document {
         let mut l = Layer::new(1, "l".into(), "x.png".into());
         l.size_px = [100, 50];
@@ -1319,19 +1344,41 @@ mod tests {
     }
 
     #[test]
-    fn moving_snaps_centre_or_corner_to_anchors() {
+    fn distorted_layer_snaps_by_the_middle_of_what_is_drawn() {
+        let mut l = Layer::new(1, "l".into(), "x.png".into());
+        l.size_px = [100, 50];
+        l.transform.center = [50.0, 25.0];
+        assert_eq!(snap_points(&l)[0], [50.0, 25.0], "undistorted: its center");
+        l.transform.rotation_deg = 30.0;
+        let m = snap_points(&l)[0];
+        assert!(
+            (m[0] - 50.0).abs() < 1e-3 && (m[1] - 25.0).abs() < 1e-3,
+            "rotated too"
+        );
+        // The right corners pulled further right: the drawn shape spans x 0..140.
+        l.transform.rotation_deg = 0.0;
+        l.transform.distort = [[0.0, 0.0], [0.4, 0.0], [0.4, 0.0], [0.0, 0.0]];
+        let m = snap_points(&l)[0];
+        assert!(
+            (m[0] - 70.0).abs() < 1e-3 && (m[1] - 25.0).abs() < 1e-3,
+            "{m:?}"
+        );
+    }
+
+    #[test]
+    fn moving_snaps_center_or_corner_to_anchors() {
         let close = |a: P2, b: P2| (a[0] - b[0]).abs() < 0.05 && (a[1] - b[1]).abs() < 0.05;
         let (none, alt) = (egui::Modifiers::NONE, egui::Modifiers::ALT);
-        // The centre comes within reach of an anchor and lands on it.
+        // The center comes within reach of an anchor and lands on it.
         let mut doc = snap_doc();
-        let near_centre = anchors(&[[104.0, 102.0]]);
+        let near_center = anchors(&[[104.0, 102.0]]);
         canvas_drag_in(
             &mut doc,
             [100.0, 100.0],
             [103.0, 101.0],
             none,
             false,
-            &near_centre,
+            &near_center,
         );
         let c = doc.layer(1).unwrap().transform.center;
         assert!(close(c, [104.0, 102.0]), "{c:?}");
@@ -1343,7 +1390,7 @@ mod tests {
             [103.0, 101.0],
             alt,
             false,
-            &near_centre,
+            &near_center,
         );
         let c = doc.layer(1).unwrap().transform.center;
         assert!(close(c, [103.0, 101.0]), "{c:?}");
@@ -1373,7 +1420,7 @@ mod tests {
     fn resizing_and_distorting_snap_the_dragged_corner() {
         let close = |a: P2, b: P2| (a[0] - b[0]).abs() < 0.05 && (a[1] - b[1]).abs() < 0.05;
         let none = egui::Modifiers::NONE;
-        // Scaling around the centre: the corner lands on an anchor on its diagonal.
+        // Scaling around the center: the corner lands on an anchor on its diagonal.
         let mut doc = snap_doc();
         let on_diagonal = anchors(&[[160.0, 130.0]]);
         canvas_drag_in(
@@ -1438,7 +1485,7 @@ mod tests {
         assert!(close(t.scale, [1.2, 1.0]), "{:?}", t.scale);
         assert!(close(t.center, [100.0, 110.0]), "{:?}", t.center);
 
-        // Alt stretches both sides around the centre.
+        // Alt stretches both sides around the center.
         let mut doc = layer(0.0);
         canvas_drag(
             &mut doc,
@@ -1563,7 +1610,7 @@ mod tests {
     }
 
     #[test]
-    fn fit_centres_page() {
+    fn fit_centers_page() {
         let rect = Rect::from_min_size(pos2(0.0, 0.0), vec2(1000.0, 500.0));
         let mut cam = Camera {
             zoom: 1.0,

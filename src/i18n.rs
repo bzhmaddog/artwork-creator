@@ -1,18 +1,20 @@
 //! Translations of the user interface.
 //!
-//! Texts are written in English in the code and looked up in the current language's
-//! table when shown; the English text is the key. A text missing from a table shows in
-//! English. Tables live in `locales/<code>.json` and are built into the program.
+//! The code names each text by a key that says what it is for, such as
+//! `ADD_TEXT_LAYER`, and looks it up in the current language's table when shown. Tables
+//! live in `locales/<code>.json` and are built into the program: `en-US.json` holds the
+//! English of every key, and is used for a key missing from another table.
 //!
-//! - [`tr!`] translates a text, and fills in `{name}` placeholders:
-//!   `tr!("Cannot open {path}: {e}", path = p.display(), e = e)`.
-//! - [`tr_n!`] picks the singular or plural text for a count, given as `{n}`:
-//!   `tr_n!("{n} shape", "{n} shapes", count)`.
-//! - [`tr_noop!`] marks a text for translation where it is defined (e.g. a constant),
-//!   for [`translate`] to look it up where it is shown.
+//! - [`tr!`] translates a key, and fills in `{name}` placeholders:
+//!   `tr!("CANNOT_OPEN_FILE", path = p.display(), e = e)`.
+//! - [`tr_n!`] picks the singular or plural text for a count, given as `{n}`: the
+//!   tables hold `KEY_ONE` and `KEY_OTHER`, and the code asks for `tr_n!("KEY", count)`.
+//! - [`tr_noop!`] marks a key where it is defined (e.g. a constant), for [`translate`] to
+//!   look it up where it is shown.
 //!
-//! A test checks that every text marked in the code has a French translation, with the
-//! same placeholders, and that the table has no leftovers.
+//! The tests check that every key of the code is in `en-US.json`, that the French table
+//! is complete, that no table has leftovers, and that placeholders match. The British
+//! English table only holds the texts spelled differently (colour, centre, grey...).
 
 use std::collections::HashMap;
 use std::fmt::Display;
@@ -28,31 +30,38 @@ const STORAGE_KEY: &str = "language";
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 #[repr(u8)]
 pub enum Language {
+    /// U.S. English, the language of the code.
     English = 0,
+    /// French from France, also used for other French locales (fr-CA...).
     French = 1,
+    BritishEnglish = 2,
 }
 
 impl Language {
-    pub const ALL: [Language; 2] = [Language::English, Language::French];
+    pub const ALL: [Language; 3] = [
+        Language::English,
+        Language::BritishEnglish,
+        Language::French,
+    ];
 
     /// The language's own name, as shown in the Language menu.
     pub fn native_name(self) -> &'static str {
         match self {
-            Language::English => "English",
-            Language::French => "Français",
+            Language::English => "English (US)",
+            Language::BritishEnglish => "English (UK)",
+            Language::French => "Français (France)",
         }
     }
 
-    /// The supported language of a locale such as `fr-FR` or `fr_CA.UTF-8`; English for
-    /// any other.
+    /// The supported language of a locale such as `fr-FR`, `en_GB.UTF-8` or `fr_CA`;
+    /// U.S. English for any other.
     pub fn from_locale(locale: &str) -> Language {
-        let code = locale
-            .split(['-', '_', '.', '@'])
-            .next()
-            .unwrap_or("")
-            .to_ascii_lowercase();
-        match code.as_str() {
-            "fr" => Language::French,
+        let mut parts = locale.split(['-', '_', '.', '@']);
+        let code = parts.next().unwrap_or("").to_ascii_lowercase();
+        let region = parts.next().unwrap_or("").to_ascii_uppercase();
+        match (code.as_str(), region.as_str()) {
+            ("fr", _) => Language::French,
+            ("en", "GB" | "UK") => Language::BritishEnglish,
             _ => Language::English,
         }
     }
@@ -64,19 +73,22 @@ impl Language {
             .unwrap_or(Language::English)
     }
 
-    /// Translations from English; `None` for English itself.
-    fn table(self) -> Option<&'static HashMap<&'static str, &'static str>> {
+    /// The language's texts, by key.
+    fn table(self) -> &'static HashMap<&'static str, &'static str> {
+        static US: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
         static FR: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
+        static GB: OnceLock<HashMap<&'static str, &'static str>> = OnceLock::new();
         match self {
-            Language::English => None,
-            Language::French => Some(FR.get_or_init(|| parse_table(FRENCH))),
+            Language::English => US.get_or_init(|| parse_table(US_ENGLISH)),
+            Language::French => FR.get_or_init(|| parse_table(FRENCH)),
+            Language::BritishEnglish => GB.get_or_init(|| parse_table(BRITISH_ENGLISH)),
         }
     }
 
     /// Whether `n` takes the singular: only 1 in English, 0 and 1 in French.
     fn is_singular(self, n: u64) -> bool {
         match self {
-            Language::English => n == 1,
+            Language::English | Language::BritishEnglish => n == 1,
             Language::French => n <= 1,
         }
     }
@@ -89,6 +101,7 @@ pub enum Preference {
     System,
     English,
     French,
+    BritishEnglish,
 }
 
 impl Preference {
@@ -97,6 +110,7 @@ impl Preference {
             Preference::System => Language::system(),
             Preference::English => Language::English,
             Preference::French => Language::French,
+            Preference::BritishEnglish => Language::BritishEnglish,
         }
     }
 
@@ -117,13 +131,16 @@ impl From<Language> for Preference {
         match l {
             Language::English => Preference::English,
             Language::French => Preference::French,
+            Language::BritishEnglish => Preference::BritishEnglish,
         }
     }
 }
 
-const FRENCH: &str = include_str!("../locales/fr.json");
+const US_ENGLISH: &str = include_str!("../locales/en-US.json");
+const FRENCH: &str = include_str!("../locales/fr-FR.json");
+const BRITISH_ENGLISH: &str = include_str!("../locales/en-GB.json");
 
-/// Reads a `locales/*.json` table: an object of English texts to translations.
+/// Reads a `locales/*.json` table: an object of keys to texts.
 fn parse_table(json: &'static str) -> HashMap<&'static str, &'static str> {
     // Leaked once per language, so lookups hand out `&'static str`.
     let map: HashMap<String, String> = serde_json::from_str(json).unwrap_or_else(|e| {
@@ -142,6 +159,7 @@ static CURRENT: AtomicU8 = AtomicU8::new(Language::English as u8);
 pub fn current() -> Language {
     match CURRENT.load(Ordering::Relaxed) {
         1 => Language::French,
+        2 => Language::BritishEnglish,
         _ => Language::English,
     }
 }
@@ -151,21 +169,30 @@ pub fn set(lang: Language) {
     CURRENT.store(lang as u8, Ordering::Relaxed);
 }
 
-/// `text` in the current language, or `text` itself if it has no translation.
-pub fn translate(text: &str) -> &str {
-    current()
-        .table()
-        .and_then(|t| t.get(text).copied())
-        .unwrap_or(text)
+/// The text of `key` in the current language, else in U.S. English. Anything that is
+/// not a key, such as a name from a template, is returned as it is.
+pub fn translate(key: &str) -> &str {
+    lookup(current(), key).unwrap_or(key)
 }
 
-/// The English singular or plural text for `n` in the current language, translated.
-pub fn translate_n(one: &'static str, other: &'static str, n: u64) -> &'static str {
-    let text = if current().is_singular(n) { one } else { other };
-    current()
-        .table()
-        .and_then(|t| t.get(text).copied())
-        .unwrap_or(text)
+/// The singular or plural text of `key` for `n` in the current language: `KEY_ONE` or
+/// `KEY_OTHER`, else in U.S. English, else `key` itself.
+pub fn translate_n(key: &'static str, n: u64) -> &'static str {
+    let lang = current();
+    let suffix = if lang.is_singular(n) {
+        "_ONE"
+    } else {
+        "_OTHER"
+    };
+    lookup(lang, &format!("{key}{suffix}")).unwrap_or(key)
+}
+
+/// The text of `key` in `lang`, else in U.S. English.
+fn lookup(lang: Language, key: &str) -> Option<&'static str> {
+    lang.table()
+        .get(key)
+        .or_else(|| Language::English.table().get(key))
+        .copied()
 }
 
 /// Replaces each `{name}` in `text` with its value; other braces are kept.
@@ -196,7 +223,7 @@ pub fn fill(text: &str, args: &[(&str, &dyn Display)]) -> String {
     out
 }
 
-/// Translates a text; with `name = value` arguments, fills in its placeholders and
+/// Translates a key; with `name = value` arguments, fills in its placeholders and
 /// gives a `String`.
 macro_rules! tr {
     ($text:literal) => {
@@ -210,20 +237,20 @@ macro_rules! tr {
     };
 }
 
-/// The singular or plural text for a count, translated, with `{n}` and any other
-/// `name = value` placeholders filled in.
+/// The singular or plural text of a key for a count, translated, with `{n}` and any
+/// other `name = value` placeholders filled in.
 macro_rules! tr_n {
-    ($one:literal, $other:literal, $n:expr $(, $name:ident = $value:expr)* $(,)?) => {{
+    ($key:literal, $n:expr $(, $name:ident = $value:expr)* $(,)?) => {{
         let n = $n;
         $crate::i18n::fill(
-            $crate::i18n::translate_n($one, $other, n as u64),
+            $crate::i18n::translate_n($key, n as u64),
             &[("n", &n as &dyn ::std::fmt::Display)
                 $(, (stringify!($name), &$value as &dyn ::std::fmt::Display))*],
         )
     }};
 }
 
-/// Marks a text for translation without translating it; see [`translate`].
+/// Marks a key for translation without translating it; see [`translate`].
 macro_rules! tr_noop {
     ($text:literal) => {
         $text
@@ -235,8 +262,8 @@ pub(crate) use {tr, tr_n, tr_noop};
 /// View > Language entries: System, then each language in its own name.
 pub fn menu(ui: &mut egui::Ui, pref: &mut Preference) {
     let before = *pref;
-    ui.radio_value(pref, Preference::System, tr!("System"))
-        .on_hover_text(tr!("Use the operating system's language"));
+    ui.radio_value(pref, Preference::System, tr!("FOLLOW_SYSTEM"))
+        .on_hover_text(tr!("FOLLOW_SYSTEM_LANGUAGE_HINT"));
     for lang in Language::ALL {
         ui.radio_value(pref, lang.into(), lang.native_name());
     }
@@ -258,6 +285,12 @@ mod tests {
         assert_eq!(Language::from_locale("fr_CA.UTF-8"), Language::French);
         assert_eq!(Language::from_locale("FR"), Language::French);
         assert_eq!(Language::from_locale("en-US"), Language::English);
+        assert_eq!(Language::from_locale("en"), Language::English);
+        assert_eq!(Language::from_locale("en-GB"), Language::BritishEnglish);
+        assert_eq!(
+            Language::from_locale("en_GB.UTF-8"),
+            Language::BritishEnglish
+        );
         assert_eq!(Language::from_locale("de-DE"), Language::English);
         assert_eq!(Language::from_locale("C.UTF-8"), Language::English);
         assert_eq!(Language::from_locale(""), Language::English);
@@ -345,20 +378,23 @@ mod tests {
                     })
                     .collect::<Vec<_>>()
                     .join("\n");
-                for (mac, count) in [("tr!(", 1), ("tr_n!(", 2), ("tr_noop!(", 1)] {
+                for (mac, plural) in [("tr!(", false), ("tr_n!(", true), ("tr_noop!(", false)] {
                     for (at, _) in source.match_indices(mac) {
                         // Skips `str!(`-like names ending in the macro's name.
                         let before = source[..at].chars().next_back();
                         if before.is_some_and(|c| c.is_alphanumeric() || c == '_') {
                             continue;
                         }
-                        let mut rest = source[at + mac.len()..].trim_start();
-                        for _ in 0..count {
-                            let (text, after) = string_literal(rest).unwrap_or_else(|| {
-                                panic!("{}: {mac} must start with string literals", path.display())
-                            });
-                            found.insert(text, path.display().to_string());
-                            rest = after.trim_start().trim_start_matches(',').trim_start();
+                        let rest = source[at + mac.len()..].trim_start();
+                        let (key, _) = string_literal(rest).unwrap_or_else(|| {
+                            panic!("{}: {mac} must start with a string literal", path.display())
+                        });
+                        let file = path.display().to_string();
+                        if plural {
+                            found.insert(format!("{key}_ONE"), file.clone());
+                            found.insert(format!("{key}_OTHER"), file);
+                        } else {
+                            found.insert(key, file);
                         }
                     }
                 }
@@ -383,33 +419,140 @@ mod tests {
         out
     }
 
+    fn load(json: &str, name: &str) -> BTreeMap<String, String> {
+        serde_json::from_str(json).unwrap_or_else(|e| panic!("{name} is not valid: {e}"))
+    }
+
+    /// Keys of `table` that the code does not use.
+    fn unused<'a>(
+        table: &'a BTreeMap<String, String>,
+        keys: &BTreeMap<String, String>,
+    ) -> Vec<&'a String> {
+        table.keys().filter(|k| !keys.contains_key(*k)).collect()
+    }
+
+    #[test]
+    fn keys_are_upper_snake_case() {
+        for key in marked_texts().keys() {
+            assert!(
+                !key.is_empty()
+                    && key
+                        .chars()
+                        .all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_'),
+                "{key:?} is not a key such as ADD_TEXT_LAYER"
+            );
+        }
+    }
+
+    #[test]
+    fn us_english_table_has_every_key() {
+        let us = load(US_ENGLISH, "locales/en-US.json");
+        let keys = marked_texts();
+        assert!(keys.len() > 100, "found only {} keys", keys.len());
+        let missing: Vec<_> = keys
+            .iter()
+            .filter(|(k, _)| us.get(*k).is_none_or(|v| v.is_empty()))
+            .map(|(k, file)| format!("{k} ({file})"))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "missing in locales/en-US.json:\n{}",
+            missing.join("\n")
+        );
+        let unused = unused(&us, &keys);
+        assert!(
+            unused.is_empty(),
+            "keys no longer in the code, in locales/en-US.json: {unused:?}"
+        );
+    }
+
     #[test]
     fn french_table_is_complete() {
-        let table: BTreeMap<String, String> =
-            serde_json::from_str(FRENCH).expect("locales/fr.json is valid JSON");
-        let marked = marked_texts();
-        assert!(marked.len() > 100, "found only {} texts", marked.len());
-        let missing: Vec<_> = marked
+        let us = load(US_ENGLISH, "locales/en-US.json");
+        let fr = load(FRENCH, "locales/fr-FR.json");
+        let keys = marked_texts();
+        let missing: Vec<_> = keys
             .iter()
-            .filter(|(k, _)| table.get(*k).is_none_or(|v| v.is_empty()))
-            .map(|(k, file)| format!("{k:?} ({file})"))
+            .filter(|(k, _)| fr.get(*k).is_none_or(|v| v.is_empty()))
+            .map(|(k, file)| format!("{k} ({file})"))
             .collect();
         assert!(
             missing.is_empty(),
             "missing French translations:\n{}",
             missing.join("\n")
         );
-        let unused: Vec<_> = table.keys().filter(|k| !marked.contains_key(*k)).collect();
+        let unused = unused(&fr, &keys);
         assert!(
             unused.is_empty(),
-            "translations of texts no longer in the code: {unused:?}"
+            "keys no longer in the code, in locales/fr-FR.json: {unused:?}"
         );
-        for (en, fr) in &table {
+        for (key, text) in &fr {
+            if let Some(en) = us.get(key) {
+                assert_eq!(
+                    placeholders(en),
+                    placeholders(text),
+                    "placeholders of {key} in French"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn british_table_matches_the_code() {
+        let us = load(US_ENGLISH, "locales/en-US.json");
+        let gb = load(BRITISH_ENGLISH, "locales/en-GB.json");
+        let keys = marked_texts();
+        let unused = unused(&gb, &keys);
+        assert!(
+            unused.is_empty(),
+            "keys no longer in the code, in locales/en-GB.json: {unused:?}"
+        );
+        for (key, text) in &gb {
+            let Some(en) = us.get(key) else { continue };
+            assert_ne!(en, text, "en-GB: {key} is spelled as in en-US");
             assert_eq!(
                 placeholders(en),
-                placeholders(fr),
-                "placeholders differ in the translation of {en:?}"
+                placeholders(text),
+                "placeholders of {key} in en-GB"
             );
         }
+        // Texts with a U.S. spelling need their British one.
+        const US: [&str; 9] = [
+            "color",
+            "center",
+            "gray",
+            "canceled",
+            "canceling",
+            "neighbor",
+            "meter ",
+            "rize",
+            "lize",
+        ];
+        let missing: Vec<_> = us
+            .iter()
+            .filter(|(k, v)| {
+                let lower = v.to_lowercase();
+                US.iter().any(|w| lower.contains(w)) && !gb.contains_key(*k)
+            })
+            .map(|(k, v)| format!("{k}: {v:?}"))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "missing British spellings in locales/en-GB.json:\n{}",
+            missing.join("\n")
+        );
+    }
+
+    #[test]
+    fn missing_keys_fall_back_to_us_english() {
+        let gb = Language::BritishEnglish;
+        assert_eq!(
+            lookup(gb, "ADD_TEXT_LAYER"),
+            Some("Add a text layer (Ctrl+T)")
+        );
+        assert_eq!(lookup(gb, "PARAM_COLOR"), Some("Colour"));
+        assert_eq!(lookup(Language::French, "PARAM_COLOR"), Some("Couleur"));
+        // Not a key, such as a template's own element name: shown as it is.
+        assert_eq!(lookup(gb, "Button centers"), None);
     }
 }

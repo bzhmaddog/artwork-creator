@@ -24,6 +24,11 @@ layers panel on the right](doc/capture.png)
 - **Layers and groups**: add images (PNG, JPEG, WebP, BMP, GIF) by button or drag and drop;
   reorder, group, duplicate, hide and lock them; group opacity is applied to the group as
   a whole.
+- **Text layers**: any installed font, bold and italic, multi-line text aligned left,
+  centered or right, letter and line spacing, color and outline. Text layers move, scale,
+  rotate, distort and take effects like images, and are drawn at the export resolution
+  so they print sharp. Fonts are saved inside `.artwork` projects (except those whose
+  license forbids embedding them), so a shared project looks the same elsewhere.
 - **Transform on the canvas**: move, scale, rotate, stretch width or height on its own, and
   drag single corners to fake perspective.
 - **Effects** on each image layer: brightness / contrast, hue / saturation, grayscale,
@@ -31,11 +36,11 @@ layers panel on the right](doc/capture.png)
   outline. They are stacked, reordered and toggled in the layer's properties, applied to
   the export at full resolution, and never change the image file. More effects can be
   added with [plugins](#plugins).
-- **Snap to anchors**: image centres and corners snap to points defined by the template,
-  such as the button centres.
+- **Snap to anchors**: image centers and corners snap to points defined by the template,
+  such as the button centers.
 - **Align** layers or groups to the page or to the template.
 - **Undo / redo** for every change to the project.
-- **Templates** made of several elements, each in its own DXF file, with its own colour and
+- **Templates** made of several elements, each in its own DXF file, with its own color and
   visibility.
 - **Export** PNG and/or PDF at the resolution you choose (72 to 1200 DPI). Choose which
   template lines are printed (in the PDF they stay sharp vector lines), and whether the
@@ -46,8 +51,8 @@ layers panel on the right](doc/capture.png)
   that only exist inside an archive are then written to an "*name* images" folder next to
   it.
   **File > Open Recent** lists the last 10 projects.
-- **English and French** interface. It follows the system language by default; choose
-  another in **View > Language**.
+- **English (US and UK) and French (France)** interface. It follows the system language
+  by default; choose another in **View > Language**.
 
 ## Building
 
@@ -87,6 +92,19 @@ is skipped if the `x86_64-pc-windows-gnu` target is not installed. Run them by h
 `make pre-commit`, or for one target with `make pre-commit ARGS=--linux` or
 `ARGS=--windows`.
 
+### Consistency
+
+When adding a tool or feature, give it the same treatment as its siblings. For example,
+every way of adding a layer has a keyboard shortcut, shown in its menu entry or tooltip
+and listed under [Shortcuts](#shortcuts); every text has a translation key, with its
+text in `locales/en-US.json` and `locales/fr-FR.json` (and `locales/en-GB.json` when the
+British spelling differs). Before finishing, compare the new feature with the closest
+existing one and fill in what it lacks.
+
+Write code, comments, docs and texts in U.S. English (color, center, gray, canceled);
+British spellings belong in `locales/en-GB.json` only. Name translation keys after what
+the text is for, in upper snake case: `ADD_TEXT_LAYER`, `EXPORT_CANCELED`.
+
 ### Releasing
 
 `make version` lists the commits since the last release tag and suggests the next version.
@@ -113,7 +131,7 @@ describes the elements:
     { "kind": "buttons", "dxf": "buttons.dxf", "name": "Action buttons" },
     { "kind": "buttons", "dxf": "menu.dxf", "name": "Menu buttons" },
     { "kind": "cutouts", "dxf": "holes.dxf", "name": "Fastener holes", "color": "#ff8c00" },
-    { "kind": "anchors", "dxf": "anchors.dxf", "name": "Button centres" }
+    { "kind": "anchors", "dxf": "anchors.dxf", "name": "Button centers" }
   ],
   "placement": { "rotation": 90, "flip_x": false, "flip_y": true, "offset_mm": [0, 0] }
 }
@@ -123,12 +141,12 @@ describes the elements:
   buttons and cutouts are holes, left blank in the export unless turned off in the Export
   window.
 - `anchors` are points that images snap to on the canvas: while an image is moved, its
-  centre or a corner lands on an anchor that comes near, and a corner being resized or
+  center or a corner lands on an anchor that comes near, and a corner being resized or
   distorted does too. Hold Alt to drag freely, or turn it off with **View > Snap to
   anchors**. Anchors are drawn as small crosses and cut nothing; they are printed only when
   ticked under **Print lines** in the Export window. They are read from the DXF's POINT
-  entities, usually all in one `anchors.dxf`. The centre of each closed shape counts too,
-  so an anchors element can also point at a buttons DXF to get the button centres. They
+  entities, usually all in one `anchors.dxf`. The center of each closed shape counts too,
+  so an anchors element can also point at a buttons DXF to get the button centers. They
   don't change the template's size or placement.
 - All DXF files of a template must share the same coordinates, as when they are exported
   from one drawing. Outlines drawn as separate lines and arcs are joined automatically.
@@ -173,12 +191,23 @@ once.
 
 ## Translations
 
-Texts are written in English in the code with `tr!("…")` (or `tr_n!` for counts, and
-`tr_noop!` where a text is defined apart from where it is shown); the English text is the
-key. Translations live in `locales/<code>.json` and are built into the program; a text
-missing there shows in English. The tests check that every marked text has a French
-translation with the same `{placeholders}`, and that `locales/fr.json` has no leftovers.
-Effects from plugins show their own names.
+The code names each text by a key that says what it is for: `tr!("ADD_TEXT_LAYER")`
+(`tr_n!("LAYER_COUNT", n)` for counts, and `tr_noop!` where a key is defined apart from
+where it is shown). The texts live in `locales/<code>.json`, built into the program:
+
+```json
+"ADD_TEXT_LAYER": "Add a text layer (Ctrl+T)",
+"LAYER_COUNT_ONE": "{n} layer",
+"LAYER_COUNT_OTHER": "{n} layers",
+```
+
+To reword a text, edit it in that language's file only. `locales/en-US.json` holds the
+English of every key and is used for keys missing from another table. `locales/fr-FR.json`
+must have every key. `locales/en-GB.json` only holds the texts spelled differently in
+British English (colour, centre, grey, cancelled...). The tests check that every key of
+the code is in en-US and fr-FR, that no table has leftovers, that `{placeholders}` match,
+and that texts with a U.S. spelling have their en-GB entry. Effects from plugins show
+their own names.
 
 To add a language: add a `Language` variant and its table in `src/i18n.rs`, and a
 `locales/<code>.json` file.
@@ -190,6 +219,9 @@ To add a language: add a `Language` variant and its table in `src/i18n.rs`, and 
 | New / Open / Save project | Ctrl+N / Ctrl+O / Ctrl+S |
 | Export | Ctrl+E |
 | Undo / Redo | Ctrl+Z / Ctrl+Shift+Z or Ctrl+Y |
+| Add an image layer | Ctrl+I, or drop image files on the window |
+| Add a text layer | Ctrl+T |
+| Edit a text layer's text | Double-click it on the canvas |
 | Duplicate | Ctrl+D |
 | Group / Ungroup | Ctrl+G / Ctrl+Shift+G |
 | Delete layer | Del |
@@ -203,7 +235,7 @@ On the canvas, with a layer selected:
 - **Corner handles** scale; **Shift** scales width and height freely.
 - **Distort** (in Properties) makes corner handles move one corner at a time, for
   perspective. **Holding Ctrl** swaps between resizing and distorting while you drag.
-- **Edge handles** stretch one side; **Alt** stretches both sides from the centre.
+- **Edge handles** stretch one side; **Alt** stretches both sides from the center.
 - **Rotation handle** rotates; **Shift** snaps to 15° steps.
 
 ## License

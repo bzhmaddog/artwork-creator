@@ -14,12 +14,19 @@ mod project;
 mod recent;
 mod render;
 mod template;
+mod text;
 mod theme;
 mod view;
 
 /// Starts the app, opening the project file given on the command line, if any.
 fn main() -> eframe::Result {
-    env_logger::init();
+    // RUST_LOG overrides this. The title bar drawn on Wayland asks the desktop for its
+    // color scheme and logs an error where no one answers (e.g. WSLg); it then uses its
+    // default, so that error is hidden.
+    env_logger::Builder::from_env(
+        env_logger::Env::default().default_filter_or("error,sctk_adwaita=off"),
+    )
+    .init();
     // A project file can be passed on the command line (or by double-clicking an associated file).
     let project = std::env::args_os().nth(1).map(std::path::PathBuf::from);
     // Plugins are loaded once, before any effect is used.

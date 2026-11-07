@@ -79,7 +79,7 @@ last_tag() {
 
 # Sets $level (major, minor or patch), $reason and $range from the commits since the
 # last tag. $level is empty when there is nothing to release.
-analyse() {
+analyze() {
     tag=$(last_tag)
     current=$(toml_version "$APP_TOML")
     if [ -z "$tag" ]; then
@@ -142,7 +142,7 @@ sdk_status() {
 }
 
 cmd_suggest() {
-    analyse
+    analyze
     echo "Current version: $current"
     echo "Last release:    ${tag:-none}"
     if [ -n "$tag" ] && [ -n "$(git rev-list "$range")" ]; then
@@ -194,7 +194,7 @@ cmd_release() {
 
     [ -z "$(git status --porcelain)" ] || die "the working tree has changes; commit or stash them first"
 
-    analyse
+    analyze
     if [ -n "$want" ]; then
         new=$(resolve "$current" "$want")
     else
@@ -223,7 +223,7 @@ cmd_release() {
     read -r answer
     case "$answer" in
         y | Y | yes) ;;
-        *) die "cancelled" ;;
+        *) die "canceled" ;;
     esac
 
     [ "$new" != "$current" ] && set_toml_version "$APP_TOML" "$new"

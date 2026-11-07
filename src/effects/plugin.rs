@@ -188,7 +188,7 @@ pub fn load_dir(dir: &Path) -> Loaded {
 
 /// Loads one plugin library.
 pub fn load_library(path: &Path) -> Result<(PluginInfo, Vec<NativeEffect>), String> {
-    // SAFETY: none can be given: loading runs the library's initialisers, and its code
+    // SAFETY: none can be given: loading runs the library's initializers, and its code
     // is trusted from here on. The README warns to install only trusted plugins.
     let library = unsafe { Library::new(path) }.map_err(|e| e.to_string())?;
     let entry = {
@@ -352,7 +352,7 @@ fn param_specs(json: &str) -> Result<Vec<ParamSpec>, String> {
             sdk::ParamKind::Bool { default } => ParamKind::Bool { default },
             sdk::ParamKind::Color { default } => ParamKind::Color {
                 default: color_from_hex(&default)
-                    .ok_or_else(|| bad("default is not a #rrggbbaa colour"))?,
+                    .ok_or_else(|| bad("default is not a #rrggbbaa color"))?,
             },
             sdk::ParamKind::Choice { options, default } => {
                 if options.is_empty() {
@@ -385,7 +385,7 @@ mod tests {
     use artwork_plugin_sdk::{Image, Param, Values};
     use serde_json::Value;
 
-    /// Fills the image with a colour; panics or fails on request.
+    /// Fills the image with a color; panics or fails on request.
     struct Fill;
 
     impl sdk::Effect for Fill {
@@ -397,7 +397,7 @@ mod tests {
         }
         fn params(&self) -> Vec<Param> {
             vec![
-                Param::color("color", "Colour", [10, 20, 30, 255]),
+                Param::color("color", "Color", [10, 20, 30, 255]),
                 Param::float("margin", "Margin", 0.0, 10.0, 0.0),
                 Param::choice(
                     "fail",

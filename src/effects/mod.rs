@@ -284,7 +284,7 @@ impl<'a> Params<'a> {
         }
     }
 
-    /// Every parameter's value as read by the getters above: in range, with colours as
+    /// Every parameter's value as read by the getters above: in range, with colors as
     /// `#rrggbbaa`. This is what plugins receive.
     pub fn resolved(&self) -> Value {
         let mut map = serde_json::Map::new();

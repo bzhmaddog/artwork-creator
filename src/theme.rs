@@ -8,7 +8,7 @@ use egui::{Theme, ThemePreference};
 
 use crate::i18n::tr;
 
-/// Asks the desktop for its colour scheme in the background, and makes it egui's fallback
+/// Asks the desktop for its color scheme in the background, and makes it egui's fallback
 /// theme (used only while the window system reports none).
 pub fn detect_in_background(ctx: &egui::Context) {
     if !cfg!(target_os = "linux") {
@@ -17,7 +17,7 @@ pub fn detect_in_background(ctx: &egui::Context) {
     let ctx = ctx.clone();
     std::thread::spawn(move || {
         if let Some(theme) = desktop_theme() {
-            log::info!("desktop colour scheme: {theme:?}");
+            log::info!("desktop color scheme: {theme:?}");
             ctx.options_mut(|o| o.fallback_theme = theme);
             ctx.request_repaint();
         }
@@ -90,10 +90,10 @@ fn parse_gsettings_scheme(out: &str) -> Option<Theme> {
 pub fn menu(ui: &mut egui::Ui) {
     let mut pref = ui.ctx().options(|o| o.theme_preference);
     let before = pref;
-    ui.radio_value(&mut pref, ThemePreference::System, tr!("System"))
-        .on_hover_text(tr!("Follow the operating system's light or dark setting"));
-    ui.radio_value(&mut pref, ThemePreference::Light, tr!("Light"));
-    ui.radio_value(&mut pref, ThemePreference::Dark, tr!("Dark"));
+    ui.radio_value(&mut pref, ThemePreference::System, tr!("FOLLOW_SYSTEM"))
+        .on_hover_text(tr!("FOLLOW_SYSTEM_THEME_HINT"));
+    ui.radio_value(&mut pref, ThemePreference::Light, tr!("THEME_LIGHT"));
+    ui.radio_value(&mut pref, ThemePreference::Dark, tr!("THEME_DARK"));
     if pref != before {
         ui.ctx().set_theme(pref);
     }

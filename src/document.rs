@@ -1,4 +1,4 @@
-//! Document model. All geometry is in page millimetres: origin at the
+//! Document model. All geometry is in page millimeters: origin at the
 //! top-left corner of the page, x to the right, y down.
 
 use std::path::{Path, PathBuf};
@@ -9,8 +9,9 @@ use serde::{Deserialize, Serialize};
 use crate::effects::EffectInstance;
 use crate::effects::cache::Processed;
 use crate::i18n::tr;
+use crate::text::{Text, TextState};
 
-/// A 2D point or vector, usually in page millimetres.
+/// A 2D point or vector, usually in page millimeters.
 pub type P2 = [f32; 2];
 
 /// 2D affine transform: `x' = a*x + c*y + e`, `y' = b*x + d*y + f`.
@@ -267,9 +268,9 @@ pub enum Orientation {
 /// Placement of an image layer on the page.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Transform {
-    /// Centre of the image on the page, in mm.
+    /// Center of the image on the page, in mm.
     pub center: P2,
-    /// Millimetres per image pixel, along the image's x and y axes.
+    /// Millimeters per image pixel, along the image's x and y axes.
     pub scale: P2,
     /// Clockwise rotation in degrees.
     pub rotation_deg: f32,
@@ -321,7 +322,7 @@ impl Transform {
         })
     }
 
-    /// Maps image pixel coordinates to page millimetres, including the distortion.
+    /// Maps image pixel coordinates to page millimeters, including the distortion.
     pub fn to_homography(self, size_px: [u32; 2]) -> Homography {
         let affine = self.to_affine(size_px);
         if !self.is_distorted() {
@@ -333,7 +334,7 @@ impl Transform {
             .then_affine(Affine::scale(w, h).then(affine))
     }
 
-    /// Maps image pixel coordinates (0..w, 0..h) to page millimetres.
+    /// Maps image pixel coordinates (0..w, 0..h) to page millimeters.
     pub fn to_affine(self, size_px: [u32; 2]) -> Affine {
         let (w, h) = (size_px[0] as f32, size_px[1] as f32);
         let fx = if self.flip_x { -1.0 } else { 1.0 };
@@ -345,7 +346,7 @@ impl Transform {
     }
 }
 
-/// An image placed on the page: a leaf of the layer tree.
+/// An image or a text placed on the page: a leaf of the layer tree.
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Layer {
     /// Unique in the project, shared with groups; never reused.
@@ -367,6 +368,13 @@ pub struct Layer {
     /// Effects applied to the image, in order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub effects: Vec<EffectInstance>,
+    /// Makes this a text layer: its pixels are drawn from this text, and `source` and
+    /// `data` are its font file (see `text`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<Box<Text>>,
+    /// Where the drawing of a text layer stands.
+    #[serde(skip)]
+    pub text_state: TextState,
 
     /// The image file's original bytes, saved into project archives as they are.
     #[serde(skip)]
@@ -380,7 +388,7 @@ pub struct Layer {
     /// Copy uploaded to the GPU for the canvas, at most 4096 px.
     #[serde(skip)]
     pub texture: Option<egui::TextureHandle>,
-    /// The image file couldn't be loaded.
+    /// The image file couldn't be loaded; for text, the font wasn't found.
     #[serde(skip)]
     pub broken: bool,
     /// The image with its effects applied, for the screen. Kept up to date by
@@ -402,6 +410,8 @@ impl Layer {
             opacity: 1.0,
             transform: Transform::default(),
             effects: Vec::new(),
+            text: None,
+            text_state: TextState::default(),
             data: None,
             pixmap: None,
             preview: None,
@@ -645,7 +655,7 @@ pub struct TemplatePlacement {
     pub flip_x: bool,
     /// Mirror top/bottom.
     pub flip_y: bool,
-    /// Offset of the template centre from the page centre, in mm.
+    /// Offset of the template center from the page center, in mm.
     pub offset_mm: P2,
 }
 
@@ -672,7 +682,7 @@ pub struct Document {
     pub template: Option<String>,
     /// How the template sits on the page.
     pub template_placement: TemplatePlacement,
-    /// Page colour (RGB), printed under the layers.
+    /// Page color (RGB), printed under the layers.
     pub background: [u8; 3],
     /// Layers and groups, bottom of the stack first.
     pub layers: Vec<Node>,
@@ -704,7 +714,7 @@ impl Document {
         }
     }
 
-    /// Centre of the page in mm.
+    /// Center of the page in mm.
     pub fn page_center(&self) -> P2 {
         let [w, h] = self.page_mm();
         [w / 2.0, h / 2.0]
@@ -911,11 +921,11 @@ impl Document {
     /// loaded yet.
     pub fn load(path: &Path) -> Result<Self, String> {
         let text = std::fs::read_to_string(path)
-            .map_err(|e| tr!("Cannot read {path}: {e}", path = path.display(), e = e))?;
+            .map_err(|e| tr!("CANNOT_READ_FILE", path = path.display(), e = e))?;
         let mut doc = Self::from_json(&text)?;
         let base = path.parent().unwrap_or(Path::new(""));
         doc.for_each_layer_mut(|layer| {
-            if layer.source.is_relative() {
+            if layer.source.is_relative() && !layer.source.as_os_str().is_empty() {
                 layer.source = base.join(&layer.source);
             }
         });
@@ -925,7 +935,7 @@ impl Document {
     /// Parses a project description, making sure new ids won't clash with saved ones.
     pub fn from_json(text: &str) -> Result<Self, String> {
         let mut doc: Document =
-            serde_json::from_str(text).map_err(|e| tr!("Invalid project file: {e}", e = e))?;
+            serde_json::from_str(text).map_err(|e| tr!("INVALID_PROJECT_FILE", e = e))?;
         let mut max_id = 0;
         for n in &mut doc.layers {
             n.for_each_node_mut(&mut |n| max_id = max_id.max(n.id()));
@@ -957,7 +967,7 @@ mod tests {
         let inv = m.inverse().unwrap();
         let p = [123.0, 45.0];
         assert!(close(inv.apply(m.apply(p)), p));
-        // The image centre lands on the transform centre.
+        // The image center lands on the transform center.
         assert!(close(m.apply([200.0, 150.0]), [50.0, 20.0]));
     }
 
@@ -1023,7 +1033,7 @@ mod tests {
         d.template_placement = TemplatePlacement::auto([196.0, 296.0], d.page_mm());
         assert_eq!(d.template_placement.rotation, 90);
         let m = d.template_affine([196.0, 296.0]);
-        // The template centre maps to the page centre.
+        // The template center maps to the page center.
         assert!(close(m.apply([98.0, 148.0]), d.page_center()));
     }
 
@@ -1039,7 +1049,7 @@ mod tests {
         d.template_placement.flip_y = true;
         let flipped = d.template_affine(size).apply([0.0, 0.0]);
         let c = d.page_center();
-        // Same x, y mirrored around the page centre.
+        // Same x, y mirrored around the page center.
         assert!((plain[0] - flipped[0]).abs() < 1e-3);
         assert!((plain[1] - c[1] + (flipped[1] - c[1])).abs() < 1e-3);
     }

@@ -12,7 +12,7 @@ struct Halftone;
 struct Cell {
     /// Dot radius, in pixels.
     radius: f32,
-    /// Average straight colour under the cell.
+    /// Average straight color under the cell.
     color: [f32; 3],
 }
 
@@ -38,7 +38,7 @@ impl Effect for Halftone {
             Param::choice(
                 "style",
                 "Dots",
-                &[("ink", "One ink"), ("color", "Image colours")],
+                &[("ink", "One ink"), ("color", "Image colors")],
                 "ink",
             ),
             Param::color("ink", "Ink", [0, 0, 0, 255]),
@@ -64,7 +64,7 @@ impl Effect for Halftone {
         let (u1, v1) = corners
             .iter()
             .fold((f32::MIN, f32::MIN), |a, c| (a.0.max(c.0), a.1.max(c.1)));
-        // One spare cell all around, so every pixel has its 3x3 neighbours.
+        // One spare cell all around, so every pixel has its 3x3 neighbors.
         let (cu0, cv0) = (
             (u0 / cell).floor() as i64 - 1,
             (v0 / cell).floor() as i64 - 1,
@@ -118,7 +118,7 @@ impl Effect for Halftone {
                 }
                 let (u, v) = to_screen(x as f32 + 0.5, y as f32 + 0.5);
                 let (cu, cv) = ((u / cell).floor() as i64, (v / cell).floor() as i64);
-                // Dots can overlap the neighbouring cells: keep the most covering one.
+                // Dots can overlap the neighboring cells: keep the most covering one.
                 let (mut cover, mut color) = (0.0f32, ink);
                 for nv in cv - 1..=cv + 1 {
                     for nu in cu - 1..=cu + 1 {

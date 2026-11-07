@@ -5,7 +5,7 @@
     {"kind":"buttons","dxf":"buttons.dxf", "name": "Action buttons"},
     {"kind":"buttons","dxf":"menu.dxf","name":"Menu buttons"},
     {"kind":"cutouts","dxf":"holes.dxf","name":"Fastener holes"},
-    {"kind":"anchors","dxf":"anchors.dxf","name":"Button centres"}
+    {"kind":"anchors","dxf":"anchors.dxf","name":"Button centers"}
   ],
   "units": "inch",
   "placement": {

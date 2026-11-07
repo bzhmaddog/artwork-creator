@@ -1,6 +1,6 @@
 //! Project files, in two formats:
-//! - `.artwork`, the default: a zip archive holding `project.json` and every image the
-//!   project uses, so it can be moved, backed up or shared on its own;
+//! - `.artwork`, the default: a zip archive holding `project.json` and every image and
+//!   font the project uses, so it can be moved, backed up or shared on its own;
 //! - `.json`, linked: the project alone, pointing to image files on disk.
 
 use std::collections::HashMap;
@@ -12,7 +12,7 @@ use std::sync::Arc;
 use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
-use crate::document::Document;
+use crate::document::{Document, Layer};
 use crate::i18n::tr;
 
 /// Extension of project archives.
@@ -21,6 +21,8 @@ pub const EXTENSION: &str = "artwork";
 const JSON_ENTRY: &str = "project.json";
 /// Folder of the images inside an archive.
 const IMAGE_DIR: &str = "images/";
+/// Folder of the text layers' fonts inside an archive.
+const FONT_DIR: &str = "fonts/";
 
 /// The file is a project archive (as opposed to a linked JSON project).
 pub fn is_archive(path: &Path) -> bool {
@@ -32,18 +34,13 @@ pub fn is_archive(path: &Path) -> bool {
 /// in each layer's `data`, with `source` set to their name inside the archive; images
 /// of JSON projects are read from disk later.
 pub fn load(path: &Path) -> Result<Document, String> {
-    let bytes = std::fs::read(path)
-        .map_err(|e| tr!("Cannot read {path}: {e}", path = path.display(), e = e))?;
+    let bytes =
+        std::fs::read(path).map_err(|e| tr!("CANNOT_READ_FILE", path = path.display(), e = e))?;
     if !bytes.starts_with(b"PK\x03\x04") {
         return Document::load(path);
     }
-    let invalid = |e: &dyn std::fmt::Display| {
-        tr!(
-            "Invalid project file {path}: {e}",
-            path = path.display(),
-            e = e
-        )
-    };
+    let invalid =
+        |e: &dyn std::fmt::Display| tr!("INVALID_PROJECT_FILE_AT", path = path.display(), e = e);
     let mut zip = ZipArchive::new(Cursor::new(bytes)).map_err(|e| invalid(&e))?;
     let json = read_entry(&mut zip, JSON_ENTRY).map_err(|e| invalid(&e))?;
     let text = String::from_utf8(json).map_err(|e| invalid(&e))?;
@@ -53,7 +50,7 @@ pub fn load(path: &Path) -> Result<Document, String> {
     let mut images: HashMap<String, Option<Arc<Vec<u8>>>> = HashMap::new();
     doc.for_each_layer_mut(|layer| {
         let name = layer.source.to_string_lossy().replace('\\', "/");
-        if !name.starts_with(IMAGE_DIR) {
+        if !name.starts_with(IMAGE_DIR) && !name.starts_with(FONT_DIR) {
             return;
         }
         layer.data = images
@@ -73,23 +70,30 @@ fn read_entry(zip: &mut ZipArchive<Cursor<Vec<u8>>>, name: &str) -> Result<Vec<u
     Ok(out)
 }
 
-/// Saves the project as an archive with all its images. Returns the names of layers
-/// whose image could not be included because it never loaded (missing file); they keep
-/// their link to the file on disk. Writes to a temporary file first, so a failed save
+/// Saves the project as an archive with all its images and fonts. Returns the names of
+/// layers whose image could not be included because it never loaded (missing file);
+/// they keep their link to the file on disk. Text layers whose font isn't loaded, or
+/// whose license forbids embedding it, keep their link to the font file and will look
+/// for their font family where the project is opened. Writes to a temporary file first, so a failed save
 /// leaves an existing project untouched.
 pub fn save(doc: &Document, path: &Path) -> Result<Vec<String>, String> {
     let mut doc = doc.clone();
     let mut images: Vec<(String, Arc<Vec<u8>>)> = Vec::new();
     let mut missing = Vec::new();
-    doc.for_each_layer_mut(|layer| match &layer.data {
-        Some(data) => {
-            let name = entry_name(data, &layer.source);
-            if !images.iter().any(|(n, _)| *n == name) {
-                images.push((name.clone(), data.clone()));
-            }
-            layer.source = PathBuf::from(name);
+    doc.for_each_layer_mut(|layer| {
+        if !font_to_save(layer) {
+            return;
         }
-        None => missing.push(layer.name.clone()),
+        match &layer.data {
+            Some(data) => {
+                let name = entry_name(data, &layer.source, layer.text.is_some());
+                if !images.iter().any(|(n, _)| *n == name) {
+                    images.push((name.clone(), data.clone()));
+                }
+                layer.source = PathBuf::from(name);
+            }
+            None => missing.push(layer.name.clone()),
+        }
     });
     let json = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
     write_safely(path, |tmp| write_archive(tmp, &json, &images))?;
@@ -106,25 +110,24 @@ pub fn save_json(doc: &Document, path: &Path) -> Result<Vec<String>, String> {
     let mut missing = Vec::new();
     let mut error = None;
     doc.for_each_layer_mut(|layer| {
-        if layer.source.is_absolute() && layer.source.is_file() {
+        if !font_to_save(layer) || (layer.source.is_absolute() && layer.source.is_file()) {
             return;
         }
         let Some(data) = &layer.data else {
             missing.push(layer.name.clone());
             return;
         };
-        let name = entry_name(data, &layer.source);
-        let file = folder.join(name.trim_start_matches(IMAGE_DIR));
+        let name = entry_name(data, &layer.source, layer.text.is_some());
+        let file = folder.join(
+            name.trim_start_matches(IMAGE_DIR)
+                .trim_start_matches(FONT_DIR),
+        );
         // Identical images share a file, so an existing one is already right.
         let written = file.is_file()
             || std::fs::create_dir_all(&folder)
                 .and_then(|()| std::fs::write(&file, data.as_slice()))
                 .map_err(|e| {
-                    error.get_or_insert(tr!(
-                        "Cannot write {path}: {e}",
-                        path = file.display(),
-                        e = e
-                    ))
+                    error.get_or_insert(tr!("CANNOT_WRITE_FILE", path = file.display(), e = e))
                 })
                 .is_ok();
         if written {
@@ -153,11 +156,7 @@ fn write_safely(
     let result = write(&tmp).and_then(|()| std::fs::rename(&tmp, path).map_err(|e| e.to_string()));
     if let Err(e) = result {
         std::fs::remove_file(&tmp).ok();
-        return Err(tr!(
-            "Cannot write {path}: {e}",
-            path = path.display(),
-            e = e
-        ));
+        return Err(tr!("CANNOT_WRITE_FILE", path = path.display(), e = e));
     }
     Ok(())
 }
@@ -185,9 +184,33 @@ fn write_archive(path: &Path, json: &str, images: &[(String, Arc<Vec<u8>>)]) -> 
 
 /// Name of an image inside the archive: identical images share one entry. The extension
 /// comes from the image data, or else from the original file name.
-fn entry_name(data: &[u8], source: &Path) -> String {
+/// False for a text layer whose font file is not saved with the project: not loaded, the
+/// built-in font, or one whose license forbids embedding it. Its `source` is cleared
+/// unless it is a file on disk; the font is looked up by family where the project opens.
+fn font_to_save(layer: &mut Layer) -> bool {
+    let Some(text) = &layer.text else {
+        return true;
+    };
+    let save = layer.data.as_ref().is_some_and(|d| {
+        text.family != crate::text::BUILTIN_FAMILY && crate::text::embeddable(d, text.font_index)
+    });
+    if !save && !layer.source.is_absolute() {
+        layer.source = PathBuf::new();
+    }
+    save
+}
+
+fn entry_name(data: &[u8], source: &Path, font: bool) -> String {
     let mut h = std::collections::hash_map::DefaultHasher::new();
     data.hash(&mut h);
+    if font {
+        let ext = match data.get(..4) {
+            Some(b"OTTO") => "otf",
+            Some(b"ttcf") => "ttc",
+            _ => "ttf",
+        };
+        return format!("{FONT_DIR}{:016x}.{ext}", h.finish());
+    }
     let ext = image::guess_format(data)
         .ok()
         .and_then(|f| f.extensions_str().first().copied())
@@ -204,7 +227,7 @@ fn entry_name(data: &[u8], source: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::document::{Layer, Node};
+    use crate::document::Node;
 
     fn png(rgb: [u8; 3]) -> Vec<u8> {
         let img = image::RgbImage::from_pixel(4, 3, image::Rgb(rgb));
@@ -217,6 +240,46 @@ mod tests {
         let mut l = Layer::new(id, name.into(), format!("/elsewhere/{name}.png").into());
         l.data = data.cloned();
         Node::Layer(Box::new(l))
+    }
+
+    #[test]
+    fn archive_holds_text_fonts_but_not_the_built_in_one() {
+        use crate::text::{self, BUILTIN_FAMILY};
+        let dir = std::env::temp_dir().join(format!("artwork-fonts-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let hack = Arc::new(epaint_default_fonts::HACK_REGULAR.to_vec());
+        let mut doc = Document::default();
+        let mut a = text::new_layer(1, "Hello", "Hack".into(), [50.0, 50.0]);
+        a.data = Some(hack.clone());
+        a.source = "/usr/share/fonts/Hack-Regular.ttf".into();
+        let mut b = text::new_layer(2, "Built in", BUILTIN_FAMILY.into(), [50.0, 80.0]);
+        b.data = Some(Arc::new(epaint_default_fonts::UBUNTU_LIGHT.to_vec()));
+        doc.layers.push(Node::Layer(Box::new(a)));
+        doc.layers.push(Node::Layer(Box::new(b)));
+
+        let path = dir.join("t.artwork");
+        assert!(
+            save(&doc, &path).unwrap().is_empty(),
+            "nothing reported missing"
+        );
+        let back = load(&path).unwrap();
+        let a = back.layer(1).unwrap();
+        assert_eq!(a.data.as_deref(), Some(hack.as_ref()), "font read back");
+        assert!(a.source.to_string_lossy().starts_with(FONT_DIR));
+        assert_eq!(a.text.as_ref().unwrap().content, "Hello");
+        let b = back.layer(2).unwrap();
+        assert!(
+            b.data.is_none() && b.source.as_os_str().is_empty(),
+            "not stored"
+        );
+
+        // A linked project writes the archive's font next to it.
+        let json = dir.join("t.json");
+        save_json(&back, &json).unwrap();
+        let linked = Document::load(&json).unwrap();
+        let src = &linked.layer(1).unwrap().source;
+        assert!(src.is_file() && src.extension().is_some_and(|e| e == "ttf"));
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -357,16 +420,16 @@ mod tests {
     #[test]
     fn entry_names_follow_the_image_format() {
         let p = png([1, 2, 3]);
-        let name = entry_name(&p, Path::new("photo.JPG"));
+        let name = entry_name(&p, Path::new("photo.JPG"), false);
         assert!(
             name.starts_with(IMAGE_DIR) && name.ends_with(".png"),
             "{name}"
         );
         assert_eq!(
             name,
-            entry_name(&p, Path::new("other.png")),
+            entry_name(&p, Path::new("other.png"), false),
             "same data, same entry"
         );
-        assert!(entry_name(b"???", Path::new("x.WEBP")).ends_with(".webp"));
+        assert!(entry_name(b"???", Path::new("x.WEBP"), false).ends_with(".webp"));
     }
 }

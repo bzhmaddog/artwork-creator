@@ -76,7 +76,7 @@ impl Progress {
         self.state().cancel = true;
     }
 
-    pub fn is_cancelled(&self) -> bool {
+    pub fn is_canceled(&self) -> bool {
         self.state().cancel
     }
 }
@@ -111,16 +111,16 @@ fn write_all(
     written: &mut Vec<PathBuf>,
 ) -> Result<(), String> {
     let dpi = settings.dpi.clamp(72, 1200) as f32;
-    progress.set(tr!("Rendering"), 0.0);
+    progress.set(tr!("EXPORT_STEP_RENDERING"), 0.0);
     let artwork = render::compose_artwork(scene, dpi, &mut |f| {
-        progress.set(tr!("Rendering"), f * RENDER_SHARE);
-        !progress.is_cancelled()
+        progress.set(tr!("EXPORT_STEP_RENDERING"), f * RENDER_SHARE);
+        !progress.is_canceled()
     })?;
     let saves = settings.png as u32 + settings.pdf as u32;
     let mut done = 0;
     let mut step = |stage: &str| -> Result<(), String> {
-        if progress.is_cancelled() {
-            return Err(render::CANCELLED.into());
+        if progress.is_canceled() {
+            return Err(render::CANCELED.into());
         }
         let share = (1.0 - RENDER_SHARE) / saves.max(1) as f32;
         progress.set(stage, RENDER_SHARE + share * done as f32);
@@ -128,7 +128,7 @@ fn write_all(
         Ok(())
     };
     if settings.png {
-        step(tr!("Saving PNG"))?;
+        step(tr!("EXPORT_STEP_SAVING_PNG"))?;
         let path = base.with_extension("png");
         let mut pixmap = artwork.clone();
         render::draw_lines(&mut pixmap, scene, dpi);
@@ -136,20 +136,19 @@ fn write_all(
         write_png(&pixmap, dpi, &path)?;
     }
     if settings.pdf {
-        step(tr!("Saving PDF"))?;
+        step(tr!("EXPORT_STEP_SAVING_PDF"))?;
         let path = base.with_extension("pdf");
         // Cut lines go in as vectors so they stay sharp at any zoom.
         written.push(path.clone());
         write_pdf(scene, &artwork, dpi, &path)?;
     }
-    progress.set(tr!("Done"), 1.0);
+    progress.set(tr!("EXPORT_STEP_DONE"), 1.0);
     Ok(())
 }
 
 /// Saves an opaque RGB PNG that records its DPI, so it prints at true size.
 fn write_png(pixmap: &tiny_skia::Pixmap, dpi: f32, path: &Path) -> Result<(), String> {
-    let err =
-        |e: &dyn std::fmt::Display| tr!("Cannot write {path}: {e}", path = path.display(), e = e);
+    let err = |e: &dyn std::fmt::Display| tr!("CANNOT_WRITE_FILE", path = path.display(), e = e);
     let file = std::fs::File::create(path).map_err(|e| err(&e))?;
     let mut enc = png::Encoder::new(
         std::io::BufWriter::new(file),
@@ -171,7 +170,7 @@ fn write_png(pixmap: &tiny_skia::Pixmap, dpi: f32, path: &Path) -> Result<(), St
     writer.finish().map_err(|e| err(&e))
 }
 
-/// Millimetres to PDF points (1/72 inch).
+/// Millimeters to PDF points (1/72 inch).
 fn mm_to_pt(mm: f32) -> f32 {
     mm * 72.0 / 25.4
 }
@@ -184,7 +183,7 @@ fn write_pdf(
     dpi: f32,
     path: &Path,
 ) -> Result<(), String> {
-    let mut doc = PdfDocument::new(tr!("Controller artwork"));
+    let mut doc = PdfDocument::new(tr!("PDF_DOCUMENT_TITLE"));
     let image = RawImage {
         pixels: RawImageData::U8(render::to_rgb(pixmap)),
         width: pixmap.width() as usize,
@@ -242,8 +241,7 @@ fn write_pdf(
     let bytes = doc
         .with_pages(vec![page])
         .save(&PdfSaveOptions::default(), &mut Vec::new());
-    std::fs::write(path, bytes)
-        .map_err(|e| tr!("Cannot write {path}: {e}", path = path.display(), e = e))
+    std::fs::write(path, bytes).map_err(|e| tr!("CANNOT_WRITE_FILE", path = path.display(), e = e))
 }
 
 #[cfg(test)]
@@ -288,11 +286,11 @@ mod tests {
             "page box should be A4 landscape"
         );
 
-        // A cancelled export fails and leaves no files behind.
-        let cancelled = Progress::default();
-        cancelled.cancel();
-        let err = run(&scene, &settings, &dir.join("gone"), &cancelled).unwrap_err();
-        assert_eq!(err, render::CANCELLED);
+        // A canceled export fails and leaves no files behind.
+        let canceled = Progress::default();
+        canceled.cancel();
+        let err = run(&scene, &settings, &dir.join("gone"), &canceled).unwrap_err();
+        assert_eq!(err, render::CANCELED);
         assert!(!dir.join("gone.png").exists() && !dir.join("gone.pdf").exists());
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -27,10 +27,10 @@ pub enum ElementKind {
     Buttons,
     /// Other holes: screws, switches, windows.
     Cutouts,
-    /// Points that images snap to on the canvas, e.g. button centres. Cut nothing; printed
+    /// Points that images snap to on the canvas, e.g. button centers. Cut nothing; printed
     /// as small crosses only when asked for in the Export window. Read from the DXF's
-    /// POINT entities and the centres of its closed shapes, so a buttons DXF gives the
-    /// button centres.
+    /// POINT entities and the centers of its closed shapes, so a buttons DXF gives the
+    /// button centers.
     Anchors,
 }
 
@@ -50,17 +50,17 @@ impl ElementKind {
         self as usize
     }
 
-    /// Name shown in the app, in English: translate it with `i18n::translate`.
+    /// Translation key of the name shown in the app: show it with `i18n::translate`.
     pub fn label(self) -> &'static str {
         match self {
-            ElementKind::Outline => tr_noop!("Outline"),
-            ElementKind::Buttons => tr_noop!("Buttons"),
-            ElementKind::Cutouts => tr_noop!("Cutouts"),
-            ElementKind::Anchors => tr_noop!("Anchors"),
+            ElementKind::Outline => tr_noop!("ELEMENT_OUTLINE"),
+            ElementKind::Buttons => tr_noop!("ELEMENT_BUTTONS"),
+            ElementKind::Cutouts => tr_noop!("ELEMENT_CUTOUTS"),
+            ElementKind::Anchors => tr_noop!("ELEMENT_ANCHORS"),
         }
     }
 
-    /// Line colour used when `template.json` sets none.
+    /// Line color used when `template.json` sets none.
     pub fn default_color(self) -> [u8; 3] {
         match self {
             ElementKind::Outline => [255, 0, 255],
@@ -86,7 +86,7 @@ pub struct ElementConfig {
     /// Display name. Defaults to the kind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// Line colour as "#rrggbb". Defaults to a colour per kind.
+    /// Line color as "#rrggbb". Defaults to a color per kind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
 }
@@ -122,7 +122,7 @@ pub struct ElementSource {
     pub name: String,
     /// The DXF file.
     pub path: PathBuf,
-    /// Colour from `template.json`, if set.
+    /// Color from `template.json`, if set.
     pub color: Option<[u8; 3]>,
 }
 
@@ -171,7 +171,7 @@ impl TemplateEntry {
         let json = serde_json::to_string_pretty(&self.config).map_err(|e| e.to_string())?;
         let path = self.config_path();
         std::fs::write(&path, json + "\n")
-            .map_err(|e| tr!("Cannot write {path}: {e}", path = path.display(), e = e))
+            .map_err(|e| tr!("CANNOT_WRITE_FILE", path = path.display(), e = e))
     }
 }
 
@@ -204,7 +204,7 @@ pub fn read_entry(folder: &Path) -> Option<TemplateEntry> {
             let parsed = parse_color(c);
             if parsed.is_none() {
                 config_error.get_or_insert(tr!(
-                    "{path}: invalid colour \"{c}\" (expected #rrggbb)",
+                    "TEMPLATE_INVALID_COLOR",
                     path = folder.join(CONFIG_FILE).display(),
                     c = c
                 ));
@@ -267,7 +267,7 @@ pub struct TemplateElement {
     pub kind: ElementKind,
     /// Shown in the app.
     pub name: String,
-    /// Colour from `template.json`, if set.
+    /// Color from `template.json`, if set.
     pub color: Option<[u8; 3]>,
     /// Its shapes in template mm. Empty for anchors.
     pub polylines: Vec<Polyline>,
@@ -321,7 +321,7 @@ pub fn scan(dir: &Path) -> Vec<TemplateEntry> {
     out
 }
 
-/// Millimetres per unit for the `units` setting of `template.json`.
+/// Millimeters per unit for the `units` setting of `template.json`.
 fn units_override(name: &str) -> Option<f64> {
     match name.trim().to_lowercase().as_str() {
         "mm" | "millimeter" | "millimeters" | "millimetre" | "millimetres" => Some(1.0),
@@ -331,7 +331,7 @@ fn units_override(name: &str) -> Option<f64> {
     }
 }
 
-/// Millimetres per drawing unit declared in a DXF header.
+/// Millimeters per drawing unit declared in a DXF header.
 fn units_to_mm(units: Units) -> f64 {
     match units {
         Units::Millimeters => 1.0,
@@ -415,7 +415,7 @@ type RawPath = (Vec<[f64; 2]>, bool);
 /// Paths and POINT entities of one DXF file, in mm, y up.
 fn read_dxf(path: &Path, units: Option<f64>) -> Result<(Vec<RawPath>, Vec<[f64; 2]>), String> {
     let drawing = dxf::Drawing::load_file(path)
-        .map_err(|e| tr!("Cannot read {path}: {e}", path = path.display(), e = e))?;
+        .map_err(|e| tr!("CANNOT_READ_FILE", path = path.display(), e = e))?;
 
     // Raw paths in drawing units, y up.
     let mut raw: Vec<RawPath> = Vec::new();
@@ -466,10 +466,10 @@ fn read_dxf(path: &Path, units: Option<f64>) -> Result<(Vec<RawPath>, Vec<[f64; 
     Ok((raw, points))
 }
 
-/// Anchor points of a DXF read as an anchors element: its points, then the centre of the
-/// bounding box of each closed shape (a circle's centre). Open lines give none.
+/// Anchor points of a DXF read as an anchors element: its points, then the center of the
+/// bounding box of each closed shape (a circle's center). Open lines give none.
 fn anchor_points(paths: &[RawPath], points: &[[f64; 2]]) -> Vec<[f64; 2]> {
-    let centres = paths.iter().filter(|(_, closed)| *closed).map(|(pts, _)| {
+    let centers = paths.iter().filter(|(_, closed)| *closed).map(|(pts, _)| {
         let (min, max) = pts
             .iter()
             .fold(([f64::MAX; 2], [f64::MIN; 2]), |(mn, mx), p| {
@@ -480,7 +480,7 @@ fn anchor_points(paths: &[RawPath], points: &[[f64; 2]]) -> Vec<[f64; 2]> {
             });
         [(min[0] + max[0]) / 2.0, (min[1] + max[1]) / 2.0]
     });
-    points.iter().copied().chain(centres).collect()
+    points.iter().copied().chain(centers).collect()
 }
 
 /// Endpoints closer than this (mm) are treated as the same point.
@@ -537,7 +537,7 @@ pub fn load(entry: &TemplateEntry) -> Result<Template, String> {
     let units = match &entry.config.units {
         Some(u) => Some(units_override(u).ok_or_else(|| {
             tr!(
-                "Unknown units \"{u}\" in {path}",
+                "TEMPLATE_UNKNOWN_UNITS",
                 u = u,
                 path = entry.config_path().display()
             )
@@ -573,10 +573,7 @@ pub fn load(entry: &TemplateEntry) -> Result<Template, String> {
             .iter()
             .map(|s| s.path.display().to_string())
             .collect();
-        return Err(tr!(
-            "No template geometry in {files}",
-            files = files.join(", ")
-        ));
+        return Err(tr!("TEMPLATE_NO_GEOMETRY", files = files.join(", ")));
     }
     // Drawing mm, y up, to template mm, y down.
     let to_frame = |p: &[f64; 2]| [(p[0] - min[0]) as f32, (max[1] - p[1]) as f32];
@@ -709,7 +706,7 @@ pub(crate) mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// Writes a DXF in mm with the given closed polygons and circles (centre, radius).
+    /// Writes a DXF in mm with the given closed polygons and circles (center, radius).
     fn write_dxf(path: &Path, polygons: &[&[[f64; 2]]], circles: &[([f64; 2], f64)]) {
         use dxf::entities::{Circle, Entity, LwPolyline};
         use dxf::{LwPolylineVertex, Point};
@@ -738,7 +735,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn anchors_are_points_and_shape_centres_outside_the_frame() {
+    fn anchors_are_points_and_shape_centers_outside_the_frame() {
         use dxf::Point;
         use dxf::entities::{Entity, ModelPoint};
         let dir = std::env::temp_dir().join(format!("artwork-anchors-{}", std::process::id()));
@@ -766,7 +763,7 @@ pub(crate) mod tests {
                 "elements": [
                     { "kind": "outline", "dxf": "edge.dxf" },
                     { "kind": "buttons", "dxf": "buttons.dxf" },
-                    { "kind": "anchors", "dxf": "buttons.dxf", "name": "Centres" },
+                    { "kind": "anchors", "dxf": "buttons.dxf", "name": "Centers" },
                     { "kind": "anchors", "dxf": "points.dxf" }
                 ]
             }"#,
@@ -777,14 +774,14 @@ pub(crate) mod tests {
 
         assert!((t.size_mm[0] - 100.0).abs() < 1e-3 && (t.size_mm[1] - 50.0).abs() < 1e-3);
         assert!(t.has(ElementKind::Anchors));
-        let centres = &t.elements[2];
+        let centers = &t.elements[2];
         assert_eq!(
-            (centres.kind, centres.name.as_str()),
-            (ElementKind::Anchors, "Centres")
+            (centers.kind, centers.name.as_str()),
+            (ElementKind::Anchors, "Centers")
         );
-        assert!(centres.polylines.is_empty());
+        assert!(centers.polylines.is_empty());
         // y down from the top of the panel.
-        let mut got = centres.anchors.clone();
+        let mut got = centers.anchors.clone();
         got.sort_by(|a, b| a[0].total_cmp(&b[0]));
         let want = [[20.0, 20.0], [50.0, 20.0], [75.0, 35.0]];
         assert_eq!(got.len(), 3, "{got:?}");
@@ -795,7 +792,10 @@ pub(crate) mod tests {
             );
         }
         let points = &t.elements[3];
-        assert_eq!(points.name, "Anchors", "named after the kind by default");
+        assert_eq!(
+            points.name, "ELEMENT_ANCHORS",
+            "named after the kind by default"
+        );
         assert_eq!(points.anchors.len(), 1);
         assert!((points.anchors[0][0] - 150.0).abs() < 1e-3);
         assert!((points.anchors[0][1] - 25.0).abs() < 1e-3);
@@ -843,7 +843,7 @@ pub(crate) mod tests {
         );
         assert_eq!(t.elements[1].color, Some([0, 255, 0]));
         assert_eq!(t.elements[2].name, "Screws");
-        // Button centre: x 40 - 10 = 30, y flipped: 70 - 45 = 25.
+        // Button center: x 40 - 10 = 30, y flipped: 70 - 45 = 25.
         let b = &t.elements[1].polylines[0].points;
         let n = b.len() as f32;
         let c = b
@@ -879,7 +879,7 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn colours() {
+    fn colors() {
         assert_eq!(parse_color("#ff8000"), Some([255, 128, 0]));
         assert_eq!(parse_color("00AAff"), Some([0, 170, 255]));
         assert_eq!(parse_color("#fff"), None);

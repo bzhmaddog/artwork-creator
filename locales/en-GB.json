@@ -1,0 +1,20 @@
+{
+  "ALIGN_CENTER_HORIZONTALLY": "Centre horizontally",
+  "ALIGN_CENTER_VERTICALLY": "Centre vertically",
+  "CENTER_TEMPLATE_ON_PAGE": "Centre on page",
+  "EFFECT_GRAYSCALE": "Greyscale",
+  "EFFECT_GRAYSCALE_HINT": "Remove colour",
+  "EFFECT_HUE_SATURATION_HINT": "Shift colours around the colour wheel and change their intensity",
+  "EFFECT_POSTERIZE": "Posterise",
+  "EFFECT_TINT_HINT": "Colour the image with one colour",
+  "ELEMENT_LINE_COLOR": "Line colour, on screen and in the export",
+  "EXPORT_CANCELED": "Export cancelled.",
+  "EXPORT_CANCELING": "Cancelling…",
+  "OUTLINE_POSITION_CENTER": "Centre",
+  "PARAM_COLOR": "Colour",
+  "SNAP_TO_ANCHORS_HINT": "Image centres and corners snap to the template's anchors while dragged. Hold Alt to drag freely.",
+  "TEMPLATE_INVALID_COLOR": "{path}: invalid colour \"{c}\" (expected #rrggbb)",
+  "TEXT_ALIGN_CENTER": "Centre lines",
+  "TEXT_COLOR": "Colour",
+  "TINT_MODE_COLORIZE": "Colourise"
+}

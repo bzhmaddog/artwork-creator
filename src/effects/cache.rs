@@ -138,9 +138,11 @@ impl EffectCache {
             return Some(img.clone());
         }
         // From the original file when we have it: exact even for semi-transparent pixels.
+        // Text layers' data is their font.
         let full = layer
             .data
             .as_ref()
+            .filter(|_| layer.text.is_none())
             .and_then(|d| image::load_from_memory(d).ok())
             .map(|i| i.to_rgba8())
             .filter(|i| i.dimensions() == (pm.width(), pm.height()))
@@ -158,11 +160,23 @@ impl EffectCache {
         quick: bool,
     ) -> Option<Processed> {
         let src = self.source(layer)?;
-        let mut img = if quick {
-            render::downscale(&src, QUICK_SIDE).into_owned()
-        } else {
-            (*src).clone()
-        };
+        let side = if quick { QUICK_SIDE } else { SCREEN_SIDE };
+        let mut img = render::downscale(&src, side).into_owned();
+        // The margins the effects add count too: a wide outline or shadow would otherwise
+        // make the processed image, and the time spent on it, grow without limit. Margins
+        // follow the image's scale, so shrinking it shrinks them; a few rounds settle
+        // the margins that are capped.
+        for _ in 0..3 {
+            let scale = img.width() as f32 / layer.size_px[0].max(1) as f32;
+            let [l, t, r, b] = super::padding(&layer.effects, scale);
+            let longest = (img.width() + l + r).max(img.height() + t + b);
+            if longest <= side {
+                break;
+            }
+            let k = side as f32 / longest as f32;
+            let target = (img.width().max(img.height()) as f32 * k).floor().max(1.0);
+            img = render::downscale(&img, target as u32).into_owned();
+        }
         let scale = img.width() as f32 / layer.size_px[0].max(1) as f32;
         let scale_y = img.height() as f32 / layer.size_px[1].max(1) as f32;
         let done = super::apply(&mut img, &layer.effects, scale);
@@ -214,7 +228,7 @@ impl EffectCache {
 }
 
 /// Straight RGBA from premultiplied pixels.
-pub(super) fn demultiply(pm: &Pixmap) -> RgbaImage {
+pub fn demultiply(pm: &Pixmap) -> RgbaImage {
     let mut img = RgbaImage::new(pm.width(), pm.height());
     for (out, px) in img.pixels_mut().zip(pm.pixels()) {
         let c = px.demultiply();
@@ -249,6 +263,36 @@ mod tests {
 
     fn fx(doc: &Document) -> Option<Processed> {
         doc.layer(1).unwrap().fx.clone()
+    }
+
+    #[test]
+    fn wide_margins_keep_the_processed_image_within_the_screen_size() {
+        let ctx = egui::Context::default();
+        ctx.input_mut(|i| i.max_texture_side = 16384);
+        let img = RgbaImage::from_pixel(4000, 400, image::Rgba([255, 0, 0, 255]));
+        let mut l = Layer::new(1, "a".into(), "a.png".into());
+        l.size_px = [4000, 400];
+        l.pixmap = Some(Arc::new(render::premultiplied_pixmap(&img).unwrap()));
+        let mut outline = EffectInstance::new(registry().get("builtin.outline").unwrap());
+        outline
+            .params
+            .insert("width".into(), serde_json::Value::from(500.0));
+        l.effects.push(outline);
+        let mut doc = Document {
+            layers: vec![Node::Layer(Box::new(l))],
+            next_id: 2,
+            ..Default::default()
+        };
+        let mut cache = EffectCache::default();
+        assert!(cache.sync(&ctx, &mut doc, false));
+        let done = fx(&doc).unwrap();
+        let [w, h] = done.texture.size();
+        assert!(
+            w as u32 <= SCREEN_SIDE && h as u32 <= SCREEN_SIDE,
+            "{w} x {h}"
+        );
+        // The margins are still those of the full-size image.
+        assert!((done.pad[0] - 501.0).abs() < 5.0, "{:?}", done.pad);
     }
 
     #[test]
@@ -317,7 +361,7 @@ mod shadow_tests {
 
     #[test]
     fn shadow_lands_in_the_same_place_on_screen_and_in_the_export() {
-        // A 10 x 10 mm white square centred at (10, 10) mm on a 30 mm grey page, with a
+        // A 10 x 10 mm white square centered at (10, 10) mm on a 30 mm gray page, with a
         // hard black shadow 4 mm right and down.
         let img = RgbaImage::from_pixel(10, 10, image::Rgba([255, 255, 255, 255]));
         let mut l = Layer::new(1, "a".into(), "a.png".into());

@@ -87,6 +87,15 @@ is skipped if the `x86_64-pc-windows-gnu` target is not installed. Run them by h
 `make pre-commit`, or for one target with `make pre-commit ARGS=--linux` or
 `ARGS=--windows`.
 
+### Releasing
+
+`make version` lists the commits since the last release tag and suggests the next version:
+minor when a commit message adds something ("Added...", "New...") or the plugin interface
+changed (major from 1.0.0 on), patch otherwise. `make release` sets that version in `Cargo.toml`, commits and tags
+it after asking; `make release V=0.3.0` (or `V=major|minor|patch`) picks the version, and
+`SDK=minor` releases the plugin SDK too. Nothing is pushed. See
+[`scripts/version.sh`](scripts/version.sh) for the details.
+
 ## Templates
 
 The app looks for a `templates` folder next to the executable, then in the current

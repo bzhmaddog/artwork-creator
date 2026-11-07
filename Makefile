@@ -17,6 +17,9 @@
 #                     ARGS=--linux or ARGS=--windows checks one target only
 #   make plugins      build the example plugins for Linux and Windows into plugins/
 #   make dist         package each release build with its templates folder into dist/
+#   make version      show the commits since the last release and suggest the next version
+#   make release      set the version, commit and tag it; V=X.Y.Z or V=major|minor|patch
+#                     picks the version, SDK=... releases the plugin SDK too
 #   make clean        remove build outputs
 
 CARGO   ?= cargo
@@ -34,7 +37,7 @@ PLUGINS     := halftone
 PLUGINS_DIR := plugins
 
 .PHONY: all linux windows debug debug-linux debug-windows run run-windows \
-        test check fmt clippy hooks pre-commit plugins dist dist-linux dist-windows clean
+        test check fmt clippy hooks pre-commit plugins dist version release dist-linux dist-windows clean
 
 all: linux windows
 
@@ -88,6 +91,13 @@ fmt:
 clippy:
 	$(CARGO) clippy --workspace --all-targets --target $(LINUX) -- -D warnings
 	$(CARGO) clippy --workspace --all-targets --target $(WINDOWS) -- -D warnings
+
+# Versioning: see scripts/version.sh.
+version:
+	sh scripts/version.sh suggest
+
+release:
+	sh scripts/version.sh release $(V) $(if $(SDK),--sdk $(SDK))
 
 # The app looks for templates/ next to the executable, so ship them together.
 dist: dist-linux dist-windows

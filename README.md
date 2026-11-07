@@ -1,6 +1,6 @@
 # Artwork Creator
 
-[![Quality](https://github.com/bzhmaddog/artwork-creator/actions/workflows/quality.yml/badge.svg?branch=main)](https://github.com/bzhmaddog/artwork-creator/actions/workflows/quality.yml)
+[![Test](https://github.com/bzhmaddog/artwork-creator/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/bzhmaddog/artwork-creator/actions/workflows/test.yml)
 [![CodeQL](https://github.com/bzhmaddog/artwork-creator/actions/workflows/github-code-scanning/codeql/badge.svg)](https://github.com/bzhmaddog/artwork-creator/actions/workflows/github-code-scanning/codeql)
 
 A desktop app for designing printed artwork for arcade controllers and fightsticks.

@@ -1,5 +1,5 @@
 # Formatting, lints and tests on every push to main and every pull request.
-name: Quality
+name: Test
 
 on:
   push:

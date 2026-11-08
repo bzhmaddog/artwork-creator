@@ -758,8 +758,8 @@ pub fn page_outline(layer: &Layer) -> Option<(Vec<P2>, bool)> {
 }
 
 /// Points of a shape layer that snap to anchors when it is moved: the center of its
-/// geometry, then its points, or the corners of its box. The stroke is left out, so a
-/// line's end, not its stroke's edge, lands on the anchor.
+/// geometry, then its points, or the corners of its box and the middles of its sides.
+/// The stroke is left out, so a line's end, not its stroke's edge, lands on the anchor.
 pub fn snap_points(layer: &Layer) -> Vec<P2> {
     let Some(s) = layer.shape.as_deref() else {
         return Vec::new();
@@ -770,6 +770,7 @@ pub fn snap_points(layer: &Layer) -> Vec<P2> {
     } else {
         let [w, h] = s.size.map(|v| v / 2.0);
         frame.extend([[-w, -h], [w, -h], [w, h], [-w, h]]);
+        frame.extend([[0.0, -h], [w, 0.0], [0.0, h], [-w, 0.0]]);
     }
     frame
         .into_iter()
@@ -1413,6 +1414,9 @@ mod tests {
         // Center, then the corners of the 40 x 25 box around [100, 80].
         assert!(close(p[0], [100.0, 80.0]));
         assert!(close(p[1], [80.0, 67.5]) && close(p[3], [120.0, 92.5]));
+        // Then the middles of its sides: top, right, bottom, left.
+        assert!(close(p[5], [100.0, 67.5]) && close(p[6], [120.0, 80.0]));
+        assert!(close(p[7], [100.0, 92.5]) && close(p[8], [80.0, 80.0]));
         let line = layer(ShapeKind::Line);
         let p = snap_points(&line);
         assert_eq!(p.len(), 3);

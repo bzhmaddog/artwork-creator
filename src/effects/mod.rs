@@ -317,6 +317,10 @@ pub struct EffectInstance {
     pub enabled: bool,
     #[serde(default)]
     pub params: ParamValues,
+    /// Color parameters linked to saved colors: parameter id to the color's name (see
+    /// `colors`).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub links: std::collections::BTreeMap<String, String>,
 }
 
 impl EffectInstance {
@@ -330,6 +334,7 @@ impl EffectInstance {
                 .iter()
                 .map(|p| (p.id.clone(), p.default_value()))
                 .collect(),
+            links: Default::default(),
         }
     }
 }
@@ -568,6 +573,7 @@ mod tests {
                 effect: "plugin.not-installed".into(),
                 enabled: true,
                 params: ParamValues::new(),
+                links: Default::default(),
             },
             invert,
         ];

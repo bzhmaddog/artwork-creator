@@ -6,11 +6,13 @@ use egui::{
     Stroke, StrokeKind, Ui, pos2, vec2,
 };
 
+use crate::colors::ColorField;
 use crate::document::{Document, Group, Layer, Node, P2};
 use crate::effects_ui;
 use crate::i18n::{tr, tr_n, tr_noop, translate};
 use crate::shape::{self, Cap, DashStyle, Join, ShapeKind};
 use crate::text::{self, FontLibrary, PathKind, TextAlign};
+use crate::variables::{self, Field};
 
 /// Width of one nesting level in the layer list.
 const INDENT: f32 = 14.0;
@@ -37,6 +39,8 @@ pub struct LayersPanel {
     /// Image layers printed below this resolution (DPI) are flagged; set by the app from
     /// the export settings.
     pub min_dpi: f32,
+    /// Something was cut or copied, for the rows' Paste entry; set by the app.
+    pub can_paste: bool,
 }
 
 /// What the Align buttons line the selection up with.
@@ -92,6 +96,16 @@ pub struct LayersOutput {
     pub add_text: bool,
     /// A kind was picked from the Shape button's menu: add a shape layer.
     pub add_shape: Option<ShapeKind>,
+    /// Cut, Copy or Paste was picked in a row's menu, that row now selected.
+    pub edit: Option<Edit>,
+}
+
+/// Clipboard commands, which the app carries out.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Edit {
+    Cut,
+    Copy,
+    Paste,
 }
 
 /// Drag-and-drop payload in the layer list: the id of the dragged node.
@@ -149,6 +163,83 @@ pub fn insertion_path(doc: &mut Document, selected: Option<u64>) -> Vec<usize> {
     path
 }
 
+/// Renames `node`, about to be added to `doc` as a copy, when `doc` has a layer or group
+/// of that name already: "name copy", then "name copy (2)", "(3)"... A copy of a copy is
+/// named after the original, not "name copy copy".
+pub fn name_copy(doc: &Document, node: &mut Node) {
+    let mut names = Vec::new();
+    fn collect<'a>(nodes: &'a [Node], names: &mut Vec<&'a str>) {
+        for n in nodes {
+            match n {
+                Node::Group(g) => {
+                    names.push(&g.name);
+                    collect(&g.children, names);
+                }
+                Node::Layer(l) => names.push(&l.name),
+            }
+        }
+    }
+    collect(&doc.layers, &mut names);
+    let name = name_mut(node);
+    if !names.contains(&name.as_str()) {
+        return;
+    }
+    let base = copy_base(name).to_owned();
+    *name = (1..)
+        .map(|n| match n {
+            1 => tr!("DUPLICATE_LAYER_NAME", name = base),
+            n => tr!("DUPLICATE_LAYER_NAME_NUMBERED", name = base, n = n),
+        })
+        .find(|candidate| !names.contains(&candidate.as_str()))
+        .expect("an unused name");
+}
+
+/// The original's name, for a name made by `name_copy`.
+fn copy_base(name: &str) -> &str {
+    // The texts around the name in each pattern, found by filling it with a marker.
+    const MARK: &str = "\u{1}";
+    let plain = tr!("DUPLICATE_LAYER_NAME", name = MARK);
+    let numbered = tr!("DUPLICATE_LAYER_NAME_NUMBERED", name = MARK, n = MARK);
+    let strip = |pattern: &str| -> Option<&str> {
+        let (before, after) = pattern.split_once(MARK)?;
+        let rest = name.strip_prefix(before)?;
+        match after.split_once(MARK) {
+            // Numbered: base, then text, digits, text.
+            Some((mid, end)) => {
+                let rest = rest.strip_suffix(end)?;
+                let (base, digits) = rest.rsplit_once(mid)?;
+                (!digits.is_empty() && digits.bytes().all(|b| b.is_ascii_digit())).then_some(base)
+            }
+            None => rest.strip_suffix(after),
+        }
+    };
+    strip(&numbered)
+        .or_else(|| strip(&plain))
+        .filter(|base| !base.is_empty())
+        .unwrap_or(name)
+}
+
+/// Gives `node` and everything in it new ids from `doc`, for a copy about to be added to
+/// it. A text following a shape copied along with it follows the copy; one following a
+/// shape `doc` doesn't have (pasted from another project) stops following it.
+pub fn give_fresh_ids(doc: &mut Document, node: &mut Node) {
+    let mut new_ids = std::collections::HashMap::new();
+    node.for_each_node_mut(&mut |n| {
+        let id = doc.alloc_id();
+        new_ids.insert(n.id(), id);
+        set_id(n, id);
+    });
+    node.for_each_layer_mut(&mut |l| {
+        if let Some(t) = l.text.as_mut().filter(|t| t.path.shape != 0) {
+            t.path.shape = match new_ids.get(&t.path.shape) {
+                Some(&id) => id,
+                None if doc.layer(t.path.shape).is_some_and(|s| s.shape.is_some()) => t.path.shape,
+                None => 0,
+            };
+        }
+    });
+}
+
 /// Copies the selected node just above itself, moved 5 mm, with new ids, and selects the
 /// copy.
 pub fn duplicate(doc: &mut Document, selected: &mut Option<u64>) -> bool {
@@ -158,13 +249,12 @@ pub fn duplicate(doc: &mut Document, selected: &mut Option<u64>) -> bool {
     let Some(mut copy) = doc.node_at(&path).cloned() else {
         return false;
     };
-    copy.for_each_node_mut(&mut |n| set_id(n, doc.alloc_id()));
+    give_fresh_ids(doc, &mut copy);
     copy.for_each_layer_mut(&mut |l| {
         l.transform.center[0] += 5.0;
         l.transform.center[1] += 5.0;
     });
-    let name = name_mut(&mut copy);
-    *name = tr!("DUPLICATE_LAYER_NAME", name = name);
+    name_copy(doc, &mut copy);
     *selected = Some(copy.id());
     *path.last_mut().unwrap() += 1;
     doc.insert(&path, copy);
@@ -959,6 +1049,7 @@ pub fn show(
     // Layer list, top of the stack first.
     let mut pending_drop = None;
     let mut pending_duplicate = None;
+    let mut pending_edit = None;
     egui::ScrollArea::vertical()
         .id_salt("layer_list")
         .max_height(ui.available_height() * 0.5)
@@ -1046,6 +1137,21 @@ pub fn show(
                         }
                         r.dnd_set_drag_payload(DraggedNode(row.id));
                         r.context_menu(|ui| {
+                            for (edit, key, shortcut, enabled) in [
+                                (Edit::Cut, tr_noop!("CUT_LAYER"), "Ctrl+X", true),
+                                (Edit::Copy, tr_noop!("COPY_LAYER"), "Ctrl+C", true),
+                                (
+                                    Edit::Paste,
+                                    tr_noop!("PASTE_LAYER"),
+                                    "Ctrl+V",
+                                    state.can_paste,
+                                ),
+                            ] {
+                                let b = Button::new(translate(key)).shortcut_text(shortcut);
+                                if ui.add_enabled(enabled, b).clicked() {
+                                    pending_edit = Some((row.id, edit));
+                                }
+                            }
                             if ui
                                 .add(Button::new(tr!("DUPLICATE_LAYER")).shortcut_text("Ctrl+D"))
                                 .clicked()
@@ -1142,6 +1248,10 @@ pub fn show(
         *selected = Some(id);
         out.changed |= duplicate(doc, selected);
     }
+    if let Some((id, edit)) = pending_edit {
+        *selected = Some(id);
+        out.edit = Some(edit);
+    }
 
     // Toolbar under the list, as in most layer panels.
     ui.add_space(2.0);
@@ -1203,7 +1313,7 @@ pub fn show(
             out.changed |= move_to_end(doc, id, false);
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if tool_button(ui, Tool::Delete, has, tr!("DELETE_LAYER")) {
+            if tool_button(ui, Tool::Delete, has, tr!("DELETE_LAYER_HINT")) {
                 out.changed |= delete(doc, selected);
             }
         });
@@ -1381,9 +1491,14 @@ fn text_section(
                 ui.end_row();
 
                 ui.label(tr!("TEXT_COLOR"));
-                changed |= ui
-                    .color_edit_button_srgba_unmultiplied(&mut t.color)
-                    .changed();
+                changed |= crate::colors::linked_button(
+                    ui,
+                    &mut layer.color_links,
+                    ColorField::Text,
+                    &mut t.color,
+                    true,
+                )
+                .changed();
                 ui.end_row();
             });
             if font_changed {
@@ -1397,16 +1512,14 @@ fn text_section(
             prop_grid(ui, "text_size").show(ui, |ui| {
                 ui.label(tr!("TEXT_FONT_SIZE"));
                 let mut pt = text::size_pt(layer);
-                if ui
-                    .add(
-                        DragValue::new(&mut pt)
-                            .range(1.0..=2000.0)
-                            .speed(0.2)
-                            .fixed_decimals(1)
-                            .suffix(" pt"),
-                    )
-                    .on_hover_text(tr!("TEXT_FONT_SIZE_HINT"))
-                    .changed()
+                if variables::field(ui, &mut layer.bindings, Field::TextSize, &mut pt, |d| {
+                    d.range(1.0..=2000.0)
+                        .speed(0.2)
+                        .fixed_decimals(1)
+                        .suffix(" pt")
+                })
+                .on_hover_text(tr!("TEXT_FONT_SIZE_HINT"))
+                .changed()
                 {
                     text::set_size_pt(layer, pt);
                     changed = true;
@@ -1437,9 +1550,14 @@ fn text_section(
                             t.outline_width = mm / em_mm;
                             changed = true;
                         }
-                        changed |= ui
-                            .color_edit_button_srgba_unmultiplied(&mut t.outline_color)
-                            .changed();
+                        changed |= crate::colors::linked_button(
+                            ui,
+                            &mut layer.color_links,
+                            ColorField::TextOutline,
+                            &mut t.outline_color,
+                            true,
+                        )
+                        .changed();
                     });
                 });
                 ui.end_row();
@@ -1579,6 +1697,21 @@ fn text_path_rows(
     changed
 }
 
+/// A position or size field in mm, from `min` (up to 5000 mm for a size), named by
+/// `prefix`.
+fn mm_value<'a>(d: DragValue<'a>, prefix: &str, min: f32) -> DragValue<'a> {
+    let d = d
+        .fixed_decimals(1)
+        .speed(0.5)
+        .prefix(format!("{prefix} "))
+        .suffix(" mm");
+    if min.is_finite() {
+        d.range(min..=5000.0)
+    } else {
+        d
+    }
+}
+
 /// The Size row of a shape layer: the size of its geometry, stroke left out. Returns
 /// true if it changed.
 fn shape_size(ui: &mut Ui, layer: &mut Layer, state: &mut LayersPanel) -> bool {
@@ -1586,16 +1719,13 @@ fn shape_size(ui: &mut Ui, layer: &mut Layer, state: &mut LayersPanel) -> bool {
         return false;
     };
     let [mut w, mut h] = old;
-    fn field<'a>(v: &'a mut f32, prefix: &str) -> DragValue<'a> {
-        DragValue::new(v)
-            .fixed_decimals(1)
-            .speed(0.5)
-            .range(0.0..=5000.0)
-            .prefix(format!("{prefix} "))
-            .suffix(" mm")
-    }
-    let rw = ui.add(field(&mut w, tr!("LAYER_WIDTH_PREFIX")));
-    let rh = ui.add(field(&mut h, tr!("LAYER_HEIGHT_PREFIX")));
+    let b = &mut layer.bindings;
+    let rw = variables::field(ui, b, Field::Width, &mut w, |d| {
+        mm_value(d, tr!("LAYER_WIDTH_PREFIX"), 0.0)
+    });
+    let rh = variables::field(ui, b, Field::Height, &mut h, |d| {
+        mm_value(d, tr!("LAYER_HEIGHT_PREFIX"), 0.0)
+    });
     aspect_lock(ui, &mut state.free_aspect);
     let mut size = old;
     if rw.changed() {
@@ -1674,15 +1804,19 @@ fn shape_section(
                     ShapeKind::Rectangle => {
                         ui.label(tr!("SHAPE_CORNER_RADIUS"));
                         let max = s.size[0].min(s.size[1]) / 2.0;
-                        changed |= ui
-                            .add(
-                                DragValue::new(&mut s.corner_radius)
-                                    .range(0.0..=max)
+                        changed |= variables::field(
+                            ui,
+                            &mut layer.bindings,
+                            Field::CornerRadius,
+                            &mut s.corner_radius,
+                            |d| {
+                                d.range(0.0..=max)
                                     .speed(0.1)
                                     .fixed_decimals(1)
-                                    .suffix(" mm"),
-                            )
-                            .changed();
+                                    .suffix(" mm")
+                            },
+                        )
+                        .changed();
                         ui.end_row();
                     }
                     ShapeKind::RegularPolygon | ShapeKind::Star => {
@@ -1743,10 +1877,15 @@ fn shape_section(
                     ui.horizontal(|ui| {
                         changed |= ui.checkbox(&mut s.fill, "").changed();
                         ui.add_enabled_ui(s.fill, |ui| {
-                            changed |= ui
-                                .color_edit_button_srgba_unmultiplied(&mut s.fill_color)
-                                .on_hover_text(tr!("SHAPE_COLOR_HINT"))
-                                .changed();
+                            changed |= crate::colors::linked_button(
+                                ui,
+                                &mut layer.color_links,
+                                ColorField::Fill,
+                                &mut s.fill_color,
+                                true,
+                            )
+                            .on_hover_text(tr!("SHAPE_COLOR_HINT"))
+                            .changed();
                         });
                     });
                     ui.end_row();
@@ -1756,20 +1895,29 @@ fn shape_section(
                 ui.horizontal(|ui| {
                     changed |= ui.checkbox(&mut s.stroke, "").changed();
                     ui.add_enabled_ui(s.stroke, |ui| {
-                        changed |= ui
-                            .add(
-                                DragValue::new(&mut s.stroke_width)
-                                    .range(0.01..=100.0)
+                        changed |= variables::field(
+                            ui,
+                            &mut layer.bindings,
+                            Field::StrokeWidth,
+                            &mut s.stroke_width,
+                            |d| {
+                                d.range(0.01..=100.0)
                                     .speed(0.02)
                                     .fixed_decimals(2)
-                                    .suffix(" mm"),
-                            )
-                            .on_hover_text(tr!("SHAPE_STROKE_WIDTH_HINT"))
-                            .changed();
-                        changed |= ui
-                            .color_edit_button_srgba_unmultiplied(&mut s.stroke_color)
-                            .on_hover_text(tr!("SHAPE_COLOR_HINT"))
-                            .changed();
+                                    .suffix(" mm")
+                            },
+                        )
+                        .on_hover_text(tr!("SHAPE_STROKE_WIDTH_HINT"))
+                        .changed();
+                        changed |= crate::colors::linked_button(
+                            ui,
+                            &mut layer.color_links,
+                            ColorField::Stroke,
+                            &mut s.stroke_color,
+                            true,
+                        )
+                        .on_hover_text(tr!("SHAPE_COLOR_HINT"))
+                        .changed();
                     });
                 });
                 ui.end_row();
@@ -2026,25 +2174,16 @@ fn properties(
                         ui.add_enabled_ui(!locked, |ui| ui.label(tr!("LAYER_POSITION")));
                         ui.add_enabled_ui(!locked, |ui| {
                             ui.horizontal(|ui| {
-                                let t = &mut layer.transform;
-                                out.changed |= ui
-                                    .add(
-                                        DragValue::new(&mut t.center[0])
-                                            .fixed_decimals(1)
-                                            .speed(0.5)
-                                            .prefix("x ")
-                                            .suffix(" mm"),
-                                    )
-                                    .changed();
-                                out.changed |= ui
-                                    .add(
-                                        DragValue::new(&mut t.center[1])
-                                            .fixed_decimals(1)
-                                            .speed(0.5)
-                                            .prefix("y ")
-                                            .suffix(" mm"),
-                                    )
-                                    .changed();
+                                let (t, b) = (&mut layer.transform, &mut layer.bindings);
+                                let [x, y] = &mut t.center;
+                                out.changed |= variables::field(ui, b, Field::X, x, |d| {
+                                    mm_value(d, "x", f32::NEG_INFINITY)
+                                })
+                                .changed();
+                                out.changed |= variables::field(ui, b, Field::Y, y, |d| {
+                                    mm_value(d, "y", f32::NEG_INFINITY)
+                                })
+                                .changed();
                             });
                         });
                         ui.end_row();
@@ -2058,22 +2197,13 @@ fn properties(
                                 }
                                 let [px_w, px_h] = layer.size_px.map(|v| v.max(1) as f32);
                                 let [mut w, mut h] = layer.size_mm();
-                                let rw = ui.add(
-                                    DragValue::new(&mut w)
-                                        .fixed_decimals(1)
-                                        .speed(0.5)
-                                        .range(0.01..=5000.0)
-                                        .prefix(format!("{} ", tr!("LAYER_WIDTH_PREFIX")))
-                                        .suffix(" mm"),
-                                );
-                                let rh = ui.add(
-                                    DragValue::new(&mut h)
-                                        .fixed_decimals(1)
-                                        .speed(0.5)
-                                        .range(0.01..=5000.0)
-                                        .prefix(format!("{} ", tr!("LAYER_HEIGHT_PREFIX")))
-                                        .suffix(" mm"),
-                                );
+                                let b = &mut layer.bindings;
+                                let rw = variables::field(ui, b, Field::Width, &mut w, |d| {
+                                    mm_value(d, tr!("LAYER_WIDTH_PREFIX"), 0.01)
+                                });
+                                let rh = variables::field(ui, b, Field::Height, &mut h, |d| {
+                                    mm_value(d, tr!("LAYER_HEIGHT_PREFIX"), 0.01)
+                                });
                                 aspect_lock(ui, &mut state.free_aspect);
                                 let s = &mut layer.transform.scale;
                                 if rw.changed() {
@@ -2763,6 +2893,31 @@ mod tests {
         group(&mut d, &mut sel); // 1 101[100[3 2]]
         assert!(!drop_node(&mut d, 101, DropTarget::Into(100)));
         assert_eq!(shape(&d.layers), "1 101[100[3 2]]");
+    }
+
+    #[test]
+    fn copies_are_numbered_after_the_original() {
+        let named = |name: &str| {
+            let mut n = layer(9);
+            *name_mut(&mut n) = name.into();
+            n
+        };
+        let mut d = doc_with(vec![named("star")]);
+        let add = |d: &mut Document, name: &str| {
+            let mut n = named(name);
+            name_copy(d, &mut n);
+            let name = name_mut(&mut n).clone();
+            d.layers.push(n);
+            name
+        };
+        assert_eq!(add(&mut d, "star"), "star copy");
+        assert_eq!(add(&mut d, "star"), "star copy (2)");
+        assert_eq!(add(&mut d, "star copy"), "star copy (3)");
+        assert_eq!(add(&mut d, "star copy (2)"), "star copy (4)");
+        assert_eq!(add(&mut d, "moon"), "moon", "an unused name stays");
+        assert_eq!(add(&mut d, "moon"), "moon copy");
+        assert_eq!(copy_base("(2)"), "(2)");
+        assert_eq!(copy_base("a copy (x)"), "a copy (x)");
     }
 
     #[test]

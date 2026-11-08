@@ -406,6 +406,12 @@ pub struct Layer {
     /// Effects applied to the image, in order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub effects: Vec<EffectInstance>,
+    /// Fields linked to formulas of the project's variables (see `variables`).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub bindings: crate::variables::Bindings,
+    /// Colors linked to saved colors, by name (see `colors`).
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub color_links: crate::colors::Links,
     /// Makes this a text layer: its pixels are drawn from this text, and `source` and
     /// `data` are its font file (see `text`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -455,6 +461,8 @@ impl Layer {
             opacity: 1.0,
             transform: Transform::default(),
             effects: Vec::new(),
+            bindings: Default::default(),
+            color_links: Default::default(),
             text: None,
             text_state: TextState::default(),
             shape: None,
@@ -769,6 +777,9 @@ pub struct Document {
     pub template_placement: TemplatePlacement,
     /// Page color (RGB), printed under the layers.
     pub background: [u8; 3],
+    /// Name of the saved color the background is linked to (see `colors`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_link: Option<String>,
     /// How far the artwork goes past the template's cut lines, in mm.
     pub bleed_mm: f32,
     /// Width of the margin inside the cut lines that important content should stay
@@ -776,6 +787,12 @@ pub struct Document {
     pub safe_margin_mm: f32,
     /// Layers and groups, bottom of the stack first.
     pub layers: Vec<Node>,
+    /// Colors saved to reuse them (see `colors`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub palette: Vec<crate::colors::Swatch>,
+    /// Named numbers that layer fields can be linked to (see `variables`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub variables: Vec<crate::variables::Variable>,
     /// Next id for a new layer or group.
     pub next_id: u64,
 }
@@ -789,9 +806,12 @@ impl Default for Document {
             template: None,
             template_placement: TemplatePlacement::default(),
             background: [255, 255, 255],
+            background_link: None,
             bleed_mm: 0.0,
             safe_margin_mm: 0.0,
             layers: Vec::new(),
+            palette: Vec::new(),
+            variables: Vec::new(),
             next_id: 1,
         }
     }
@@ -1051,6 +1071,8 @@ impl Document {
             n.for_each_node_mut(&mut |n| max_id = max_id.max(n.id()));
         }
         doc.next_id = doc.next_id.max(max_id + 1);
+        // Saved colors are linked by name: each needs one, unlike in older projects.
+        crate::colors::name_palette(&mut doc.palette);
         Ok(doc)
     }
 }
@@ -1273,6 +1295,7 @@ mod tests {
             effect: "plugin.not-installed".into(),
             enabled: false,
             params: ParamValues::from([("x".into(), serde_json::Value::from(3))]),
+            links: Default::default(),
         });
         let json = serde_json::to_string(&l).unwrap();
         let back: Layer = serde_json::from_str(&json).unwrap();

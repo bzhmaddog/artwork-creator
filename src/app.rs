@@ -9,19 +9,21 @@ use egui::{
 };
 
 use crate::canvas_points;
+use crate::clipboard::Clipboard;
 use crate::document::{self, Document, Layer, Node, Orientation, P2, PageSize};
 use crate::effects::cache::EffectCache;
 use crate::export::{self, ExportSettings};
 use crate::file_dialog::{self, FileBrowser, Filter, Purpose, Request};
 use crate::history::History;
 use crate::i18n::{self, tr, tr_n, tr_noop, translate};
-use crate::layers_ui::{self, LayersPanel};
+use crate::layers_ui::{self, Edit, LayersPanel};
 use crate::project;
 use crate::recent::{self, RecentFiles};
 use crate::render::{self, PlacedElement, Scene};
 use crate::shape::{self, ShapeKind};
 use crate::template::{self, ElementKind, Template, TemplateEntry};
 use crate::text::{self, FontLibrary};
+use crate::variables;
 use crate::view::{self, CanvasState, REAL_SIZE_ZOOM};
 
 /// Longest side of the on-screen texture. Exports always use the full-resolution image.
@@ -54,6 +56,11 @@ const SHORTCUT_OPEN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND
 const SHORTCUT_SAVE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::S);
 const SHORTCUT_EXPORT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::E);
 const SHORTCUT_PRINT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::P);
+// Cut, copy and paste come as events, not keys (see `clipboard`); these only show them.
+const SHORTCUT_CUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::X);
+const SHORTCUT_COPY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::C);
+const SHORTCUT_PASTE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::V);
+const SHORTCUT_DELETE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::Delete);
 const SHORTCUT_DUPLICATE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::D);
 const SHORTCUT_TEXT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::T);
 const SHORTCUT_IMAGE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::I);
@@ -83,6 +90,10 @@ pub struct ArtworkApp {
     /// The document differs from the saved project; follows `history`.
     dirty: bool,
     history: History,
+    /// The layer or group last cut or copied.
+    clipboard: Clipboard,
+    /// What linked fields were last set to, to tell when one is changed by hand.
+    applied: variables::Applied,
     /// Recently opened or saved projects, for File > Open Recent.
     recent: RecentFiles,
     export_settings: ExportSettings,
@@ -239,6 +250,8 @@ impl ArtworkApp {
             project_path: None,
             dirty: false,
             history: History::new(&Document::default()),
+            clipboard: Clipboard::default(),
+            applied: variables::Applied::new(),
             recent: RecentFiles::load(cc.storage),
             export_settings: ExportSettings::default(),
             saved_export: ExportSettings::default(),
@@ -307,6 +320,8 @@ impl ArtworkApp {
 
     /// Brings the rest of the app in line with a document restored by undo or redo.
     fn after_restore(&mut self, (template, page): (Option<String>, P2)) {
+        // The restored fields were not changed by hand.
+        self.applied.clear();
         if self.doc.template != template {
             // Keep the restored placement rather than the template's defaults.
             let placement = self.doc.template_placement;
@@ -467,13 +482,20 @@ impl ArtworkApp {
         Ok(())
     }
 
+    /// Where a new text or shape layer goes: the template's center (the page's without
+    /// a template), or the middle of the view when that is out of sight.
+    fn new_layer_center(&self) -> P2 {
+        let center = Self::outline_bounds(&self.elements())
+            .map(|(c, _)| c)
+            .unwrap_or_else(|| self.doc.page_center());
+        self.canvas.in_view(center)
+    }
+
     /// Adds a text layer above the selection, centered on the template, and puts the
     /// keyboard in its text.
     fn add_text(&mut self, ctx: &egui::Context) {
         let id = self.doc.alloc_id();
-        let center = Self::outline_bounds(&self.elements())
-            .map(|(c, _)| c)
-            .unwrap_or_else(|| self.doc.page_center());
+        let center = self.new_layer_center();
         let layer = text::new_layer(
             id,
             tr!("DEFAULT_TEXT_LAYER_NAME"),
@@ -491,7 +513,8 @@ impl ArtworkApp {
         }
     }
 
-    /// Adds a shape layer of `kind` above the selection, centered on the template. Lines,
+    /// Adds a shape layer of `kind` above the selection, centered on the template, or on
+    /// the view when the template's center is out of sight (see `new_layer_center`). Lines,
     /// polylines and polygons are drawn point by point on the canvas instead.
     fn add_shape(&mut self, ctx: &egui::Context, kind: ShapeKind) {
         self.layers_panel.shape_kind = kind;
@@ -502,9 +525,7 @@ impl ArtworkApp {
             return;
         }
         let id = self.doc.alloc_id();
-        let center = Self::outline_bounds(&self.elements())
-            .map(|(c, _)| c)
-            .unwrap_or_else(|| self.doc.page_center());
+        let center = self.new_layer_center();
         let layer = shape::new_layer(id, kind, center);
         let at = layers_ui::insertion_path(&mut self.doc, self.selected);
         self.doc.insert(&at, Node::Layer(Box::new(layer)));
@@ -687,6 +708,7 @@ impl ArtworkApp {
         self.export_settings = ExportSettings::default();
         self.saved_export = self.export_settings.clone();
         self.dirty = false;
+        self.applied.clear();
         self.history.reset(&self.doc);
     }
 
@@ -748,6 +770,7 @@ impl ArtworkApp {
                 self.project_path = Some(path);
                 self.canvas.fit_pending = true;
                 self.dirty = false;
+                self.applied.clear();
                 self.history.reset(&self.doc);
             }
             Err(e) => {
@@ -1035,6 +1058,40 @@ impl ArtworkApp {
                 if ui.add_enabled(self.history.can_redo(), redo).clicked() {
                     self.redo();
                 }
+                ui.separator();
+                let has = self.selected.is_some();
+                let entry = |key: &str, sc: &KeyboardShortcut| {
+                    egui::Button::new(translate(key)).shortcut_text(ctx.format_shortcut(sc))
+                };
+                if ui
+                    .add_enabled(has, entry(tr_noop!("CUT_LAYER"), &SHORTCUT_CUT))
+                    .clicked()
+                {
+                    self.edit(&ctx, Edit::Cut);
+                }
+                if ui
+                    .add_enabled(has, entry(tr_noop!("COPY_LAYER"), &SHORTCUT_COPY))
+                    .clicked()
+                {
+                    self.edit(&ctx, Edit::Copy);
+                }
+                let paste = entry(tr_noop!("PASTE_LAYER"), &SHORTCUT_PASTE);
+                if ui
+                    .add_enabled(self.clipboard.has_content(), paste)
+                    .clicked()
+                {
+                    self.edit(&ctx, Edit::Paste);
+                }
+                let duplicate = entry(tr_noop!("DUPLICATE_LAYER"), &SHORTCUT_DUPLICATE);
+                if ui.add_enabled(has, duplicate).clicked() {
+                    self.dirty |= layers_ui::duplicate(&mut self.doc, &mut self.selected);
+                }
+                if ui
+                    .add_enabled(has, entry(tr_noop!("DELETE_LAYER"), &SHORTCUT_DELETE))
+                    .clicked()
+                {
+                    self.dirty |= layers_ui::delete(&mut self.doc, &mut self.selected);
+                }
             });
             ui.menu_button(tr!("MENU_VIEW"), |ui| {
                 if ui.button(tr!("FIT_PAGE_IN_VIEW")).clicked() {
@@ -1055,6 +1112,8 @@ impl ArtworkApp {
                 )
                 .on_hover_text(tr!("SNAP_TO_ANCHORS_HINT"))
                 .on_disabled_hover_text(tr!("TEMPLATE_HAS_NO_ANCHORS"));
+                ui.checkbox(&mut self.canvas.snap_to_edges, tr!("SNAP_TO_EDGES"))
+                    .on_hover_text(tr!("SNAP_TO_EDGES_HINT"));
                 ui.separator();
                 ui.menu_button(tr!("MENU_THEME"), crate::theme::menu);
                 ui.menu_button(tr!("MENU_LANGUAGE"), |ui| {
@@ -1177,10 +1236,10 @@ impl ArtworkApp {
         }
         ui.horizontal(|ui| {
             ui.label(tr!("PAGE_BACKGROUND"));
-            let [r, g, b] = self.doc.background;
-            let mut c = Color32::from_rgb(r, g, b);
-            if ui.color_edit_button_srgba(&mut c).changed() {
-                self.doc.background = [c.r(), c.g(), c.b()];
+            let doc = &mut self.doc;
+            if crate::colors::button_rgb(ui, &mut doc.background, &mut doc.background_link)
+                .changed()
+            {
                 self.dirty = true;
             }
         });
@@ -1194,6 +1253,20 @@ impl ArtworkApp {
                 |ui| self.template_settings(ui),
             );
         }
+        crate::layers_ui::section(
+            ui,
+            "colors",
+            RichText::new(tr!("COLORS_SECTION")).heading(),
+            |_| false,
+            |ui| self.dirty |= crate::colors::palette_ui(ui, &mut self.doc),
+        );
+        crate::layers_ui::section(
+            ui,
+            "variables",
+            RichText::new(tr!("VARIABLES_SECTION")).heading(),
+            |_| false,
+            |ui| self.dirty |= variables::variables_ui(ui, &mut self.doc),
+        );
     }
 
     /// Body of the Template section: placement, elements and default placement.
@@ -2022,6 +2095,56 @@ impl ArtworkApp {
         }
     }
 
+    // ---- Clipboard ----
+
+    /// Cuts or copies the selection onto the clipboard. Paste asks for the system
+    /// clipboard's text, which comes back next frame as a paste event, as with Ctrl+V.
+    fn edit(&mut self, ctx: &egui::Context, edit: Edit) {
+        let text = match edit {
+            Edit::Cut => {
+                let text = self.clipboard.cut(&mut self.doc, &mut self.selected);
+                self.dirty |= text.is_some();
+                text
+            }
+            Edit::Copy => self.clipboard.copy(&self.doc, self.selected),
+            Edit::Paste => {
+                ctx.send_viewport_cmd(egui::ViewportCommand::RequestPaste);
+                None
+            }
+        };
+        if let Some(text) = text {
+            ctx.copy_text(text);
+        }
+    }
+
+    /// Pastes the layers the system clipboard's `text` holds, if it holds any. Layers
+    /// copied in another window come without their images, which are loaded here.
+    fn paste(&mut self, ctx: &egui::Context, text: &str) {
+        let Some(pasted) = self
+            .clipboard
+            .paste(&mut self.doc, &mut self.selected, text)
+        else {
+            return;
+        };
+        self.dirty = true;
+        if !pasted.foreign {
+            return;
+        }
+        let mut missing = Vec::new();
+        if let Some(node) = self.doc.node_mut(pasted.id) {
+            node.for_each_layer_mut(&mut |layer| {
+                if !layer.is_drawn() && Self::load_image(ctx, layer).is_err() {
+                    layer.broken = true;
+                    missing.push(layer.source.display().to_string());
+                }
+            });
+        }
+        if !missing.is_empty() {
+            self.messages
+                .push(tr!("IMAGES_NOT_LOADED", files = missing.join("\n")));
+        }
+    }
+
     /// Keyboard shortcuts. Editing ones are skipped while a text field has focus.
     fn shortcuts(&mut self, ctx: &egui::Context) {
         let pressed = |sc: &KeyboardShortcut| ctx.input_mut(|i| i.consume_shortcut(sc));
@@ -2057,6 +2180,26 @@ impl ArtworkApp {
         }
         if pressed(&SHORTCUT_SHAPE) {
             self.add_shape(ctx, self.layers_panel.shape_kind);
+        }
+        // egui turns Ctrl+X, C and V (and their Windows alternatives) into events.
+        let edits: Vec<_> = ctx.input_mut(|i| {
+            let mut edits = Vec::new();
+            i.events.retain(|e| {
+                match e {
+                    egui::Event::Cut => edits.push((Edit::Cut, None)),
+                    egui::Event::Copy => edits.push((Edit::Copy, None)),
+                    egui::Event::Paste(text) => edits.push((Edit::Paste, Some(text.clone()))),
+                    _ => return true,
+                }
+                false
+            });
+            edits
+        });
+        for (edit, text) in edits {
+            match text {
+                Some(text) => self.paste(ctx, &text),
+                None => self.edit(ctx, edit),
+            }
         }
         if pressed(&SHORTCUT_DUPLICATE) {
             self.dirty |= layers_ui::duplicate(&mut self.doc, &mut self.selected);
@@ -2203,6 +2346,8 @@ impl eframe::App for ArtworkApp {
             self.add_images(&ctx, dropped);
         }
         self.guard_close(&ctx);
+        crate::colors::publish(&ctx, &self.doc);
+        variables::publish(&ctx, &self.doc);
         self.shortcuts(&ctx);
         self.poll_export(&ctx);
         self.watch_template(&ctx);
@@ -2227,6 +2372,7 @@ impl eframe::App for ArtworkApp {
             .min_size(310.0)
             .show(ui, |ui| {
                 let bounds = Self::outline_bounds(&elements);
+                self.layers_panel.can_paste = self.clipboard.has_content();
                 let out = layers_ui::show(
                     ui,
                     &mut self.doc,
@@ -2244,6 +2390,9 @@ impl eframe::App for ArtworkApp {
                 }
                 if let Some(kind) = out.add_shape {
                     self.add_shape(&ctx, kind);
+                }
+                if let Some(edit) = out.edit {
+                    self.edit(&ctx, edit);
                 }
             });
 
@@ -2284,6 +2433,10 @@ impl eframe::App for ArtworkApp {
         if let Some((purpose, paths)) = self.browser.show(&ctx) {
             self.on_files(&ctx, purpose, paths, false);
         }
+        // Colors saved from a picker go into the palette.
+        for swatch in crate::colors::take_saved(&ctx) {
+            self.dirty |= crate::colors::save(&mut self.doc, swatch);
+        }
         self.overwrite_modal(&ctx);
         self.message_modal(&ctx);
         self.close_modal(&ctx);
@@ -2292,6 +2445,10 @@ impl eframe::App for ArtworkApp {
         // shape scaled by a drag that just ended takes its new size first, so the drag
         // and that are one step.
         let finished = !ctx.input(|i| i.pointer.any_down()) && !ctx.egui_wants_keyboard_input();
+        // Linked fields follow their variables, and linked colors the saved colors,
+        // before shapes and texts are laid out.
+        variables::apply(&mut self.doc, &mut self.applied);
+        crate::colors::apply(&mut self.doc);
         shape::sync(&ctx, &mut self.doc, !ctx.input(|i| i.pointer.any_down()));
         // Texts following a shape edited on the canvas go with it in the same step.
         text::sync(&ctx, &mut self.doc, &self.fonts);

@@ -23,7 +23,12 @@ layers panel on the right](doc/capture.png)
 
 - **Layers and groups**: add images (PNG, JPEG, WebP, BMP, GIF) by button or drag and drop;
   reorder, group, duplicate, hide and lock them; group opacity is applied to the group as
-  a whole.
+  a whole. Cut, copy and paste layers and groups, within a project, into another one, or
+  between two windows of the app. A paste goes above the selection. Copies land 5 mm
+  from the original, each one a step further. The first paste of a cut, or of a copy
+  from another window, lands in place. A copy whose name is taken is named "name copy",
+  then "name copy (2)", and so on, as with Duplicate. New text and shape layers go in the
+  middle of the template, or of the view when that is out of sight.
 - **Text layers**: typed in place on the canvas, in any installed font, bold and italic,
   multi-line text aligned left, centered or right, letter and line spacing, color and
   outline. Text layers move, scale, rotate, distort and take effects like images, and are
@@ -53,9 +58,33 @@ layers panel on the right](doc/capture.png)
   outline (solid, dashed, dotted or dash-dot). They are stacked, reordered and toggled in the layer's properties, applied to
   the export at full resolution, and never change the image file. More effects can be
   added with [plugins](#plugins).
-- **Snap to anchors**: image centers and corners snap to points defined by the template,
-  such as the button centers; so do a shape's center, corners and points (its stroke left
-  out).
+- **Colors**: every color picker (text, outline, fill, stroke, effects, page background)
+  also shows the project's saved colors and the colors already used in it; a click on one
+  applies it. **Save this color** in a picker adds the color to the saved ones, which are
+  kept in the project file. A color picked from the saved ones, or saved from its picker,
+  stays linked to it (its button gets a colored frame) and follows when the saved color
+  changes; picking another color unlinks it. The **Colors** section of the left panel
+  lists the saved colors, to name, change or remove them, and the colors in use, a click
+  on one saving it. Renaming a saved color keeps its links; removing one unlinks the
+  colors using it, which keep their value. Layers pasted into another project bring
+  their saved colors along, unless that project gives the name to another color.
+- **Variables**: named numbers kept with the project, in the **Variables** section of the
+  left panel, such as `button = 30` or `margin = 2.5`. Type a variable's name, or a
+  formula such as `button + 2` or `(panel - 2 * margin) / 3`, in a layer's width,
+  height, x, y, stroke width, corner radius or text size field to link it: the field
+  then shows the formula, and follows when a variable changes. Variables have no unit;
+  each field reads them in its own (mm, or pt for text size). Typing a plain number in a
+  linked field unlinks it, and so does moving or resizing the layer some other way (on
+  the canvas, with Align or the arrow keys). Renaming a variable renames it in the
+  formulas; removing one unlinks the fields using it, which keep their value.
+- **Snap to anchors**: the centers, corners and edge middles of images snap to points
+  defined by the template, such as the button centers. So do a shape's center, the
+  corners and side middles of its box, or its points (its stroke left out).
+- **Snap to page and outline**: while a layer or group is moved, its edges and middle snap
+  to the page's edges and middle, and to the template's outline: the edges and middle of
+  its bounds, its straight sides, and the bleed line when there is a bleed. An edge being
+  stretched and a corner being resized snap too. A dashed line shows the guide it snapped
+  to. Hold Alt to drag freely, or turn it off with **View > Snap to page and outline**.
 - **Align** layers or groups to the page or to the template.
 - **Undo / redo** for every change to the project.
 - **Templates** made of several elements, each in its own DXF file, with its own color and
@@ -192,7 +221,7 @@ describes the elements:
   buttons and cutouts are holes, left blank in the export unless turned off in the Export
   window.
 - `anchors` are points that images snap to on the canvas: while an image is moved, its
-  center or a corner lands on an anchor that comes near, and a corner being resized or
+  center, a corner or the middle of an edge lands on an anchor that comes near, and a corner being resized or
   distorted does too. Hold Alt to drag freely, or turn it off with **View > Snap to
   anchors**. Anchors are drawn as small crosses and cut nothing; they are printed only when
   ticked under **Print lines** in the Export window. They are read from the DXF's POINT
@@ -280,6 +309,7 @@ To add a language: add a `Language` variant and its table in `src/i18n.rs`, and 
 | Add a point while editing points | Double-click a segment |
 | Make a point smooth or sharp | Double-click it while editing points |
 | Place a smooth point while drawing | Press and drag |
+| Cut / Copy / Paste layer | Ctrl+X / Ctrl+C / Ctrl+V |
 | Duplicate | Ctrl+D |
 | Group / Ungroup | Ctrl+G / Ctrl+Shift+G |
 | Delete layer | Del |

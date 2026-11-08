@@ -76,11 +76,23 @@ Planned:
 
 ### Editing
 
-- **Copy/Paste layers**: Beeing able to copy/paste from the canvas area
+Done:
+
+- **Copy and paste layers** and groups, within a project, between projects, or between
+  two windows of the app.
+- **Snapping** of layer edges and middles to the page and the template's outline, and of
+  edge middles to anchors.
+- **Color manager**: the colors used in the project and a palette saved with it, offered
+  in every color picker and listed in a Colors section. Colors picked from the palette
+  stay linked to it and follow when a saved color changes.
+- **Variables**: named numbers that size, position, stroke, corner and text size fields
+  are linked to through formulas, following when a variable changes.
+
+Planned:
+
 - **Clipping masks**: clip a layer to the shape of the layer below it, or to a group.
 - **Blend modes** (multiply, screen, overlay...).
 - **Gradient and pattern fills** for shapes, text and a background layer.
-- **Color manager** to store and reuse colors already used in the project
 - **Background color** layer filling the whole outline.
 - **Flip** layers horizontally and vertically.
 - **Rulers and guides** dragged from the rulers, with snapping.

@@ -302,7 +302,8 @@ fn params_ui(
             for spec in specs {
                 ui.label(label_text(builtin, &spec.label));
                 let params = Params::new(specs, &inst.params);
-                if let Some(v) = param_ui(ui, salt, spec, builtin, &params, px_mm) {
+                if let Some(v) = param_ui(ui, salt, spec, builtin, &params, &mut inst.links, px_mm)
+                {
                     inst.params.insert(spec.id.clone(), v);
                     changed = true;
                 }
@@ -317,13 +318,15 @@ fn label_text(builtin: bool, text: &str) -> &str {
     if builtin { translate(text) } else { text }
 }
 
-/// One parameter's control. Returns the new value if it changed.
+/// One parameter's control, a color one linked through `links`. Returns the new value
+/// if it changed.
 fn param_ui(
     ui: &mut Ui,
     salt: (u64, usize),
     spec: &ParamSpec,
     builtin: bool,
     p: &Params,
+    links: &mut std::collections::BTreeMap<String, String>,
     px_mm: Option<(f32, &str)>,
 ) -> Option<Value> {
     let id = spec.id.as_str();
@@ -368,7 +371,7 @@ fn param_ui(
         }
         ParamKind::Color { .. } => {
             let mut v = p.color(id);
-            ui.color_edit_button_srgba_unmultiplied(&mut v)
+            crate::colors::linked_button(ui, links, spec.id.clone(), &mut v, true)
                 .changed()
                 .then(|| Value::from(color_to_hex(v)))
         }
@@ -407,6 +410,7 @@ mod tests {
                 effect: (*id).into(),
                 enabled: true,
                 params: Default::default(),
+                links: Default::default(),
             })
             .collect()
     }

@@ -4,6 +4,8 @@
 mod app;
 mod canvas_points;
 mod canvas_text;
+mod clipboard;
+mod colors;
 mod document;
 mod effects;
 mod effects_ui;
@@ -21,6 +23,7 @@ mod shape;
 mod template;
 mod text;
 mod theme;
+mod variables;
 mod view;
 
 /// Starts the app, opening the project file given on the command line, if any.

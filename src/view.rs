@@ -40,6 +40,8 @@ const SAFE_AREA_COLOR: Color32 = Color32::from_rgb(130, 80, 220);
 const MAX_GROUP_PREVIEW_SIDE: f32 = 2048.0;
 /// How close (screen points) an image's center or corner must come to an anchor to snap.
 const SNAP_RADIUS: f32 = 10.0;
+/// Shortest straight side of the outline that layers snap to, in mm.
+const MIN_GUIDE_SIDE_MM: f32 = 2.0;
 /// Half the size of the cross marking an anchor, in screen points.
 const ANCHOR_MARK: f32 = 5.0;
 
@@ -154,11 +156,18 @@ pub struct CanvasState {
     /// Corner handles distort the selected layer instead of scaling it. Holding Ctrl
     /// swaps the two.
     pub distort_mode: bool,
-    /// Image centers and corners snap to the template's anchors while dragged. Holding Alt
+    /// Image centers, corners and edge middles snap to the template's anchors while
+    /// dragged. Holding Alt
     /// turns it off for the drag.
     pub snap_to_anchors: bool,
     /// The anchor the dragged image snapped to this frame, in page mm, to highlight it.
     snapped: Option<P2>,
+    /// Edges and centers of layers snap to the page's and the template outline's edges
+    /// while moved or resized. Holding Alt turns it off for the drag.
+    pub snap_to_edges: bool,
+    /// The guides the dragged layer snapped to this frame: a vertical line's x and a
+    /// horizontal line's y, in page mm, to show them.
+    snapped_guides: [Option<f32>; 2],
     /// Where the canvas is on screen.
     pub(crate) rect: Rect,
     drag: Option<Drag>,
@@ -198,6 +207,8 @@ impl Default for CanvasState {
             distort_mode: false,
             snap_to_anchors: true,
             snapped: None,
+            snap_to_edges: true,
+            snapped_guides: [None; 2],
             rect: Rect::NOTHING,
             drag: None,
             panning: false,
@@ -210,6 +221,20 @@ impl Default for CanvasState {
 }
 
 impl CanvasState {
+    /// `p` (page mm) if it is well inside the visible part of the canvas, otherwise the
+    /// middle of the view: where to put something new so that it can be seen.
+    pub fn in_view(&self, p: P2) -> P2 {
+        if !self.rect.is_positive() {
+            return p;
+        }
+        let inner = self.rect.shrink2(self.rect.size() * 0.1);
+        if inner.contains(self.camera.to_screen(self.rect, p)) {
+            p
+        } else {
+            self.camera.to_mm(self.rect, self.rect.center())
+        }
+    }
+
     /// Starts typing in a text layer on the canvas, all of its text selected.
     pub fn type_in(&mut self, layer: &Layer) {
         let n = layer.text.as_ref().map_or(0, |t| t.content.chars().count());
@@ -229,7 +254,8 @@ impl CanvasState {
     }
 }
 
-/// Points of a layer that snap to anchors: its center, then its drawn corners. The
+/// Points of a layer that snap to anchors: its center, its drawn corners, then the
+/// middles of its drawn edges. The
 /// center is the middle of the drawn corners' bounds, as for Align: once the layer is
 /// distorted, that is where it looks centered, not the center of its undistorted frame.
 /// A shape's are those of its geometry, its stroke left out (see `shape::snap_points`).
@@ -244,7 +270,12 @@ fn snap_points(layer: &Layer) -> Vec<P2> {
         hi = [hi[0].max(p[0]), hi[1].max(p[1])];
     }
     let middle = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0];
-    vec![middle, c[0], c[1], c[2], c[3]]
+    let mut points = vec![middle, c[0], c[1], c[2], c[3]];
+    points.extend((0..4).map(|i| {
+        let (a, b) = (c[i], c[(i + 1) % 4]);
+        [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0]
+    }));
+    points
 }
 
 /// The anchor nearest to any of `points`, if within `reach` (mm): the offset that moves
@@ -261,6 +292,90 @@ pub(crate) fn nearest_snap(anchors: &[P2], points: &[P2], reach: f32) -> Option<
         }
     }
     best.map(|(_, d, a)| (d, a))
+}
+
+/// Lines that the edges and middles of layers snap to, in page mm: vertical lines by
+/// their x, horizontal lines by their y.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub(crate) struct Guides {
+    pub x: Vec<f32>,
+    pub y: Vec<f32>,
+}
+
+/// The guides layers snap to: the edges and middle of a `page` mm page, and those of
+/// the outline's bounds, its straight vertical and horizontal sides, and the bleed line
+/// `bleed` mm outside its bounds.
+pub(crate) fn guides(elements: &[PlacedElement], bleed: f32, page: P2) -> Guides {
+    let mut g = Guides {
+        x: vec![0.0, page[0] / 2.0, page[0]],
+        y: vec![0.0, page[1] / 2.0, page[1]],
+    };
+    let lines = elements
+        .iter()
+        .filter(|e| e.kind == ElementKind::Outline)
+        .flat_map(|e| &e.polylines);
+    let mut bounds: Option<(P2, P2)> = None;
+    for line in lines.clone() {
+        for p in &line.points {
+            bounds = Some(match bounds {
+                None => (*p, *p),
+                Some((lo, hi)) => (
+                    [lo[0].min(p[0]), lo[1].min(p[1])],
+                    [hi[0].max(p[0]), hi[1].max(p[1])],
+                ),
+            });
+        }
+    }
+    let Some((lo, hi)) = bounds else {
+        return g.sorted();
+    };
+    for a in 0..2 {
+        let axis = if a == 0 { &mut g.x } else { &mut g.y };
+        axis.extend([lo[a], (lo[a] + hi[a]) / 2.0, hi[a]]);
+        if bleed > 0.0 {
+            axis.extend([lo[a] - bleed, hi[a] + bleed]);
+        }
+    }
+    for line in lines {
+        let n = line.points.len();
+        let segments = if line.closed { n } else { n.saturating_sub(1) };
+        for i in 0..segments {
+            let (p, q) = (line.points[i], line.points[(i + 1) % n]);
+            let (dx, dy) = ((q[0] - p[0]).abs(), (q[1] - p[1]).abs());
+            if dx < 1e-3 && dy >= MIN_GUIDE_SIDE_MM {
+                g.x.push(p[0]);
+            } else if dy < 1e-3 && dx >= MIN_GUIDE_SIDE_MM {
+                g.y.push(p[1]);
+            }
+        }
+    }
+    g.sorted()
+}
+
+impl Guides {
+    /// Sorted, each line once.
+    fn sorted(mut self) -> Self {
+        for axis in [&mut self.x, &mut self.y] {
+            axis.sort_by(f32::total_cmp);
+            axis.dedup_by(|a, b| (*a - *b).abs() < 1e-3);
+        }
+        self
+    }
+}
+
+/// The shift that brings the nearest of `values` onto one of `guides`, if within `reach`
+/// (mm), and that guide.
+fn snap_axis(guides: &[f32], values: &[f32], reach: f32) -> Option<(f32, f32)> {
+    let mut best: Option<(f32, f32)> = None;
+    for &v in values {
+        for &g in guides {
+            let d = g - v;
+            if d.abs() <= reach && best.is_none_or(|(b, _)| d.abs() < b.abs()) {
+                best = Some((d, g));
+            }
+        }
+    }
+    best
 }
 
 /// Drawn corners of an image of `size_px` placed by `t`.
@@ -409,6 +524,11 @@ pub fn show(
     let snap_reach =
         (state.snap_to_anchors && !alt && !anchors.is_empty()).then_some(SNAP_RADIUS / cam.zoom);
     let mut snapped = None;
+    // The page's and the outline's guides, and their reach in mm when snapping to them
+    // is on.
+    let guides = guides(elements, state.cuts.bleed_mm, doc.page_mm());
+    let guide_reach = (state.snap_to_edges && !alt).then_some(SNAP_RADIUS / cam.zoom);
+    let mut snapped_guides = [None; 2];
 
     // Which handle (if any) of the selected layer is under a screen point. A shape whose
     // points are being edited shows those instead.
@@ -594,6 +714,28 @@ pub fn show(
                     snapped = Some(a);
                 }
             }
+            // Otherwise an edge or the middle of what is moved lands on a guide, on
+            // each axis.
+            let ids: Vec<u64> = drag.layers.iter().map(|(id, _)| *id).collect();
+            if snapped.is_none()
+                && let Some(reach) = guide_reach
+                && let Some((lo, hi)) = layers_ui::layers_bounds(doc, &ids)
+            {
+                let mut off = [0.0; 2];
+                for (a, axis) in [&guides.x, &guides.y].into_iter().enumerate() {
+                    let values = [lo[a], (lo[a] + hi[a]) / 2.0, hi[a]];
+                    if let Some((d, g)) = snap_axis(axis, &values, reach) {
+                        off[a] = d;
+                        snapped_guides[a] = Some(g);
+                    }
+                }
+                for id in &ids {
+                    if let Some(layer) = doc.layer_mut(*id) {
+                        let c = layer.transform.center;
+                        layer.transform.center = [c[0] + off[0], c[1] + off[1]];
+                    }
+                }
+            }
             ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
             changed = true;
         } else if response.dragged_by(PointerButton::Primary)
@@ -617,7 +759,27 @@ pub fn show(
                         let d = [m[0] - drag.start_mouse[0], m[1] - drag.start_mouse[1]];
                         let pull = d[0] * dir[0] + d[1] * dir[1];
                         let both = if alt { 2.0 } else { 1.0 };
-                        let new = (extent + pull * both).max(MIN_STRETCH_MM);
+                        let mut new = (extent + pull * both).max(MIN_STRETCH_MM);
+                        // An edge parallel to a guide lands on it. The edge stands
+                        // `new / 2` from the center with Alt, `new - extent / 2` from
+                        // the starting center without.
+                        let a = (0..2).find(|&a| dir[a].abs() > 0.999);
+                        if let Some(a) = a.filter(|_| !s.is_distorted())
+                            && let Some(reach) = guide_reach
+                        {
+                            let axis = if a == 0 { &guides.x } else { &guides.y };
+                            let from_center =
+                                |new: f32| if alt { new / 2.0 } else { new - extent / 2.0 };
+                            let edge = c[a] + dir[a] * from_center(new);
+                            if let Some((_, g)) = snap_axis(axis, &[edge], reach) {
+                                let e = dir[a] * (g - c[a]);
+                                let snapped_new = if alt { 2.0 * e } else { e + extent / 2.0 };
+                                if snapped_new >= MIN_STRETCH_MM {
+                                    new = snapped_new;
+                                    snapped_guides[a] = Some(g);
+                                }
+                            }
+                        }
                         t.scale[axis] = new / px;
                         let shift_c = if alt { 0.0 } else { (new - extent) / 2.0 };
                         t.center = [
@@ -647,19 +809,19 @@ pub fn show(
                     t.scale = [(s.scale[0] * f).max(1e-4), (s.scale[1] * f).max(1e-4)];
                     // The dragged corner snaps: scaled so it comes as close as it can to
                     // the anchor along its diagonal, the center staying put.
+                    let start = corners_of(s, layer.size_px);
+                    let i = (0..4)
+                        .min_by(|&a, &b| {
+                            let d = |k: usize| {
+                                len([
+                                    start[k][0] - drag.start_mouse[0],
+                                    start[k][1] - drag.start_mouse[1],
+                                ])
+                            };
+                            d(a).total_cmp(&d(b))
+                        })
+                        .unwrap_or(0);
                     if let Some(reach) = snap_reach {
-                        let start = corners_of(s, layer.size_px);
-                        let i = (0..4)
-                            .min_by(|&a, &b| {
-                                let d = |k: usize| {
-                                    len([
-                                        start[k][0] - drag.start_mouse[0],
-                                        start[k][1] - drag.start_mouse[1],
-                                    ])
-                                };
-                                d(a).total_cmp(&d(b))
-                            })
-                            .unwrap_or(0);
                         let p = corners_of(*t, layer.size_px)[i];
                         if let Some((_, a)) = nearest_snap(&anchors, &[p], reach) {
                             let u = [p[0] - c[0], p[1] - c[1]];
@@ -673,6 +835,29 @@ pub fn show(
                             if k > 1e-3 {
                                 t.scale = [t.scale[0] * k, t.scale[1] * k];
                                 snapped = Some(a);
+                            }
+                        }
+                    }
+                    // Otherwise the corner's x or y lands on a guide, whichever is
+                    // nearer, the center staying put.
+                    if snapped.is_none()
+                        && let Some(reach) = guide_reach
+                    {
+                        let p = corners_of(*t, layer.size_px)[i];
+                        let mut best: Option<(f32, usize, f32)> = None;
+                        for (a, axis) in [&guides.x, &guides.y].into_iter().enumerate() {
+                            if (p[a] - c[a]).abs() > 1e-3
+                                && let Some((d, g)) = snap_axis(axis, &[p[a]], reach)
+                                && best.is_none_or(|(b, _, _)| d.abs() < b.abs())
+                            {
+                                best = Some((d, a, g));
+                            }
+                        }
+                        if let Some((_, a, g)) = best {
+                            let k = (g - c[a]) / (p[a] - c[a]);
+                            if k > 1e-3 {
+                                t.scale = [t.scale[0] * k, t.scale[1] * k];
+                                snapped_guides[a] = Some(g);
                             }
                         }
                     }
@@ -718,6 +903,7 @@ pub fn show(
         if response.drag_stopped() || !ui.input(|i| i.pointer.primary_down()) {
             state.drag = None;
             snapped = None;
+            snapped_guides = [None; 2];
         }
     } else if let Some(p) = hover
         && !space
@@ -748,6 +934,7 @@ pub fn show(
     }
 
     state.snapped = snapped;
+    state.snapped_guides = snapped_guides;
     paint(ui, doc, elements, *selected, state, rect, distorting);
     canvas_text::paint(ui, doc, &state.typing, cam, rect);
     let painter = ui.painter_at(rect);
@@ -1219,6 +1406,18 @@ fn paint(
     if let Some(a) = state.snapped {
         let p = cam.to_screen(rect, a);
         painter.circle_stroke(p, ANCHOR_MARK * 1.6, Stroke::new(2.0, ACCENT));
+    }
+    // The guides the dragged layer snapped to, across the whole canvas.
+    let guide = Stroke::new(1.0, ACCENT);
+    if let Some(x) = state.snapped_guides[0] {
+        let x = cam.to_screen(rect, [x, 0.0]).x;
+        let line = [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())];
+        painter.extend(Shape::dashed_line(&line, guide, 6.0, 4.0));
+    }
+    if let Some(y) = state.snapped_guides[1] {
+        let y = cam.to_screen(rect, [0.0, y]).y;
+        let line = [egui::pos2(rect.left(), y), egui::pos2(rect.right(), y)];
+        painter.extend(Shape::dashed_line(&line, guide, 6.0, 4.0));
     }
 
     let Some(sel) = selected.filter(|&id| doc.effectively_visible(id)) else {
@@ -2066,6 +2265,84 @@ mod tests {
         assert!(state.points.is_some(), "still editing");
     }
 
+    /// Template elements made of a rectangular outline from `lo` to `hi`.
+    fn outline(lo: P2, hi: P2) -> Vec<PlacedElement> {
+        vec![PlacedElement {
+            kind: ElementKind::Outline,
+            polylines: vec![crate::template::Polyline {
+                points: vec![lo, [hi[0], lo[1]], hi, [lo[0], hi[1]]],
+                closed: true,
+            }],
+            anchors: Vec::new(),
+        }]
+    }
+
+    #[test]
+    fn guides_are_the_page_and_the_outline_s_bounds_middle_straight_sides_and_bleed_line() {
+        let mut els = outline([20.0, 20.0], [250.0, 180.0]);
+        // A notch with a short vertical side, too short to count, and a long one.
+        els[0].polylines.push(crate::template::Polyline {
+            points: vec![[60.0, 40.0], [60.0, 41.0], [90.0, 41.0], [90.0, 70.0]],
+            closed: false,
+        });
+        let g = guides(&els, 3.0, [297.0, 210.0]);
+        assert_eq!(
+            g.x,
+            [0.0, 17.0, 20.0, 90.0, 135.0, 148.5, 250.0, 253.0, 297.0]
+        );
+        assert_eq!(
+            g.y,
+            [0.0, 17.0, 20.0, 41.0, 100.0, 105.0, 180.0, 183.0, 210.0]
+        );
+        let page_only = guides(&anchors(&[[1.0, 1.0]]), 3.0, [297.0, 210.0]);
+        assert_eq!(page_only.x, [0.0, 148.5, 297.0]);
+        assert_eq!(page_only.y, [0.0, 105.0, 210.0]);
+    }
+
+    #[test]
+    fn moving_and_resizing_snap_edges_to_the_outline() {
+        let close = |a: f32, b: f32| (a - b).abs() < 0.05;
+        let none = egui::Modifiers::NONE;
+        // Guides x 40, 110, 180 and y 20, 100, 180. The image: (50, 75) to (150, 125).
+        let els = outline([40.0, 20.0], [180.0, 180.0]);
+        let drag =
+            |doc: &mut Document, from: P2, to: P2, m| canvas_drag_in(doc, from, to, m, false, &els);
+
+        // The left edge comes within reach of the outline's and lands on it.
+        let mut doc = snap_doc();
+        drag(&mut doc, [100.0, 100.0], [91.5, 100.0], none);
+        let c = doc.layer(1).unwrap().transform.center;
+        assert!(close(c[0], 90.0) && close(c[1], 100.0), "{c:?}");
+        // Alt drags freely.
+        let mut doc = snap_doc();
+        drag(
+            &mut doc,
+            [100.0, 100.0],
+            [91.5, 100.0],
+            egui::Modifiers::ALT,
+        );
+        assert!(close(doc.layer(1).unwrap().transform.center[0], 91.5));
+
+        // The bottom edge stretched near the outline's bottom ends on it, the top staying.
+        let mut doc = snap_doc();
+        drag(&mut doc, [100.0, 125.0], [100.0, 177.5], none);
+        let l = doc.layer(1).unwrap();
+        let (lo, hi) = layers_ui::layers_bounds(&doc, &[1]).unwrap();
+        assert!(close(lo[1], 75.0) && close(hi[1], 180.0), "{lo:?} {hi:?}");
+        assert!(close(l.transform.scale[0], 1.0));
+
+        // Without a template, the page's edges: the right one, 297.
+        let mut doc = snap_doc();
+        canvas_drag_in(&mut doc, [100.0, 100.0], [245.5, 100.0], none, false, &[]);
+        assert!(close(doc.layer(1).unwrap().transform.center[0], 247.0));
+
+        // A corner scaled near the outline's right side ends on it.
+        let mut doc = snap_doc();
+        drag(&mut doc, [150.0, 125.0], [178.0, 139.0], none);
+        let (_, hi) = layers_ui::layers_bounds(&doc, &[1]).unwrap();
+        assert!(close(hi[0], 180.0), "{hi:?}");
+    }
+
     #[test]
     fn moving_snaps_center_or_corner_to_anchors() {
         let close = |a: P2, b: P2| (a[0] - b[0]).abs() < 0.05 && (a[1] - b[1]).abs() < 0.05;
@@ -2109,6 +2386,19 @@ mod tests {
         let l = doc.layer(1).unwrap();
         assert!(close(l.corners()[1], [155.0, 76.0]), "{:?}", l.corners());
         assert!(close(l.transform.center, [105.0, 101.0]));
+        // So does the middle of an edge: the right one, at (150, 100).
+        let mut doc = snap_doc();
+        let near_edge = anchors(&[[156.0, 99.0]]);
+        canvas_drag_in(
+            &mut doc,
+            [100.0, 100.0],
+            [104.0, 100.0],
+            none,
+            false,
+            &near_edge,
+        );
+        let c = doc.layer(1).unwrap().transform.center;
+        assert!(close(c, [106.0, 99.0]), "{c:?}");
         // Out of reach, nothing snaps.
         let mut doc = snap_doc();
         let far = anchors(&[[130.0, 100.0]]);
@@ -2294,6 +2584,28 @@ mod tests {
         assert_eq!(state.camera.zoom, zoom, "window covers the canvas");
         frame(&mut state, 0.3, wheel(pos2(800.0, 600.0)), true);
         assert!(state.camera.zoom > zoom, "bare canvas still zooms");
+    }
+
+    #[test]
+    fn new_things_go_in_view() {
+        let rect = Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 800.0));
+        let mut state = CanvasState {
+            rect,
+            ..Default::default()
+        };
+        state.camera.fit(rect, [297.0, 210.0]);
+        let center = [148.5, 105.0];
+        assert_eq!(state.in_view(center), center, "the whole page shows");
+        // Zoomed in on the top left corner: the page's center is out of sight.
+        state
+            .camera
+            .zoom_at(rect, state.camera.to_screen(rect, [20.0, 20.0]), 8.0);
+        let p = state.in_view(center);
+        let middle = state.camera.to_mm(rect, rect.center());
+        assert!((p[0] - middle[0]).abs() < 1e-3 && (p[1] - middle[1]).abs() < 1e-3);
+        assert!(p[0] < 60.0 && p[1] < 60.0, "{p:?}");
+        // Before the canvas was ever shown, nothing changes.
+        assert_eq!(CanvasState::default().in_view(center), center);
     }
 
     #[test]

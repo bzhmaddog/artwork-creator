@@ -82,11 +82,19 @@ Done:
   two windows of the app.
 - **Snapping** of layer edges and middles to the page and the template's outline, and of
   edge middles to anchors.
-- **Color manager**: the colors used in the project and a palette saved with it, offered
-  in every color picker and listed in a Colors section. Colors picked from the palette
-  stay linked to it and follow when a saved color changes.
-- **Variables**: named numbers that size, position, stroke, corner and text size fields
-  are linked to through formulas, following when a variable changes.
+- **Variables** of a kind (length, angle, text size, number, color, text): size,
+  position, stroke, corner, rotation and text size fields are linked to them through
+  formulas, written in the field or in a formula editor opened by its fx button (with the
+  result and the variables the field takes); colors by picking a color variable in any
+  color picker; a text layer's text through its link button. Linked fields, colors and
+  texts follow when a variable changes. With the size's aspect locked, width and height
+  are linked together.
+- **Broken links**: removing a variable in use asks first; what used it keeps its value
+  and shows a broken link, and the layer list flags those layers (and folded groups
+  holding them).
+- **Colors in use** section listing the project's colors with their code and opacity, a
+  double click saving one as a color variable; color pickers show the colors in use, the
+  color variables, and the color's hex code and opacity.
 
 Planned:
 
@@ -118,4 +126,5 @@ Planned:
 
 - **Customizable shortcuts**.
 - **More languages**.
-- **Panel position customisation** : let user drag and place panel where he want (floating or snapped to borders of the window)
+- **Panel positions**: panels dragged and placed where the user wants, floating or
+  docked to an edge of the window.

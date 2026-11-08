@@ -1,10 +1,10 @@
 //! The project's colors, to reuse them: those in use, gathered from the document, and
-//! the palette of colors saved with the project on purpose, each with its own name.
+//! its color variables (see `variables`), each with its own name.
 //!
 //! Every color button of the app is [`button`]: its picker shows both lists as swatches,
-//! and a click on one applies it. A click on a saved color also links the button's color
-//! to it, by name, like a field linked to a variable: each frame, [`apply`] gives every
-//! linked color its saved color's value, so changing a saved color changes all the
+//! and a click on one applies it. A click on a color variable also links the button's
+//! color to it, by name, like a field linked to a variable: each frame, [`apply`] gives
+//! every linked color its variable's value, so changing a color variable changes all the
 //! colors using it. A color changed some other way in the picker is unlinked. The app
 //! publishes the lists at the start of each frame ([`publish`]), so the buttons need no
 //! extra arguments; a color saved from a picker is handed back the same way
@@ -20,20 +20,20 @@ use serde::{Deserialize, Serialize};
 
 use crate::document::{Document, Node};
 use crate::effects::{ParamKind, Params, color_from_hex, color_to_hex, registry};
-use crate::i18n::{tr, tr_n};
+use crate::i18n::tr;
+use crate::variables::{self, Kind, Value, Variable};
 
-/// A color saved in the project's palette.
+/// A saved color of the first projects that had them, before color variables: read,
+/// then made a color variable ([`migrate_palette`]).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct Swatch {
+pub struct OldSwatch {
     /// Straight RGBA.
     pub color: [u8; 4],
-    /// Unique in the palette; the colors linked to this one name it. Older projects
-    /// may have none: [`name_palette`] gives them one.
     #[serde(default)]
     pub name: String,
 }
 
-/// A layer's color that can be linked to a saved color. An effect's color parameters
+/// A layer's color that can be linked to a color variable. An effect's color parameters
 /// are linked in the effect itself (`EffectInstance::links`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -48,7 +48,7 @@ pub enum ColorField {
     Stroke,
 }
 
-/// Names of the saved colors a layer's colors are linked to.
+/// Names of the color variables a layer's colors are linked to.
 pub type Links = BTreeMap<ColorField, String>;
 
 /// Side of a swatch in the pickers and the Colors section, in points.
@@ -105,21 +105,35 @@ pub fn used(doc: &Document) -> Vec<[u8; 4]> {
     colors
 }
 
-/// `#rrggbb`, or `#rrggbbaa` when not opaque.
-pub fn hex(c: [u8; 4]) -> String {
+/// A color for people to read: `#RRGGBB`, then its opacity (`#000032, 50% opacity`).
+pub fn describe(c: [u8; 4]) -> String {
     let [r, g, b, a] = c;
-    if a == 255 {
-        format!("#{r:02x}{g:02x}{b:02x}")
-    } else {
-        format!("#{r:02x}{g:02x}{b:02x}{a:02x}")
-    }
+    format!(
+        "#{r:02X}{g:02X}{b:02X}, {}",
+        tr!("OPACITY_PERCENT", n = opacity_percent(a))
+    )
+}
+
+/// An alpha as a percentage of opacity, rounded.
+fn opacity_percent(a: u8) -> u8 {
+    (a as f32 / 2.55).round() as u8
 }
 
 /// What the color pickers show this frame.
 #[derive(Clone, Default)]
 struct Swatches {
-    saved: Vec<Swatch>,
+    /// All the variables: the colors to show, the names to avoid for a new one.
+    vars: Vec<Variable>,
     used: Vec<[u8; 4]>,
+}
+
+impl Swatches {
+    /// The color variables' names and colors.
+    fn saved(&self) -> impl Iterator<Item = (&str, [u8; 4])> {
+        self.vars
+            .iter()
+            .filter_map(|v| Some((v.name.as_str(), v.value.color()?)))
+    }
 }
 
 fn swatches_id() -> Id {
@@ -133,79 +147,119 @@ fn saved_id() -> Id {
 /// Makes the project's colors available to the color buttons drawn this frame.
 pub fn publish(ctx: &egui::Context, doc: &Document) {
     let swatches = Arc::new(Swatches {
-        saved: doc.palette.clone(),
+        vars: doc.variables.clone(),
         used: used(doc),
     });
     ctx.data_mut(|d| d.insert_temp(swatches_id(), swatches));
 }
 
-/// Colors saved from a picker's "Save this color" button since the last call.
-pub fn take_saved(ctx: &egui::Context) -> Vec<Swatch> {
-    ctx.data_mut(|d| d.remove_temp::<Vec<Swatch>>(saved_id()))
+/// Color variables made from a picker's "Save this color" button since the last call.
+pub fn take_saved(ctx: &egui::Context) -> Vec<Variable> {
+    ctx.data_mut(|d| d.remove_temp::<Vec<Variable>>(saved_id()))
         .unwrap_or_default()
 }
 
-/// Adds `swatch` to the palette unless its color or its name is there already. Returns
-/// true if it was added.
-pub fn save(doc: &mut Document, swatch: Swatch) -> bool {
-    if doc
-        .palette
-        .iter()
-        .any(|s| s.color == swatch.color || s.name == swatch.name)
+/// Adds the color variable `var` unless a color variable has its color or a variable
+/// its name already. Returns true if it was added.
+pub fn save(doc: &mut Document, var: Variable) -> bool {
+    let color = var.value.color();
+    if color.is_none()
+        || doc
+            .variables
+            .iter()
+            .any(|v| v.name == var.name || (v.value.color().is_some() && v.value.color() == color))
     {
         return false;
     }
-    doc.palette.push(swatch);
+    doc.variables.push(var);
     true
 }
 
-/// A name no saved color has: "Color 1", "Color 2"...
-pub fn new_name(palette: &[Swatch]) -> String {
-    (1..)
-        .map(|n| tr!("NEW_SAVED_COLOR_NAME", n = n))
-        .find(|n| palette.iter().all(|s| s.name != *n))
-        .expect("an unused name")
+/// The color variable `name`'s color, if there is one.
+fn find(vars: &[Variable], name: &str) -> Option<[u8; 4]> {
+    vars.iter().find(|v| v.name == name)?.value.color()
 }
 
-/// Names the saved colors that have no name, or the name of one before them.
-pub fn name_palette(palette: &mut [Swatch]) {
-    for i in 0..palette.len() {
-        let name = palette[i].name.trim();
-        if name.is_empty() || palette[..i].iter().any(|s| s.name == name) {
-            palette[i].name = new_name(palette);
-        } else if name.len() != palette[i].name.len() {
-            palette[i].name = name.to_owned();
-        }
+/// Makes the saved colors of a project from before color variables color variables.
+/// A name that can't be a variable's (such as "Color 1") or is taken becomes one that
+/// can ("Color_1"), in the links too.
+pub fn migrate_palette(doc: &mut Document) {
+    let old = std::mem::take(&mut doc.old_palette);
+    if old.is_empty() {
+        return;
     }
+    let mut renamed: BTreeMap<String, String> = BTreeMap::new();
+    for swatch in old {
+        let mut base: String = swatch
+            .name
+            .trim()
+            .chars()
+            .map(|c| {
+                if c.is_alphanumeric() || c == '_' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
+        if !base
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_alphabetic() || c == '_')
+        {
+            base.insert(0, '_');
+        }
+        let free = |n: &str| doc.variables.iter().all(|v| v.name != n);
+        let name = if base.chars().all(|c| c == '_') {
+            variables::new_name(&doc.variables, Kind::Color)
+        } else if free(&base) {
+            base
+        } else {
+            (2..)
+                .map(|n| format!("{base}_{n}"))
+                .find(|n| free(n))
+                .expect("an unused name")
+        };
+        if !swatch.name.is_empty() && !renamed.contains_key(&swatch.name) {
+            renamed.insert(swatch.name, name.clone());
+        }
+        doc.variables.push(Variable {
+            name,
+            value: Value::Color(swatch.color),
+        });
+    }
+    for_each_link(doc, |link| match renamed.get(link.as_str()) {
+        Some(new) => {
+            *link = new.clone();
+            true
+        }
+        None => false,
+    });
 }
 
-/// Gives every linked color its saved color's value, and unlinks those whose saved
-/// color is gone. Returns true if the document changed.
+/// Gives every linked color its color variable's value. A color whose variable is gone
+/// (or no longer a color) keeps its link, broken, and its last value: its button shows
+/// a broken link icon, and a color variable of that name links it again. Links to a
+/// color the layer doesn't have are dropped. Returns true if the document changed.
 pub fn apply(doc: &mut Document) -> bool {
-    let palette = std::mem::take(&mut doc.palette);
-    let find = |name: &str| palette.iter().find(|s| s.name == name).map(|s| s.color);
+    let vars = std::mem::take(&mut doc.variables);
+    let find = |name: &str| find(&vars, name);
     let mut changed = false;
-    if let Some(name) = &doc.background_link {
-        match find(name) {
-            Some([r, g, b, _]) => {
-                changed |= doc.background != [r, g, b];
-                doc.background = [r, g, b];
-            }
-            None => {
-                doc.background_link = None;
-                changed = true;
-            }
-        }
+    if let Some([r, g, b, _]) = doc.background_link.as_deref().and_then(find) {
+        changed |= doc.background != [r, g, b];
+        doc.background = [r, g, b];
     }
     doc.for_each_layer_mut(|layer| {
         let mut links = std::mem::take(&mut layer.color_links);
         links.retain(|&field, name| {
-            let (Some(c), Some(slot)) = (find(name), slot(layer, field)) else {
+            let Some(slot) = slot(layer, field) else {
                 changed = true;
                 return false;
             };
-            changed |= *slot != c;
-            *slot = c;
+            if let Some(c) = find(name) {
+                changed |= *slot != c;
+                *slot = c;
+            }
             true
         });
         layer.color_links = links;
@@ -213,8 +267,7 @@ pub fn apply(doc: &mut Document) -> bool {
             let params = &mut fx.params;
             fx.links.retain(|param, name| {
                 let Some(c) = find(name) else {
-                    changed = true;
-                    return false;
+                    return true;
                 };
                 let now = params
                     .get(param)
@@ -228,30 +281,30 @@ pub fn apply(doc: &mut Document) -> bool {
             });
         }
     });
-    doc.palette = palette;
+    doc.variables = vars;
     changed
 }
 
-/// Fits the color links of `node`, pasted from the clipboard, to `palette`, which may not
-/// be the one it was copied from. A link stays when the palette has a saved color of
-/// that name and value; it moves to the saved color of that value when there is one;
-/// otherwise its color is saved under its name. A link whose name the palette gives to
-/// another color is dropped, its color kept as it is.
-pub fn adopt_links(palette: &mut Vec<Swatch>, node: &mut Node) {
+/// Fits the color links of `node`, pasted from the clipboard, to the variables `vars`,
+/// which may not be those of the project it was copied from. A link stays when there
+/// is a color variable of that name and value; it moves to the color variable of that
+/// value when there is one; otherwise its color is saved as a variable of its name. A
+/// link whose name another variable has is dropped, its color kept as it is.
+pub fn adopt_links(vars: &mut Vec<Variable>, node: &mut Node) {
     let mut fit = |name: &mut String, c: [u8; 4]| {
-        if palette.iter().any(|s| s.name == *name && s.color == c) {
+        if find(vars, name) == Some(c) {
             return true;
         }
-        if let Some(s) = palette.iter().find(|s| s.color == c) {
-            *name = s.name.clone();
+        if let Some(v) = vars.iter().find(|v| v.value.color() == Some(c)) {
+            *name = v.name.clone();
             return true;
         }
-        if palette.iter().any(|s| s.name == *name) {
+        if vars.iter().any(|v| v.name == *name) {
             return false;
         }
-        palette.push(Swatch {
-            color: c,
+        vars.push(Variable {
             name: name.clone(),
+            value: Value::Color(c),
         });
         true
     };
@@ -291,8 +344,8 @@ fn slot(layer: &mut crate::document::Layer, field: ColorField) -> Option<&mut [u
     }
 }
 
-/// Every link to a saved color in the document: the page background's, the layers'
-/// and their effects'.
+/// Every link to a color variable in the document: the page background's, the layers'
+/// and their effects'. A link `f` returns false for is removed.
 fn for_each_link(doc: &mut Document, mut f: impl FnMut(&mut String) -> bool) {
     if let Some(name) = &mut doc.background_link
         && !f(name)
@@ -307,8 +360,8 @@ fn for_each_link(doc: &mut Document, mut f: impl FnMut(&mut String) -> bool) {
     });
 }
 
-/// How many colors are linked to the saved color `name`.
-fn use_count(doc: &mut Document, name: &str) -> usize {
+/// How many colors are linked to the variable `name`.
+pub fn use_count(doc: &mut Document, name: &str) -> usize {
     let mut n = 0;
     for_each_link(doc, |link| {
         n += (link == name) as usize;
@@ -317,8 +370,35 @@ fn use_count(doc: &mut Document, name: &str) -> usize {
     n
 }
 
-/// A swatch of `color`, clickable. The selected one gets a thick frame.
-pub fn swatch(ui: &mut Ui, color: [u8; 4], selected: bool) -> Response {
+/// Links to the variable `old` go to `new`.
+pub fn rename_links(doc: &mut Document, old: &str, new: &str) {
+    for_each_link(doc, |link| {
+        if link == old {
+            *link = new.to_owned();
+        }
+        true
+    });
+}
+
+/// Draws a chain inside the swatch `rect` of `color`, black or white, whichever stands
+/// out from the color, over a halo of the other so it shows on any color; `broken`, a
+/// broken chain.
+fn paint_chain(painter: &egui::Painter, rect: egui::Rect, color: [u8; 4], broken: bool) {
+    let [r, g, b, a] = color;
+    let over = Color32::from_rgba_unmultiplied(r, g, b, a);
+    let (ink, halo) = if over.intensity() < 0.55 && a > 96 {
+        (Color32::WHITE, Color32::from_black_alpha(140))
+    } else {
+        (Color32::BLACK, Color32::from_white_alpha(140))
+    };
+    let icon = rect.shrink(1.0);
+    variables::paint_link_stroke(painter, icon, egui::Stroke::new(3.0, halo), broken);
+    variables::paint_link_stroke(painter, icon, egui::Stroke::new(1.4, ink), broken);
+}
+
+/// A swatch of `color`, clickable. The selected one gets a thick frame; the one a color
+/// is `linked` to, a chain inside too.
+pub fn swatch(ui: &mut Ui, color: [u8; 4], selected: bool, linked: bool) -> Response {
     let (rect, response) = ui.allocate_exact_size(vec2(SWATCH, SWATCH), Sense::click());
     if ui.is_rect_visible(rect) {
         let [r, g, b, a] = color;
@@ -335,19 +415,27 @@ pub fn swatch(ui: &mut Ui, color: [u8; 4], selected: bool) -> Response {
             egui::Stroke::new(width, visuals.fg_stroke.color),
             egui::StrokeKind::Inside,
         );
+        if linked {
+            paint_chain(ui.painter(), rect, color, false);
+        }
     }
     response
 }
 
-/// A grid of swatches, each a color, whether it is selected and its tooltip; returns
-/// the index of the one clicked.
-fn swatch_grid(ui: &mut Ui, swatches: &[([u8; 4], bool, String)]) -> Option<usize> {
+/// A grid of swatches, each a color, whether it is selected (the one linked to, for
+/// color variables, which shows a chain) and its tooltip; returns the index of the one
+/// clicked.
+fn swatch_grid(ui: &mut Ui, swatches: &[([u8; 4], bool, String)], links: bool) -> Option<usize> {
     let mut picked = None;
     ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
     for (r, row) in swatches.chunks(PER_ROW).enumerate() {
         ui.horizontal(|ui| {
             for (i, (c, selected, tip)) in row.iter().enumerate() {
-                if swatch(ui, *c, *selected).on_hover_text(tip).clicked() {
+                let linked = links && *selected;
+                if swatch(ui, *c, *selected, linked)
+                    .on_hover_text(tip)
+                    .clicked()
+                {
                     picked = Some(r * PER_ROW + i);
                 }
             }
@@ -372,10 +460,12 @@ pub fn linked_button<K: Ord>(
     response
 }
 
-/// A color button whose picker also shows the project's saved and used colors. `color`
-/// is straight RGBA; with `alpha` false it stays opaque. `link` is the name of the
-/// saved color it is linked to: a click on a saved color links it, any other change
-/// unlinks it. A linked button has a colored frame.
+/// A color button whose picker also shows the project's color variables and used
+/// colors. `color` is straight RGBA; with `alpha` false it stays opaque. `link` is the
+/// name of the color variable it is linked to: a click on a color variable links it,
+/// any other change unlinks it. The button is a square swatch; linked, a chain link is
+/// drawn inside it (the variable's name is in its tooltip); linked to a variable that
+/// no longer exists, a broken chain.
 pub fn button(
     ui: &mut Ui,
     color: &mut [u8; 4],
@@ -384,7 +474,13 @@ pub fn button(
 ) -> Response {
     let popup_id = ui.auto_id_with("color_popup");
     let open = Popup::is_id_open(ui.ctx(), popup_id);
-    let size = ui.spacing().interact_size;
+    // Square, as tall as a field.
+    let side = ui.spacing().interact_size.y;
+    let size = vec2(side, side);
+    let broken = link.as_deref().is_some_and(|name| {
+        let swatches = ui.data(|d| d.get_temp::<Arc<Swatches>>(swatches_id()));
+        !swatches.is_some_and(|s| s.saved().any(|(n, _)| n == name))
+    });
     let (rect, mut response) = ui.allocate_exact_size(size, Sense::click());
     if ui.is_rect_visible(rect) {
         let visuals = if open {
@@ -400,17 +496,28 @@ pub fn button(
             rect,
         );
         let radius = visuals.corner_radius.at_most(2);
-        let stroke = if link.is_some() {
-            egui::Stroke::new(2.0, ui.visuals().hyperlink_color)
-        } else {
-            visuals.bg_stroke
-        };
         ui.painter()
-            .rect_stroke(rect, radius, stroke, egui::StrokeKind::Inside);
+            .rect_stroke(rect, radius, visuals.bg_stroke, egui::StrokeKind::Inside);
+        if link.is_some() {
+            paint_chain(ui.painter(), rect, *color, broken);
+        }
     }
-    if let Some(name) = link {
-        response = response.on_hover_text(tr!("COLOR_LINKED_HINT", name = name));
-    }
+    // The color, with its opacity, then its link if any.
+    response = response.on_hover_text(match link {
+        Some(name) if broken => {
+            format!(
+                "{}\n{}",
+                describe(*color),
+                tr!("BROKEN_COLOR_LINK_HINT", name = name)
+            )
+        }
+        Some(name) => format!(
+            "{}\n{}",
+            describe(*color),
+            tr!("COLOR_LINKED_HINT", name = name)
+        ),
+        None => describe(*color),
+    });
 
     // The picker's hue and saturation, kept so they survive a gray or black color.
     let hsva_id = popup_id.with("hsva");
@@ -439,61 +546,81 @@ pub fn button(
                 *link = None;
                 response.mark_changed();
             }
+            // The values the sliders don't show: the code, to type or copy, and the
+            // opacity in %.
+            if code_fields(ui, popup_id, color, alpha) {
+                hsva = Hsva::from_srgba_unmultiplied(*color);
+                *link = None;
+                response.mark_changed();
+            }
 
             let swatches = ui
                 .data(|d| d.get_temp::<Arc<Swatches>>(swatches_id()))
                 .unwrap_or_default();
-            ui.separator();
             let mut picked = None;
-            ui.label(RichText::new(tr!("PALETTE_COLORS")).small());
-            if swatches.saved.is_empty() {
-                ui.label(RichText::new(tr!("PALETTE_EMPTY")).small().weak());
-            } else {
-                let grid: Vec<_> = swatches
-                    .saved
-                    .iter()
-                    .map(|s| {
-                        let selected = match link {
-                            Some(name) => s.name == *name,
-                            None => s.color == *color,
-                        };
-                        (s.color, selected, tip(s))
-                    })
-                    .collect();
-                if let Some(i) = swatch_grid(ui, &grid) {
-                    let s = &swatches.saved[i];
-                    picked = Some((s.color, Some(s.name.clone())));
-                }
-            }
-            let saved = swatches.saved.iter().any(|s| s.color == *color);
-            if ui
-                .add_enabled(
-                    !saved,
-                    egui::Button::new(tr!("SAVE_COLOR_TO_PALETTE")).small(),
-                )
-                .on_hover_text(tr!("SAVE_COLOR_TO_PALETTE_HINT"))
-                .clicked()
-            {
-                // Saved and linked to at once; the app adds it to the palette.
-                let swatch = Swatch {
-                    color: *color,
-                    name: new_name(&swatches.saved),
-                };
-                *link = Some(swatch.name.clone());
-                response.mark_changed();
-                ui.data_mut(|d| {
-                    d.get_temp_mut_or_default::<Vec<Swatch>>(saved_id())
-                        .push(swatch)
-                });
-            }
-            ui.label(RichText::new(tr!("COLORS_IN_USE")).small());
+            // The colors in use, right below the sliders.
+            ui.add_space(4.0);
             let grid: Vec<_> = swatches
                 .used
                 .iter()
-                .map(|&c| (c, link.is_none() && c == *color, hex(c)))
+                .map(|&c| (c, link.is_none() && c == *color, describe(c)))
                 .collect();
-            if let Some(i) = swatch_grid(ui, &grid) {
+            if let Some(i) = swatch_grid(ui, &grid, false) {
                 picked = Some((swatches.used[i], None));
+            }
+            ui.separator();
+            ui.label(RichText::new(tr!("COLOR_VARIABLES")).small());
+            let saved: Vec<(&str, [u8; 4])> = swatches.saved().collect();
+            if saved.is_empty() {
+                crate::callout::callout_small(
+                    ui,
+                    crate::callout::Tone::Info,
+                    tr!("COLOR_VARIABLES_EMPTY"),
+                );
+            } else {
+                // Only the one linked to is selected, with a chain inside; a click on
+                // it again unlinks the color, which keeps its value.
+                let grid: Vec<_> = saved
+                    .iter()
+                    .map(|&(name, c)| {
+                        let linked = link.as_deref() == Some(name);
+                        let tip = if linked {
+                            format!("{}\n{}", tip(name, c), tr!("CLICK_TO_UNLINK_COLOR"))
+                        } else {
+                            tip(name, c)
+                        };
+                        (c, linked, tip)
+                    })
+                    .collect();
+                if let Some(i) = swatch_grid(ui, &grid, true) {
+                    let (name, c) = saved[i];
+                    if link.as_deref() == Some(name) {
+                        *link = None;
+                        response.mark_changed();
+                    } else {
+                        picked = Some((c, Some(name.to_owned())));
+                    }
+                }
+            }
+            // Only when there is something to save: a color no variable has.
+            let is_saved = saved.iter().any(|&(_, c)| c == *color);
+            if !is_saved
+                && ui
+                    .add(egui::Button::new(tr!("SAVE_COLOR_AS_VARIABLE")).small())
+                    .on_hover_text(tr!("SAVE_COLOR_AS_VARIABLE_HINT"))
+                    .clicked()
+            {
+                // Saved and linked to at once; the app adds the variable.
+                let var = Variable {
+                    name: variables::new_name(&swatches.vars, Kind::Color),
+                    value: Value::Color(*color),
+                };
+                *link = Some(var.name.clone());
+                response.mark_changed();
+                ui.data_mut(|d| {
+                    d.get_temp_mut_or_default::<Vec<Variable>>(saved_id())
+                        .push(var)
+                });
             }
             if let Some((mut c, name)) = picked {
                 if !alpha {
@@ -518,125 +645,152 @@ pub fn button_rgb(ui: &mut Ui, color: &mut [u8; 3], link: &mut Option<String>) -
     response
 }
 
-/// A saved swatch's tooltip: its name and its hex code.
-fn tip(s: &Swatch) -> String {
-    format!("{} ({})", s.name, hex(s.color))
+/// A color variable's tooltip: its name and its hex code.
+fn tip(name: &str, c: [u8; 4]) -> String {
+    format!("{name} ({})", describe(c))
 }
 
-/// The Colors section's body: the saved colors, each with its name and a remove
-/// button, then the colors in use, a click on one saving it. Renaming a saved color
-/// renames it in the links; removing one unlinks the colors using it, which keep their
-/// value. Returns true if the document changed.
-pub fn palette_ui(ui: &mut Ui, doc: &mut Document) -> bool {
+/// The picker's Hex field (`#RRGGBB`, applied when left or on Enter; `#RRGGBBAA` sets
+/// the opacity too) and, with `alpha`, its Opacity field in %. Returns true if `color`
+/// changed.
+fn code_fields(ui: &mut Ui, popup_id: Id, color: &mut [u8; 4], alpha: bool) -> bool {
     let mut changed = false;
-    ui.label(tr!("PALETTE_COLORS"));
-    if doc.palette.is_empty() {
-        ui.label(RichText::new(tr!("PALETTE_EMPTY")).weak());
-    }
-    let mut remove = None;
-    let mut rename = None;
-    let names: Vec<String> = doc.palette.iter().map(|s| s.name.clone()).collect();
-    let used_by: Vec<usize> = names.iter().map(|n| use_count(doc, n)).collect();
-    for (i, s) in doc.palette.iter_mut().enumerate() {
-        ui.horizontal(|ui| {
-            changed |= ui
-                .color_edit_button_srgba_unmultiplied(&mut s.color)
-                .on_hover_text(hex(s.color))
-                .changed();
-            // The name is edited in a draft, applied when the field is left, so the
-            // links follow from one valid name to the next.
-            let id = ui.scope_id().with(("saved_color_name", i));
-            let mut draft = ui
-                .data(|d| d.get_temp::<String>(id))
-                .unwrap_or_else(|| s.name.clone());
-            let name = draft.trim();
-            let ok =
-                !name.is_empty() && !names.iter().enumerate().any(|(j, m)| j != i && m == name);
-            let width = ui.available_width() - ui.spacing().interact_size.y - 4.0;
-            let mut edit = egui::TextEdit::singleline(&mut draft)
-                .hint_text(tr!("SAVED_COLOR_NAME_HINT"))
-                .desired_width(width.max(40.0));
-            if !ok {
-                edit = edit.text_color(ui.visuals().error_fg_color);
-            }
-            let r = ui.add(edit);
-            let r = if ok {
-                r.on_hover_text(tr_n!("SAVED_COLOR_USE_COUNT", used_by[i]))
+    ui.horizontal(|ui| {
+        crate::layers_ui::field_frames(ui);
+        ui.label(tr!("COLOR_HEX"));
+        // Typed into a draft, shown as the color's code otherwise.
+        let id = popup_id.with("hex");
+        let [r, g, b, a] = *color;
+        let code = format!("#{r:02X}{g:02X}{b:02X}");
+        let mut draft: String = ui
+            .data(|d| d.get_temp(id))
+            .filter(|_| ui.memory(|m| m.has_focus(id.with("edit"))))
+            .unwrap_or(code);
+        let r = ui.add(
+            egui::TextEdit::singleline(&mut draft)
+                .id(id.with("edit"))
+                .desired_width(70.0)
+                // In line with the label: the text sits at the top of its box otherwise.
+                .align(egui::Align2::LEFT_CENTER),
+        );
+        if r.lost_focus() {
+            let text = draft.trim();
+            let text = if text.starts_with('#') {
+                text.to_owned()
             } else {
-                r.on_hover_text(tr!("SAVED_COLOR_NAME_INVALID"))
+                format!("#{text}")
             };
-            if r.lost_focus() {
-                let name = draft.trim().to_owned();
-                if ok && name != s.name {
-                    rename = Some((s.name.clone(), name.clone()));
-                    s.name = name;
+            if let Some(mut c) = color_from_hex(&text) {
+                // Six digits keep the opacity; none without alpha.
+                if text.len() == 7 || !alpha {
+                    c[3] = if alpha { a } else { 255 };
+                }
+                if c != *color {
+                    *color = c;
                     changed = true;
                 }
-                ui.data_mut(|d| d.remove::<String>(id));
-            } else if r.has_focus() || r.changed() {
-                ui.data_mut(|d| d.insert_temp(id, draft));
             }
+            ui.data_mut(|d| d.remove::<String>(id));
+        } else if r.has_focus() {
+            ui.data_mut(|d| d.insert_temp(id, draft));
+        }
+        if alpha {
+            ui.add_space(8.0);
+            ui.label(tr!("OPACITY"));
+            let mut pct = opacity_percent(color[3]);
             if ui
-                .add(egui::Button::new("🗑").frame(false))
-                .on_hover_text(tr!("REMOVE_PALETTE_COLOR"))
-                .clicked()
+                .add(egui::DragValue::new(&mut pct).range(0..=100).speed(1.0))
+                .changed()
             {
-                remove = Some(i);
+                color[3] = (pct as f32 * 2.55).round() as u8;
+                changed = true;
             }
-        });
-    }
-    if let Some((old, new)) = rename {
-        for_each_link(doc, |link| {
-            if *link == old {
-                *link = new.clone();
-            }
-            true
-        });
-    }
-    if let Some(i) = remove {
-        let gone = doc.palette.remove(i).name;
-        for_each_link(doc, |link| *link != gone);
-        changed = true;
-    }
-    if ui.button(tr!("ADD_PALETTE_COLOR")).clicked() {
-        let name = new_name(&doc.palette);
-        doc.palette.push(Swatch {
-            color: [255, 255, 255, 255],
-            name,
-        });
-        changed = true;
-    }
-
-    ui.add_space(4.0);
-    ui.label(tr!("COLORS_IN_USE"))
-        .on_hover_text(tr!("COLORS_IN_USE_HINT"));
-    let used = used(doc);
-    let mut picked = None;
-    ui.horizontal_wrapped(|ui| {
-        ui.spacing_mut().item_spacing = vec2(3.0, 3.0);
-        for c in used {
-            let saved = doc.palette.iter().any(|s| s.color == c);
-            let tip = if saved {
-                tr!("COLOR_IN_PALETTE", hex = hex(c))
-            } else {
-                tr!("SAVE_COLOR_IN_USE", hex = hex(c))
-            };
-            if swatch(ui, c, saved).on_hover_text(tip).clicked() {
-                picked = Some(c);
-            }
+            crate::layers_ui::unit(ui, "%");
         }
     });
-    if let Some(color) = picked {
-        let name = new_name(&doc.palette);
-        changed |= save(doc, Swatch { color, name });
-    }
     changed
+}
+
+/// A color as the Colors in use section lists it, in a monospace font: `#RRGGBB`,
+/// then its opacity, padded so the percentages line up (`#000032  50%`).
+fn in_use_text(c: [u8; 4]) -> String {
+    let [r, g, b, a] = c;
+    format!("#{r:02X}{g:02X}{b:02X} {:>3}%", opacity_percent(a))
+}
+
+/// The Colors in use section's body: the colors in use, one per row, each with its
+/// swatch and its code. A double click on one adds a color variable of that color,
+/// even if one already has it. Returns true if the document changed.
+pub fn in_use_ui(ui: &mut Ui, doc: &mut Document) -> bool {
+    let mut picked = None;
+    // Monospace, so the columns line up, and small enough for a whole row to fit the
+    // panel: every row has as many characters as the widest possible one.
+    let mut font = egui::TextStyle::Monospace.resolve(ui.style());
+    let room = ui.available_width() - SWATCH - 16.0;
+    let chars = in_use_text([255; 4]).chars().count() as f32;
+    let advance = ui.fonts_mut(|f| f.glyph_width(&egui::FontId::monospace(1.0), '0'));
+    if advance > 0.0 {
+        font.size = font.size.min(room / (chars * advance)).max(7.0);
+    }
+    for c in used(doc) {
+        let height = ui.spacing().interact_size.y;
+        let (rect, response) =
+            ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click());
+        if ui.is_rect_visible(rect) {
+            let painter = ui.painter();
+            if response.hovered() {
+                painter.rect_filled(rect, 3.0, ui.visuals().widgets.hovered.weak_bg_fill);
+            }
+            let sw = egui::Rect::from_min_size(
+                rect.left_center() - vec2(-2.0, SWATCH / 2.0),
+                vec2(SWATCH, SWATCH),
+            );
+            let [r, g, b, a] = c;
+            show_color_at(painter, Color32::from_rgba_unmultiplied(r, g, b, a), sw);
+            painter.rect_stroke(
+                sw,
+                2.0,
+                ui.visuals().widgets.noninteractive.bg_stroke,
+                egui::StrokeKind::Inside,
+            );
+            let text_at = egui::pos2(sw.right() + 6.0, rect.center().y);
+            painter.text(
+                text_at,
+                egui::Align2::LEFT_CENTER,
+                in_use_text(c),
+                font.clone(),
+                ui.visuals().text_color(),
+            );
+        }
+        if response
+            .on_hover_text(tr!("SAVE_COLOR_IN_USE"))
+            .double_clicked()
+        {
+            picked = Some(c);
+        }
+    }
+    let Some(c) = picked else {
+        return false;
+    };
+    doc.variables.push(Variable {
+        name: variables::new_name(&doc.variables, Kind::Color),
+        value: Value::Color(c),
+    });
+    true
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::document::{Group, Layer};
+
+    /// A color variable.
+    fn cv(name: &str, c: [u8; 4]) -> Variable {
+        Variable {
+            name: name.into(),
+            value: Value::Color(c),
+        }
+    }
 
     #[test]
     fn used_colors_come_once_each_in_stack_order_without_switched_off_ones() {
@@ -728,10 +882,13 @@ mod tests {
         let ctx = egui::Context::default();
         let doc = Document {
             background: [200, 10, 10],
-            palette: vec![Swatch {
-                color: [10, 200, 10, 255],
-                name: "green".into(),
-            }],
+            variables: vec![
+                cv("green", [10, 200, 10, 255]),
+                Variable {
+                    name: "color1".into(),
+                    value: Value::Length(1.0),
+                },
+            ],
             ..Default::default()
         };
         let mut color = [1, 2, 3, 255];
@@ -788,8 +945,23 @@ mod tests {
             frame(events, &mut color, &doc);
         }
         assert_eq!(color, [10, 200, 10, 255]);
-        assert_eq!(*link.borrow(), Some("green".into()), "a saved color links");
+        assert_eq!(
+            *link.borrow(),
+            Some("green".into()),
+            "a color variable links"
+        );
         assert!(changed.get());
+
+        // A click on the variable it is linked to unlinks the color, which stays as it
+        // is. "Save this color" isn't offered for a color a variable has.
+        let shapes = frame(Vec::new(), &mut color, &doc);
+        assert!(!shapes.iter().any(|s| matches!(&s.shape,
+            egui::Shape::Text(t) if t.galley.text() == "Save this color")));
+        for events in click(green[0]) {
+            frame(events, &mut color, &doc);
+        }
+        assert_eq!(*link.borrow(), None, "unlinked");
+        assert_eq!(color, [10, 200, 10, 255], "the color kept");
 
         // A color in use is applied unlinked.
         let shapes = frame(Vec::new(), &mut color, &doc);
@@ -818,46 +990,75 @@ mod tests {
         let saved = take_saved(&ctx);
         assert_eq!(
             saved,
-            [Swatch {
-                color: [9, 9, 9, 255],
-                name: "Color 1".into(),
-            }]
+            [cv("color2", [9, 9, 9, 255])],
+            "named after no variable"
         );
-        assert_eq!(*link.borrow(), Some("Color 1".into()), "and linked to");
+        assert_eq!(*link.borrow(), Some("color2".into()), "and linked to");
         assert!(take_saved(&ctx).is_empty());
     }
 
     #[test]
-    fn saving_keeps_one_swatch_per_color_and_name_and_hex_drops_full_alpha() {
+    fn saving_keeps_one_variable_per_color_and_name() {
         let mut doc = Document::default();
-        let sw = |c, n: &str| Swatch {
-            color: c,
-            name: n.into(),
-        };
-        assert!(save(&mut doc, sw([1, 2, 3, 255], "a")));
-        assert!(!save(&mut doc, sw([1, 2, 3, 255], "b")));
-        assert!(!save(&mut doc, sw([4, 5, 6, 255], "a")));
-        assert!(save(&mut doc, sw([1, 2, 3, 0], "b")));
-        assert_eq!(doc.palette.len(), 2);
-        assert_eq!(hex([1, 2, 3, 255]), "#010203");
-        assert_eq!(hex([255, 0, 171, 128]), "#ff00ab80");
-        let json = serde_json::to_string(&doc).unwrap();
-        let back = Document::from_json(&json).unwrap();
-        assert_eq!(back.palette, doc.palette);
+        assert!(save(&mut doc, cv("a", [1, 2, 3, 255])));
+        assert!(!save(&mut doc, cv("b", [1, 2, 3, 255])));
+        assert!(!save(&mut doc, cv("a", [4, 5, 6, 255])));
+        assert!(save(&mut doc, cv("b", [1, 2, 3, 0])));
+        doc.variables.push(Variable {
+            name: "c".into(),
+            value: Value::Number(1.0),
+        });
         assert!(
-            !serde_json::to_string(&Document::default())
-                .unwrap()
-                .contains("palette"),
-            "an empty palette isn't saved"
+            !save(&mut doc, cv("c", [7, 7, 7, 255])),
+            "a number has the name"
         );
+        assert_eq!(doc.variables.len(), 3);
     }
 
     #[test]
-    fn pasted_links_fit_the_palette_of_the_project_they_land_in() {
-        let sw = |c: [u8; 4], n: &str| Swatch {
-            color: c,
-            name: n.into(),
-        };
+    fn saved_colors_of_older_projects_become_color_variables() {
+        let mut json = serde_json::to_value(Document::default()).unwrap();
+        let fields = json.as_object_mut().unwrap();
+        fields.insert("background_link".into(), "Color 1".into());
+        fields.insert(
+            "variables".into(),
+            serde_json::json!([{"name": "ink", "value": 2}]),
+        );
+        fields.insert(
+            "palette".into(),
+            serde_json::json!([
+                {"color": [1, 2, 3, 255], "name": "Color 1"},
+                {"color": [4, 5, 6, 255], "name": "ink"},
+                {"color": [7, 8, 9, 255], "name": ""},
+                {"color": [0, 0, 0, 255], "name": "2 tone"},
+            ]),
+        );
+        let json = json.to_string();
+        let doc = Document::from_json(&json).unwrap();
+        let vars: Vec<_> = doc
+            .variables
+            .iter()
+            .map(|v| (v.name.as_str(), v.value.clone()))
+            .collect();
+        assert_eq!(
+            vars,
+            [
+                ("ink", Value::Number(2.0)),
+                ("Color_1", Value::Color([1, 2, 3, 255])),
+                ("ink_2", Value::Color([4, 5, 6, 255])),
+                ("color1", Value::Color([7, 8, 9, 255])),
+                ("_2_tone", Value::Color([0, 0, 0, 255])),
+            ]
+        );
+        assert_eq!(doc.background_link.as_deref(), Some("Color_1"));
+        assert!(doc.old_palette.is_empty());
+        let saved = serde_json::to_string(&doc).unwrap();
+        assert!(!saved.contains("palette"), "{saved}");
+    }
+
+    #[test]
+    fn pasted_links_fit_the_variables_of_the_project_they_land_in() {
+        let sw = |c: [u8; 4], n: &str| cv(n, c);
         let red = [200, 0, 0, 255];
         let blue = [0, 0, 200, 255];
         let mut text = Layer::new(1, "t".into(), "".into());
@@ -904,22 +1105,229 @@ mod tests {
         adopt_links(&mut palette, &mut pasted);
         assert_eq!(palette, before);
         assert_eq!(links(&pasted).0.len(), 2);
-    }
 
-    #[test]
-    fn older_palettes_get_a_unique_name_for_each_color() {
-        let sw = |n: &str| Swatch {
-            color: [0, 0, 0, 255],
-            name: n.into(),
+        // A variable of another kind has the name: that link is dropped.
+        let number = Variable {
+            name: "shadow".into(),
+            value: Value::Number(1.0),
         };
-        let mut palette = vec![sw(""), sw(" ink "), sw("ink"), sw("Color 1")];
-        name_palette(&mut palette);
-        let names: Vec<_> = palette.iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, ["Color 2", "ink", "Color 3", "Color 1"]);
+        let mut vars = vec![number.clone()];
+        let mut pasted = node.clone();
+        adopt_links(&mut vars, &mut pasted);
+        assert!(links(&pasted).1.is_empty());
+        assert_eq!(vars, [number, sw(red, "Color 1"), sw(blue, "ink")]);
     }
 
     #[test]
-    fn linked_colors_follow_their_saved_color_and_unlink_when_it_is_gone() {
+    fn colors_in_use_are_listed_by_code_and_saved_by_double_click() {
+        assert_eq!(in_use_text([255, 8, 0, 255]), "#FF0800 100%");
+        assert_eq!(in_use_text([0, 0, 50, 128]), "#000032  50%");
+        assert_eq!(describe([0, 0, 50, 128]), "#000032, 50% opacity");
+        assert_eq!(describe([255, 8, 0, 255]), "#FF0800, 100% opacity");
+        let ctx = egui::Context::default();
+        let mut doc = Document {
+            background: [200, 10, 10],
+            ..Default::default()
+        };
+        let time = std::cell::Cell::new(0.0);
+        let frame = |events: Vec<egui::Event>, doc: &mut Document| {
+            time.set(time.get() + 0.05);
+            let input = egui::RawInput {
+                time: Some(time.get()),
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    vec2(400.0, 300.0),
+                )),
+                events,
+                ..Default::default()
+            };
+            let mut changed = false;
+            let mut out = ctx.run_ui(input, |ui| changed = in_use_ui(ui, doc));
+            out.textures_delta.clear();
+            let row = out.shapes.iter().find_map(|s| match &s.shape {
+                egui::Shape::Text(t) if t.galley.text() == "#C80A0A 100%" => {
+                    Some(t.pos + t.galley.size() / 2.0)
+                }
+                _ => None,
+            });
+            (changed, row)
+        };
+        let at = frame(Vec::new(), &mut doc).1.expect("the background's row");
+        let press = |pressed| egui::Event::PointerButton {
+            pos: at,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: egui::Modifiers::NONE,
+        };
+        frame(vec![egui::Event::PointerMoved(at)], &mut doc);
+        let clicks = |n: usize, doc: &mut Document| {
+            let mut changed = false;
+            for _ in 0..n {
+                changed |= frame(vec![press(true)], doc).0;
+                changed |= frame(vec![press(false)], doc).0;
+            }
+            changed
+        };
+        assert!(!clicks(1, &mut doc), "a click saves nothing");
+        assert!(doc.variables.is_empty());
+        // Far enough from the first click not to make a double click with it.
+        time.set(time.get() + 1.0);
+        assert!(clicks(2, &mut doc));
+        assert_eq!(doc.variables, [cv("color1", [200, 10, 10, 255])]);
+        time.set(time.get() + 1.0);
+        assert!(clicks(2, &mut doc), "again, as another variable");
+        assert_eq!(
+            doc.variables,
+            [
+                cv("color1", [200, 10, 10, 255]),
+                cv("color2", [200, 10, 10, 255])
+            ]
+        );
+    }
+
+    #[test]
+    fn the_hex_and_opacity_fields_set_the_color() {
+        let ctx = egui::Context::default();
+        let mut color = [255, 8, 0, 128];
+        let time = std::cell::Cell::new(0.0);
+        let frame = |events: Vec<egui::Event>, color: &mut [u8; 4]| {
+            time.set(time.get() + 0.1);
+            let input = egui::RawInput {
+                time: Some(time.get()),
+                events,
+                ..Default::default()
+            };
+            let mut changed = false;
+            let mut out = ctx.run_ui(input, |ui| {
+                changed = code_fields(ui, Id::unique("p"), color, true);
+            });
+            out.textures_delta.clear();
+            let texts: Vec<(String, egui::Pos2)> = out
+                .shapes
+                .iter()
+                .filter_map(|s| match &s.shape {
+                    egui::Shape::Text(t) => {
+                        Some((t.galley.text().to_owned(), t.pos + t.galley.size() / 2.0))
+                    }
+                    _ => None,
+                })
+                .collect();
+            (changed, texts)
+        };
+        let key = |key, modifiers| egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers,
+        };
+        // Clicks the field showing `shown`, types `text` over it and presses Enter.
+        let type_in = |shown: &str, text: &str, color: &mut [u8; 4]| {
+            let texts = frame(Vec::new(), color).1;
+            let at = texts
+                .iter()
+                .find(|(t, _)| t == shown)
+                .unwrap_or_else(|| panic!("{shown} in {texts:?}"))
+                .1;
+            let press = |pressed| egui::Event::PointerButton {
+                pos: at,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            };
+            let mut changed = false;
+            for events in [
+                vec![egui::Event::PointerMoved(at)],
+                vec![press(true)],
+                vec![press(false)],
+                vec![key(egui::Key::A, egui::Modifiers::COMMAND)],
+                vec![egui::Event::Text(text.into())],
+                vec![key(egui::Key::Enter, egui::Modifiers::NONE)],
+                vec![],
+            ] {
+                changed |= frame(events, color).0;
+            }
+            changed
+        };
+        let texts = frame(Vec::new(), &mut color).1;
+        assert!(texts.iter().any(|(t, _)| t == "#FF0800"), "{texts:?}");
+        assert!(
+            texts.iter().any(|(t, _)| t == "50"),
+            "the opacity: {texts:?}"
+        );
+        // Six digits keep the opacity; eight set it.
+        assert!(type_in("#FF0800", "00ff00", &mut color));
+        assert_eq!(color, [0, 255, 0, 128]);
+        assert!(type_in("#00FF00", "#11223380", &mut color));
+        assert_eq!(color, [0x11, 0x22, 0x33, 0x80]);
+        assert!(
+            !type_in("#112233", "nonsense", &mut color),
+            "not a color: unchanged"
+        );
+        assert!(type_in("50", "100", &mut color));
+        assert_eq!(color[3], 255);
+    }
+
+    #[test]
+    fn a_color_button_is_square_and_a_link_shows_as_a_chain_inside_it() {
+        let ctx = egui::Context::default();
+        let doc = Document {
+            variables: vec![cv("ink", [1, 2, 3, 255])],
+            ..Default::default()
+        };
+        // The button's rect, the colors of the rect strokes and the number of lines
+        // drawn (the crack of a broken chain).
+        let draw = |link: Option<&str>, color: [u8; 4]| {
+            let mut c = color;
+            let mut link = link.map(str::to_owned);
+            let mut rect = egui::Rect::NOTHING;
+            let mut side = 0.0;
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                publish(ui.ctx(), &doc);
+                side = ui.spacing().interact_size.y;
+                rect = button(ui, &mut c, true, &mut link).rect;
+            });
+            out.textures_delta.clear();
+            assert_eq!(c, color, "it keeps its color");
+            let strokes: Vec<Color32> = out
+                .shapes
+                .iter()
+                .filter_map(|s| match &s.shape {
+                    egui::Shape::Rect(r) => Some(r.stroke.color),
+                    egui::Shape::Path(p) => match p.stroke.color {
+                        egui::epaint::ColorMode::Solid(c) => Some(c),
+                        _ => None,
+                    },
+                    _ => None,
+                })
+                .collect();
+            let lines = out
+                .shapes
+                .iter()
+                .filter(|s| matches!(s.shape, egui::Shape::LineSegment { .. }))
+                .count();
+            assert!((rect.width() - side).abs() < 0.5 && (rect.height() - side).abs() < 0.5);
+            (strokes, lines)
+        };
+        let (strokes, _) = draw(None, [1, 2, 3, 255]);
+        assert!(!strokes.contains(&Color32::WHITE), "no link, no chain");
+        let (strokes, lines) = draw(Some("ink"), [1, 2, 3, 255]);
+        assert!(
+            strokes.contains(&Color32::WHITE),
+            "a white chain on a dark color"
+        );
+        assert_eq!(lines, 0);
+        let (strokes, _) = draw(Some("ink"), [250, 250, 200, 255]);
+        assert!(
+            strokes.contains(&Color32::BLACK),
+            "a black chain on a light color"
+        );
+        let (_, lines) = draw(Some("gone"), [1, 2, 3, 255]);
+        assert!(lines > 0, "a broken chain, cracked");
+    }
+
+    #[test]
+    fn linked_colors_follow_their_saved_color_and_keep_their_value_when_it_is_gone() {
         let mut shape = Layer::new(1, "s".into(), "".into());
         shape.shape = Some(Box::default());
         shape.color_links.insert(ColorField::Fill, "brand".into());
@@ -930,16 +1338,7 @@ mod tests {
         let mut doc = Document {
             background_link: Some("brand".into()),
             layers: vec![Node::Layer(Box::new(shape))],
-            palette: vec![
-                Swatch {
-                    color: [200, 0, 0, 255],
-                    name: "brand".into(),
-                },
-                Swatch {
-                    color: [0, 0, 50, 128],
-                    name: "ink".into(),
-                },
-            ],
+            variables: vec![cv("brand", [200, 0, 0, 255]), cv("ink", [0, 0, 50, 128])],
             ..Default::default()
         };
         assert!(apply(&mut doc));
@@ -961,22 +1360,100 @@ mod tests {
         assert_eq!(params.color("color"), [0, 0, 50, 128]);
         assert_eq!(use_count(&mut doc, "brand"), 2);
 
-        // Renamed in the links, then removed: the colors stay as they are.
-        for_each_link(&mut doc, |link| {
-            if link == "brand" {
-                *link = "red".into();
-            }
-            true
-        });
-        doc.palette[0].name = "red".into();
-        doc.palette[0].color = [0, 200, 0, 255];
+        // Renamed in the links, then removed: the colors stay as they are, their links
+        // kept, broken.
+        rename_links(&mut doc, "brand", "red");
+        doc.variables[0] = cv("red", [0, 200, 0, 255]);
         apply(&mut doc);
         assert_eq!(doc.background, [0, 200, 0]);
-        doc.palette.clear();
-        apply(&mut doc);
+        // A variable of that name that isn't a color is no link either.
+        doc.variables[0].value = Value::Number(1.0);
+        doc.variables.remove(1);
+        assert!(!apply(&mut doc), "nothing changes");
         let l = layer(&doc);
-        assert_eq!(doc.background_link, None);
-        assert!(l.color_links.is_empty() && l.effects[0].links.is_empty());
+        assert_eq!(doc.background_link.as_deref(), Some("red"));
+        assert_eq!(l.color_links[&ColorField::Fill], "red");
+        assert_eq!(l.effects[0].links["color"], "ink");
         assert_eq!(l.shape.as_ref().unwrap().fill_color, [0, 200, 0, 255]);
+
+        // A color variable of that name links them again.
+        doc.variables.push(cv("ink", [9, 9, 9, 255]));
+        assert!(apply(&mut doc));
+        let fx = &layer(&doc).effects[0];
+        let params = Params::new(registry().get(&fx.effect).unwrap().params(), &fx.params);
+        assert_eq!(params.color("color"), [9, 9, 9, 255]);
+    }
+
+    /// Draws color buttons, unlinked, linked and broken, in both themes, to the PNG
+    /// named by `COLOR_BUTTON_PREVIEW`: `cargo test color_button_preview -- --ignored`.
+    #[test]
+    #[ignore]
+    fn color_button_preview() {
+        let Ok(path) = std::env::var("COLOR_BUTTON_PREVIEW") else {
+            return;
+        };
+        let doc = Document {
+            variables: vec![
+                cv("ink", [40, 120, 220, 255]),
+                cv("paper", [245, 240, 200, 255]),
+            ],
+            ..Default::default()
+        };
+        crate::preview::render(&path, vec2(260.0, 140.0), |ui| {
+            publish(ui.ctx(), &doc);
+            egui::Grid::new("g").show(ui, |ui| {
+                for (label, link, c) in [
+                    ("Fill", None, [200, 60, 60, 255]),
+                    ("Stroke", Some("ink"), [40, 120, 220, 255]),
+                    ("Outline", Some("paper"), [245, 240, 200, 255]),
+                    ("Text", Some("gone"), [90, 90, 90, 255]),
+                ] {
+                    ui.label(label);
+                    let mut c = c;
+                    let mut link = link.map(str::to_owned);
+                    button(ui, &mut c, true, &mut link);
+                    ui.end_row();
+                }
+            });
+        });
+    }
+
+    /// Draws the picker's Hex and Opacity row in a popup's style, as egui draws its
+    /// popup menus, to the PNG named by `COLOR_CODE_PREVIEW`.
+    #[test]
+    #[ignore]
+    fn color_code_preview() {
+        let Ok(path) = std::env::var("COLOR_CODE_PREVIEW") else {
+            return;
+        };
+        crate::preview::render(&path, vec2(300.0, 60.0), |ui| {
+            egui::containers::menu::menu_style(ui.style_mut());
+            let mut c = [0, 194, 240, 255];
+            code_fields(ui, Id::unique("preview"), &mut c, true);
+        });
+    }
+
+    /// Draws the Colors in use section to the PNG named by `COLORS_IN_USE_PREVIEW`.
+    #[test]
+    #[ignore]
+    fn colors_in_use_preview() {
+        let Ok(path) = std::env::var("COLORS_IN_USE_PREVIEW") else {
+            return;
+        };
+        let mut shape = Layer::new(1, "s".into(), "".into());
+        shape.shape = Some(Box::new(crate::shape::Shape {
+            fill_color: [0, 108, 234, 255],
+            stroke_color: [0, 0, 50, 128],
+            ..Default::default()
+        }));
+        let doc = std::cell::RefCell::new(Document {
+            background: [255, 255, 255],
+            layers: vec![Node::Layer(Box::new(shape))],
+            ..Default::default()
+        });
+        // As narrow as the left panel.
+        crate::preview::render(&path, vec2(230.0, 200.0), |ui| {
+            in_use_ui(ui, &mut doc.borrow_mut());
+        });
     }
 }

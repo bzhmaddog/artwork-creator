@@ -390,7 +390,11 @@ impl FileBrowser {
                         confirm = !self.file_name.trim().is_empty();
                     }
                 } else if multiple {
-                    ui.weak(tr!("SELECT_SEVERAL_FILES_HINT"));
+                    crate::callout::callout_small(
+                        ui,
+                        crate::callout::Tone::Tip,
+                        tr!("SELECT_SEVERAL_FILES_HINT"),
+                    );
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let ok_label = if save { tr!("SAVE") } else { tr!("OPEN_FILE") };

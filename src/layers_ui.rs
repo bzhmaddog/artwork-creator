@@ -912,6 +912,22 @@ const PROP_LABELS: [&str; 30] = [
 ];
 
 /// A two-column grid of labels and controls, lined up with the other property grids.
+/// Gives the fields of a popup (a picker, an editor) their frames back: egui draws the
+/// widgets of popup menus without frames, which makes a text or number field there
+/// look like plain text.
+pub fn field_frames(ui: &mut Ui) {
+    ui.visuals_mut().widgets = ui.ctx().global_style().visuals.widgets.clone();
+}
+
+/// A field's unit, shown after it rather than inside it: "mm", "°", "pt", "%"...
+pub fn unit(ui: &mut Ui, unit: &str) -> Response {
+    let unit = unit.trim();
+    if unit.is_empty() {
+        return ui.response();
+    }
+    ui.label(unit)
+}
+
 fn prop_grid(ui: &Ui, id: &str) -> egui::Grid {
     let label_width = PROP_LABELS
         .iter()
@@ -1055,9 +1071,10 @@ pub fn show(
         .max_height(ui.available_height() * 0.5)
         .show(ui, |ui| {
             if doc.layers.is_empty() {
-                ui.weak(tr!("NO_LAYERS_YET"));
+                crate::callout::callout(ui, crate::callout::Tone::Info, tr!("NO_LAYERS_YET"));
             }
             let full = ui.max_rect();
+            let broken_links = variables::broken_links_by_node(doc);
             for row in rows(doc) {
                 let Some(node) = doc.node_at_mut(&row.path) else {
                     continue;
@@ -1115,8 +1132,19 @@ pub fn show(
                         // The name takes the rest of the row, so short names are as easy to
                         // click (and drag) as long ones. No frame of its own: the whole row
                         // shows hover and selection. Renaming is done in Properties.
-                        let size = vec2(ui.available_width(), ui.spacing().interact_size.y);
+                        // Linked to variables that no longer exist (a group: inside it): a
+                        // badge at the right end of the row, after the name.
+                        let gone = broken_links.get(&row.id);
+                        let badge = if gone.is_some() {
+                            ui.spacing().interact_size.y + ui.spacing().item_spacing.x
+                        } else {
+                            0.0
+                        };
+                        let size = vec2(ui.available_width() - badge, ui.spacing().interact_size.y);
                         let (name_rect, r) = ui.allocate_exact_size(size, Sense::click_and_drag());
+                        if let Some(gone) = gone {
+                            variables::broken_links_badge(ui, gone);
+                        }
                         if ui.is_rect_visible(name_rect) {
                             let color = if *selected == Some(row.id) {
                                 ui.visuals().selection.stroke.color
@@ -1385,19 +1413,34 @@ fn text_section(
             // The name follows the text until it is renamed.
             let auto = layer.name == text::auto_name(&t.content);
             let id = ui.make_persistent_id("text_content");
+            // The text box, then its link button to a text variable at its top right.
             let r = ui
-                .add(
-                    egui::TextEdit::multiline(&mut t.content)
-                        .id(id)
-                        .desired_rows(3)
-                        .desired_width(f32::INFINITY)
-                        .hint_text(tr!("TEXT_PLACEHOLDER")),
-                )
-                .on_hover_text(if t.path.kind == PathKind::Straight {
-                    tr!("TYPE_ON_CANVAS_HINT")
-                } else {
-                    tr!("TEXT_ON_PATH_TYPE_HINT")
-                });
+                .horizontal_top(|ui| {
+                    let side = ui.spacing().interact_size.y;
+                    let width = ui.available_width() - side - ui.spacing().item_spacing.x;
+                    let r = ui
+                        .add(
+                            egui::TextEdit::multiline(&mut t.content)
+                                .id(id)
+                                .desired_rows(3)
+                                .desired_width(width)
+                                .hint_text(tr!("TEXT_PLACEHOLDER")),
+                        )
+                        .on_hover_text(if t.path.kind == PathKind::Straight {
+                            tr!("TYPE_ON_CANVAS_HINT")
+                        } else {
+                            tr!("TEXT_ON_PATH_TYPE_HINT")
+                        });
+                    if crate::text_links::link_button(ui, &mut t.link) {
+                        changed = true;
+                    }
+                    r
+                })
+                .inner;
+            // Typed in, the text is no longer its variable's.
+            if r.changed() {
+                crate::text_links::typed_in(ui.ctx(), &mut t.link);
+            }
             if std::mem::take(&mut state.show_text) {
                 r.scroll_to_me(Some(egui::Align::Center));
             }
@@ -1478,16 +1521,18 @@ fn text_section(
                 ui.end_row();
 
                 ui.label(tr!("TEXT_LINE_SPACING"));
-                changed |= ui
-                    .add(
-                        DragValue::new(&mut t.line_height)
-                            .range(0.5..=5.0)
-                            .speed(0.01)
-                            .fixed_decimals(2)
-                            .suffix(" x"),
-                    )
-                    .on_hover_text(tr!("TEXT_LINE_SPACING_HINT"))
-                    .changed();
+                ui.horizontal(|ui| {
+                    changed |= ui
+                        .add(
+                            DragValue::new(&mut t.line_height)
+                                .range(0.5..=5.0)
+                                .speed(0.01)
+                                .fixed_decimals(2),
+                        )
+                        .on_hover_text(tr!("TEXT_LINE_SPACING_HINT"))
+                        .changed();
+                    unit(ui, "x");
+                });
                 ui.end_row();
 
                 ui.label(tr!("TEXT_COLOR"));
@@ -1512,18 +1557,18 @@ fn text_section(
             prop_grid(ui, "text_size").show(ui, |ui| {
                 ui.label(tr!("TEXT_FONT_SIZE"));
                 let mut pt = text::size_pt(layer);
-                if variables::field(ui, &mut layer.bindings, Field::TextSize, &mut pt, |d| {
-                    d.range(1.0..=2000.0)
-                        .speed(0.2)
-                        .fixed_decimals(1)
-                        .suffix(" pt")
-                })
-                .on_hover_text(tr!("TEXT_FONT_SIZE_HINT"))
-                .changed()
-                {
-                    text::set_size_pt(layer, pt);
-                    changed = true;
-                }
+                ui.horizontal(|ui| {
+                    if variables::field(ui, &mut layer.bindings, Field::TextSize, &mut pt, |d| {
+                        d.range(1.0..=2000.0).speed(0.2).fixed_decimals(1)
+                    })
+                    .on_hover_text(tr!("TEXT_FONT_SIZE_HINT"))
+                    .changed()
+                    {
+                        text::set_size_pt(layer, pt);
+                        changed = true;
+                    }
+                    unit(ui, "pt");
+                });
                 ui.end_row();
 
                 ui.label(tr!("TEXT_OUTLINE"));
@@ -1541,8 +1586,7 @@ fn text_section(
                                 DragValue::new(&mut mm)
                                     .range(0.01..=50.0)
                                     .speed(0.02)
-                                    .fixed_decimals(2)
-                                    .suffix(" mm"),
+                                    .fixed_decimals(2),
                             )
                             .on_hover_text(tr!("TEXT_OUTLINE_HINT"))
                             .changed()
@@ -1550,6 +1594,7 @@ fn text_section(
                             t.outline_width = mm / em_mm;
                             changed = true;
                         }
+                        unit(ui, "mm");
                         changed |= crate::colors::linked_button(
                             ui,
                             &mut layer.color_links,
@@ -1607,13 +1652,17 @@ fn text_path_rows(
     let mm_value = |ui: &mut Ui, ems: &mut f32, range, hint: &str| {
         let mut mm = *ems * em_mm;
         let r = ui
-            .add(
-                DragValue::new(&mut mm)
-                    .range(range)
-                    .speed(0.1)
-                    .fixed_decimals(1)
-                    .suffix(" mm"),
-            )
+            .horizontal(|ui| {
+                let r = ui.add(
+                    DragValue::new(&mut mm)
+                        .range(range)
+                        .speed(0.1)
+                        .fixed_decimals(1),
+                );
+                unit(ui, "mm");
+                r
+            })
+            .inner
             .on_hover_text(hint);
         if r.changed() {
             *ems = mm / em_mm;
@@ -1626,14 +1675,13 @@ fn text_path_rows(
         PathKind::Straight => return changed,
         PathKind::Arc => {
             ui.label(tr!("TEXT_PATH_BEND"));
-            changed |= ui
-                .add(
-                    Slider::new(&mut p.bend, -100.0..=100.0)
-                        .fixed_decimals(0)
-                        .suffix(" %"),
-                )
-                .on_hover_text(tr!("TEXT_PATH_BEND_HINT"))
-                .changed();
+            ui.horizontal(|ui| {
+                changed |= ui
+                    .add(Slider::new(&mut p.bend, -100.0..=100.0).fixed_decimals(0))
+                    .on_hover_text(tr!("TEXT_PATH_BEND_HINT"))
+                    .changed();
+                unit(ui, "%");
+            });
             ui.end_row();
         }
         PathKind::Circle => {
@@ -1649,7 +1697,11 @@ fn text_path_rows(
         PathKind::Shape => {
             ui.label(tr!("TEXT_PATH_SHAPE_LAYER"));
             if shapes.is_empty() {
-                ui.weak(tr!("TEXT_PATH_NO_SHAPES"));
+                crate::callout::callout_small(
+                    ui,
+                    crate::callout::Tone::Info,
+                    tr!("TEXT_PATH_NO_SHAPES"),
+                );
             } else {
                 let name = shapes
                     .iter()
@@ -1669,14 +1721,13 @@ fn text_path_rows(
     }
     if matches!(p.kind, PathKind::Circle | PathKind::Shape) {
         ui.label(tr!("TEXT_PATH_POSITION"));
-        changed |= ui
-            .add(
-                Slider::new(&mut p.position, 0.0..=100.0)
-                    .fixed_decimals(1)
-                    .suffix(" %"),
-            )
-            .on_hover_text(tr!("TEXT_PATH_POSITION_HINT"))
-            .changed();
+        ui.horizontal(|ui| {
+            changed |= ui
+                .add(Slider::new(&mut p.position, 0.0..=100.0).fixed_decimals(1))
+                .on_hover_text(tr!("TEXT_PATH_POSITION_HINT"))
+                .changed();
+            unit(ui, "%");
+        });
         ui.end_row();
 
         ui.label(tr!("TEXT_PATH_FLIP"));
@@ -1698,13 +1749,9 @@ fn text_path_rows(
 }
 
 /// A position or size field in mm, from `min` (up to 5000 mm for a size), named by
-/// `prefix`.
+/// `prefix`. Its row ends with the unit (see [`unit`]).
 fn mm_value<'a>(d: DragValue<'a>, prefix: &str, min: f32) -> DragValue<'a> {
-    let d = d
-        .fixed_decimals(1)
-        .speed(0.5)
-        .prefix(format!("{prefix} "))
-        .suffix(" mm");
+    let d = d.fixed_decimals(1).speed(0.5).prefix(format!("{prefix} "));
     if min.is_finite() {
         d.range(min..=5000.0)
     } else {
@@ -1720,13 +1767,18 @@ fn shape_size(ui: &mut Ui, layer: &mut Layer, state: &mut LayersPanel) -> bool {
     };
     let [mut w, mut h] = old;
     let b = &mut layer.bindings;
+    let links = [Field::Width, Field::Height].map(|f| b.get(&f).cloned());
     let rw = variables::field(ui, b, Field::Width, &mut w, |d| {
         mm_value(d, tr!("LAYER_WIDTH_PREFIX"), 0.0)
     });
     let rh = variables::field(ui, b, Field::Height, &mut h, |d| {
         mm_value(d, tr!("LAYER_HEIGHT_PREFIX"), 0.0)
     });
+    unit(ui, "mm");
     aspect_lock(ui, &mut state.free_aspect);
+    if !state.free_aspect {
+        variables::link_aspect(b, links, old, &variables::published(ui.ctx()));
+    }
     let mut size = old;
     if rw.changed() {
         size[0] = w;
@@ -1804,19 +1856,17 @@ fn shape_section(
                     ShapeKind::Rectangle => {
                         ui.label(tr!("SHAPE_CORNER_RADIUS"));
                         let max = s.size[0].min(s.size[1]) / 2.0;
-                        changed |= variables::field(
-                            ui,
-                            &mut layer.bindings,
-                            Field::CornerRadius,
-                            &mut s.corner_radius,
-                            |d| {
-                                d.range(0.0..=max)
-                                    .speed(0.1)
-                                    .fixed_decimals(1)
-                                    .suffix(" mm")
-                            },
-                        )
-                        .changed();
+                        ui.horizontal(|ui| {
+                            changed |= variables::field(
+                                ui,
+                                &mut layer.bindings,
+                                Field::CornerRadius,
+                                &mut s.corner_radius,
+                                |d| d.range(0.0..=max).speed(0.1).fixed_decimals(1),
+                            )
+                            .changed();
+                            unit(ui, "mm");
+                        });
                         ui.end_row();
                     }
                     ShapeKind::RegularPolygon | ShapeKind::Star => {
@@ -1833,20 +1883,22 @@ fn shape_section(
                         if star {
                             ui.label(tr!("SHAPE_INNER_RADIUS"));
                             let mut pct = s.inner_ratio * 100.0;
-                            if ui
-                                .add(
-                                    DragValue::new(&mut pct)
-                                        .range(1.0..=100.0)
-                                        .speed(0.5)
-                                        .fixed_decimals(0)
-                                        .suffix(" %"),
-                                )
-                                .on_hover_text(tr!("SHAPE_INNER_RADIUS_HINT"))
-                                .changed()
-                            {
-                                s.inner_ratio = pct / 100.0;
-                                changed = true;
-                            }
+                            ui.horizontal(|ui| {
+                                if ui
+                                    .add(
+                                        DragValue::new(&mut pct)
+                                            .range(1.0..=100.0)
+                                            .speed(0.5)
+                                            .fixed_decimals(0),
+                                    )
+                                    .on_hover_text(tr!("SHAPE_INNER_RADIUS_HINT"))
+                                    .changed()
+                                {
+                                    s.inner_ratio = pct / 100.0;
+                                    changed = true;
+                                }
+                                unit(ui, "%");
+                            });
                             ui.end_row();
                         }
                     }
@@ -1900,15 +1952,11 @@ fn shape_section(
                             &mut layer.bindings,
                             Field::StrokeWidth,
                             &mut s.stroke_width,
-                            |d| {
-                                d.range(0.01..=100.0)
-                                    .speed(0.02)
-                                    .fixed_decimals(2)
-                                    .suffix(" mm")
-                            },
+                            |d| d.range(0.01..=100.0).speed(0.02).fixed_decimals(2),
                         )
                         .on_hover_text(tr!("SHAPE_STROKE_WIDTH_HINT"))
                         .changed();
+                        unit(ui, "mm");
                         changed |= crate::colors::linked_button(
                             ui,
                             &mut layer.color_links,
@@ -1970,9 +2018,10 @@ fn image_section(ui: &mut Ui, layer: &Layer, min_dpi: f32) {
             let dpi = layer.print_dpi().unwrap_or(f32::INFINITY);
             let shown = format!("{dpi:.0}");
             if dpi < min_dpi {
-                ui.colored_label(
-                    ui.visuals().warn_fg_color,
-                    tr!("PRINT_RESOLUTION_LOW", dpi = shown),
+                crate::callout::callout(
+                    ui,
+                    crate::callout::Tone::Warning,
+                    &tr!("PRINT_RESOLUTION_LOW", dpi = shown),
                 )
                 .on_hover_text(tr!("LOW_RESOLUTION_HINT", min = format!("{min_dpi:.0}")));
             } else {
@@ -2055,7 +2104,7 @@ fn properties(
     out: &mut LayersOutput,
 ) {
     let Some(id) = sel else {
-        ui.weak(tr!("NO_LAYER_SELECTED"));
+        crate::callout::callout(ui, crate::callout::Tone::Info, tr!("NO_LAYER_SELECTED"));
         return;
     };
     let page_center = doc.page_center();
@@ -2145,7 +2194,11 @@ fn properties(
                         |_| false,
                         |ui| {
                             ui.weak(tr_n!("LAYER_COUNT", layer_count));
-                            ui.weak(tr!("MOVE_GROUP_HINT"));
+                            crate::callout::callout(
+                                ui,
+                                crate::callout::Tone::Tip,
+                                tr!("MOVE_GROUP_HINT"),
+                            );
                         },
                     );
                 },
@@ -2184,6 +2237,7 @@ fn properties(
                                     mm_value(d, "y", f32::NEG_INFINITY)
                                 })
                                 .changed();
+                                unit(ui, "mm");
                             });
                         });
                         ui.end_row();
@@ -2197,14 +2251,26 @@ fn properties(
                                 }
                                 let [px_w, px_h] = layer.size_px.map(|v| v.max(1) as f32);
                                 let [mut w, mut h] = layer.size_mm();
+                                let old = [w, h];
                                 let b = &mut layer.bindings;
+                                let links =
+                                    [Field::Width, Field::Height].map(|f| b.get(&f).cloned());
                                 let rw = variables::field(ui, b, Field::Width, &mut w, |d| {
                                     mm_value(d, tr!("LAYER_WIDTH_PREFIX"), 0.01)
                                 });
                                 let rh = variables::field(ui, b, Field::Height, &mut h, |d| {
                                     mm_value(d, tr!("LAYER_HEIGHT_PREFIX"), 0.01)
                                 });
+                                unit(ui, "mm");
                                 aspect_lock(ui, &mut state.free_aspect);
+                                if !state.free_aspect {
+                                    variables::link_aspect(
+                                        b,
+                                        links,
+                                        old,
+                                        &variables::published(ui.ctx()),
+                                    );
+                                }
                                 let s = &mut layer.transform.scale;
                                 if rw.changed() {
                                     let k = w / px_w / s[0];
@@ -2228,13 +2294,24 @@ fn properties(
 
                         ui.label(tr!("LAYER_ROTATION"));
                         ui.add_enabled_ui(!locked, |ui| {
-                            out.changed |= ui
-                                .add(
-                                    Slider::new(&mut layer.transform.rotation_deg, -180.0..=180.0)
-                                        .suffix("°")
-                                        .fixed_decimals(1),
-                                )
-                                .changed();
+                            ui.horizontal(|ui| {
+                                let (t, b) = (&mut layer.transform, &mut layer.bindings);
+                                let rot = &mut t.rotation_deg;
+                                // The slider's own value box can't take a formula: the
+                                // field next to it does.
+                                if variables::field(ui, b, Field::Rotation, rot, |d| {
+                                    d.fixed_decimals(1).speed(0.5)
+                                })
+                                .changed()
+                                {
+                                    *rot = variables::wrap_degrees(*rot);
+                                    out.changed = true;
+                                }
+                                unit(ui, "°");
+                                out.changed |= ui
+                                    .add(Slider::new(rot, -180.0..=180.0).show_value(false))
+                                    .changed();
+                            });
                         });
                         ui.end_row();
                     });
@@ -3094,5 +3171,52 @@ mod tests {
         let p = &h.doc.layer(1).unwrap().text.as_ref().unwrap().path;
         assert_eq!((p.kind, p.shape), (PathKind::Shape, 2));
         assert!(h.frame(vec![]).iter().any(|(t, _)| t == "Follows"));
+    }
+
+    /// Draws the layer list with a layer linked to a variable gone, and a folded group
+    /// holding another, to the PNG named by `LAYER_LIST_PREVIEW`.
+    #[test]
+    #[ignore]
+    fn layer_list_preview() {
+        let Ok(path) = std::env::var("LAYER_LIST_PREVIEW") else {
+            return;
+        };
+        let mut fine = Layer::new(1, "Logo".into(), "".into());
+        fine.size_px = [10, 10];
+        let mut gone = Layer::new(2, "Button text".into(), "".into());
+        gone.size_px = [10, 10];
+        gone.bindings.insert(Field::X, "margin".into());
+        let mut inner = gone.clone();
+        inner.id = 3;
+        inner.name = "Label".into();
+        let doc = std::cell::RefCell::new(Document {
+            layers: vec![
+                Node::Group(crate::document::Group {
+                    id: 4,
+                    name: "Folded group".into(),
+                    visible: true,
+                    locked: false,
+                    opacity: 1.0,
+                    expanded: false,
+                    children: vec![Node::Layer(Box::new(inner))],
+                }),
+                Node::Layer(Box::new(gone)),
+                Node::Layer(Box::new(fine)),
+            ],
+            ..Default::default()
+        });
+        let fonts = FontLibrary::builtin_only();
+        let state = std::cell::RefCell::new(LayersPanel::default());
+        crate::preview::render(&path, vec2(260.0, 330.0), |ui| {
+            let mut selected = None;
+            show(
+                ui,
+                &mut doc.borrow_mut(),
+                &mut selected,
+                &mut state.borrow_mut(),
+                None,
+                &fonts,
+            );
+        });
     }
 }

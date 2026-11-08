@@ -180,6 +180,9 @@ pub struct Text {
     /// The path the lines follow; straight by default.
     #[serde(skip_serializing_if = "TextPath::is_straight")]
     pub path: TextPath,
+    /// Name of the text variable `content` is linked to (see `text_links`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub link: Option<String>,
 }
 
 fn is_zero(v: &u32) -> bool {
@@ -265,6 +268,7 @@ impl Default for Text {
             font_index: 0,
             fallbacks: Vec::new(),
             path: TextPath::default(),
+            link: None,
         }
     }
 }

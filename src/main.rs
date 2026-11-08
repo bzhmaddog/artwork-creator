@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod callout;
 mod canvas_points;
 mod canvas_text;
 mod clipboard;
@@ -14,6 +15,8 @@ mod file_dialog;
 mod history;
 mod i18n;
 mod layers_ui;
+#[cfg(test)]
+mod preview;
 mod print;
 mod printing;
 mod project;
@@ -22,6 +25,7 @@ mod render;
 mod shape;
 mod template;
 mod text;
+mod text_links;
 mod theme;
 mod variables;
 mod view;

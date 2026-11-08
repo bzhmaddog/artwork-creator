@@ -292,6 +292,8 @@ pub fn field(
     }
     t.focused = true;
     if r.changed() {
+        // Typed in, the text is no longer its variable's (see `text_links`).
+        crate::text_links::typed_in(&ctx, &mut text.link);
         if auto {
             layer.name = text::auto_name(&text.content);
         }

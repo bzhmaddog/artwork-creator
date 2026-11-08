@@ -58,25 +58,58 @@ layers panel on the right](doc/capture.png)
   outline (solid, dashed, dotted or dash-dot). They are stacked, reordered and toggled in the layer's properties, applied to
   the export at full resolution, and never change the image file. More effects can be
   added with [plugins](#plugins).
-- **Colors**: every color picker (text, outline, fill, stroke, effects, page background)
-  also shows the project's saved colors and the colors already used in it; a click on one
-  applies it. **Save this color** in a picker adds the color to the saved ones, which are
-  kept in the project file. A color picked from the saved ones, or saved from its picker,
-  stays linked to it (its button gets a colored frame) and follows when the saved color
-  changes; picking another color unlinks it. The **Colors** section of the left panel
-  lists the saved colors, to name, change or remove them, and the colors in use, a click
-  on one saving it. Renaming a saved color keeps its links; removing one unlinks the
-  colors using it, which keep their value. Layers pasted into another project bring
-  their saved colors along, unless that project gives the name to another color.
-- **Variables**: named numbers kept with the project, in the **Variables** section of the
-  left panel, such as `button = 30` or `margin = 2.5`. Type a variable's name, or a
-  formula such as `button + 2` or `(panel - 2 * margin) / 3`, in a layer's width,
-  height, x, y, stroke width, corner radius or text size field to link it: the field
-  then shows the formula, and follows when a variable changes. Variables have no unit;
-  each field reads them in its own (mm, or pt for text size). Typing a plain number in a
-  linked field unlinks it, and so does moving or resizing the layer some other way (on
-  the canvas, with Align or the arrow keys). Renaming a variable renames it in the
-  formulas; removing one unlinks the fields using it, which keep their value.
+- **Variables**: named values kept with the project, in the **Variables** section of the
+  left panel, each of a kind: a length in mm (`button = 30`), an angle in degrees, a text
+  size in pt, a number without a unit (`count = 3`), a color or a text. **Add a
+  variable** asks for the kind; the section lists the variables grouped by kind, each
+  behind its kind's icon, with its unit after its value.
+  - Type a variable's name, or a formula such as `button + 2` or
+    `(panel - 2 * margin) / 3`, in a layer's width, height, x, y, stroke width or corner
+    radius field (lengths), rotation field (angles) or text size field (text sizes) to
+    link it: the field then shows the result (the formula is in its tooltip and its fx
+    button is filled with the link color), and follows when a variable changes. A field takes the variables of its
+    kind and numbers; a formula using another kind shows an error and leaves the field
+    as it is. Typing a plain number in a linked field, or dragging its value, unlinks
+    it, and so does moving, resizing or turning the layer some other way (on the canvas,
+    with Align or the arrow keys).
+  - The **fx** button inside each of those fields, at its right end, opens the formula
+    editor: the formula (the field's value to start with), its result or what is wrong
+    with it, and the variables the field takes, a click inserting one at the cursor.
+    **OK** (or Enter) links the field to the formula, or just sets the value when it
+    names no variable; **Unlink, keeping the value** unlinks the field. The fx becomes a
+    badge filled with the link color when the field is linked, so the fields using
+    variables stand out, and with the warning color when its variable is gone.
+  - With the size's aspect locked, linking the width also links the height to the same
+    formula scaled by their ratio (`button` gives `button * 0.5` for a layer half as
+    tall as wide), and the other way round; unlinking one unlinks both, and locking the
+    aspect with only one of them linked links the other.
+  - Every color picker (text, outline, fill, stroke, effects, page background) also shows
+    the color variables and the colors already used in the project; a click on one
+    applies it. A color picked from the color variables stays linked to it (a chain link is
+    drawn inside its square swatch, the variable's name in its tooltip) and follows when the
+    variable changes; picking another color, or clicking the linked color
+    variable again in the picker (it shows a chain), unlinks it. Below its sliders, a
+    picker has the color's **Hex** code, to type or copy (`#RRGGBBAA` sets the opacity
+    too), and its **Opacity** in %; hovering a color button or swatch shows its code and
+    opacity. **Save this color** in a picker makes a color variable of the color and
+    links to it.
+  - A text layer's text is linked to a text variable with the link button at the top
+    right of its text box: it then shows the variable's text and follows when it
+    changes, so one variable can fill several layers. Typing in the text, in the panel
+    or on the canvas, unlinks it, with a warning in the status bar (undo links it
+    again); **Unlink, keeping the value** unlinks it too.
+  - The **Colors in use** section, below Variables, lists the colors in use one per
+    row, as `#RRGGBB` followed by its opacity (`100%`). Double-click one to
+    add a color variable of that color, even if another color variable has it.
+  - Renaming a variable renames it in the formulas and links. Removing one that is in
+    use asks first; the fields and colors using it keep their value and show a broken
+    link icon (hover it to see what it was linked to). Typing a value in such a field,
+    or picking a color, unlinks it; adding a variable of the same name links it again.
+    In the layer list, a layer with such broken links shows a broken chain, in the
+    warning color, naming the variables in its tooltip; so does a folded group holding
+    one.
+    Layers pasted into another project bring their color variables along, unless that
+    project gives the name to another variable.
 - **Snap to anchors**: the centers, corners and edge middles of images snap to points
   defined by the template, such as the button centers. So do a shape's center, the
   corners and side middles of its box, or its points (its stroke left out).
@@ -186,7 +219,16 @@ every way of adding a layer has a keyboard shortcut, shown in its menu entry or 
 and listed under [Shortcuts](#shortcuts); every text has a translation key, with its
 text in `locales/en-US.json` and `locales/fr-FR.json` (and `locales/en-GB.json` when the
 British spelling differs). Before finishing, compare the new feature with the closest
-existing one and fill in what it lacks.
+existing one and fill in what it lacks. A number field's unit goes after the field, not inside it
+(`layers_ui::unit`); a pair of fields on one row (x and y, width and height) shares one. A
+dialog's buttons sit at the right of its bottom row, the main one rightmost and Cancel on
+its left (`app::dialog_button_row`); a secondary one such as "Close without saving" or Unlink goes
+apart at the left edge (`app::at_left_edge`). A helper text (an explanation, an empty state,
+a tip, a warning) is a callout (`callout::callout`, or `callout_small` in tight places),
+of the tone that fits: Info, Tip or Warning; data shown for information (sizes, counts,
+paths) stays plain weak text. `CALLOUT_PREVIEW=out.png cargo test callout_preview --
+--ignored` draws them in both themes, to look at without starting the app. Any piece of the
+interface can be drawn that way from a test, with `preview::render`.
 
 Write code, comments, docs and texts in U.S. English (color, center, gray, canceled);
 British spellings belong in `locales/en-GB.json` only. Name translation keys after what

@@ -777,7 +777,7 @@ pub struct Document {
     pub template_placement: TemplatePlacement,
     /// Page color (RGB), printed under the layers.
     pub background: [u8; 3],
-    /// Name of the saved color the background is linked to (see `colors`).
+    /// Name of the color variable the background is linked to (see `colors`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background_link: Option<String>,
     /// How far the artwork goes past the template's cut lines, in mm.
@@ -787,11 +787,13 @@ pub struct Document {
     pub safe_margin_mm: f32,
     /// Layers and groups, bottom of the stack first.
     pub layers: Vec<Node>,
-    /// Colors saved to reuse them (see `colors`).
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub palette: Vec<crate::colors::Swatch>,
-    /// Named numbers that layer fields can be linked to (see `variables`).
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    /// Saved colors of the first projects that had them, made color variables once
+    /// read (see `colors::migrate_palette`); never saved.
+    #[serde(default, rename = "palette", skip_serializing)]
+    pub old_palette: Vec<crate::colors::OldSwatch>,
+    /// Named lengths, angles, sizes, numbers and colors that layer fields can be linked
+    /// to (see `variables`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub variables: Vec<crate::variables::Variable>,
     /// Next id for a new layer or group.
     pub next_id: u64,
@@ -810,7 +812,7 @@ impl Default for Document {
             bleed_mm: 0.0,
             safe_margin_mm: 0.0,
             layers: Vec::new(),
-            palette: Vec::new(),
+            old_palette: Vec::new(),
             variables: Vec::new(),
             next_id: 1,
         }
@@ -1071,8 +1073,8 @@ impl Document {
             n.for_each_node_mut(&mut |n| max_id = max_id.max(n.id()));
         }
         doc.next_id = doc.next_id.max(max_id + 1);
-        // Saved colors are linked by name: each needs one, unlike in older projects.
-        crate::colors::name_palette(&mut doc.palette);
+        // Saved colors of older projects are color variables now.
+        crate::colors::migrate_palette(&mut doc);
         Ok(doc)
     }
 }

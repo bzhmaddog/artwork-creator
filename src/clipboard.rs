@@ -101,8 +101,10 @@ impl Clipboard {
         });
         layers_ui::give_fresh_ids(doc, &mut node);
         layers_ui::name_copy(doc, &mut node);
-        // From another project, its links name saved colors this one may not have.
-        crate::colors::adopt_links(&mut doc.palette, &mut node);
+        // From another project, its links name color and text variables this one may
+        // not have.
+        crate::colors::adopt_links(&mut doc.variables, &mut node);
+        crate::text_links::adopt_links(&mut doc.variables, &mut node);
         // Over the copied group itself, the copy goes next to it rather than inside.
         let path = match selected.filter(|&s| Some(s) == self.source) {
             Some(s) => doc.path_of(s).map(|mut p| {

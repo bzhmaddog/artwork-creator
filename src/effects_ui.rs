@@ -149,14 +149,11 @@ fn stack_ui(
 ) -> bool {
     let mut changed = false;
     if stack.is_empty() {
-        // Centered, every wrapped line too.
-        ui.vertical_centered(|ui| {
-            ui.weak(tr!("EFFECTS_INTRO"));
-        });
+        crate::callout::callout(ui, crate::callout::Tone::Info, tr!("EFFECTS_INTRO"));
         return changed;
     }
     if stack.len() > 1 {
-        ui.weak(tr!("EFFECTS_ORDER_HINT"));
+        crate::callout::callout(ui, crate::callout::Tone::Tip, tr!("EFFECTS_ORDER_HINT"));
     }
 
     let mut remove = None;
@@ -344,26 +341,41 @@ fn param_ui(
             // Sizes in pixels span a wide range where small values matter most:
             // logarithmic, the slider moves in fine steps there.
             let slider = Slider::new(&mut v, *min..=*max).logarithmic(unit.trim() == "px");
-            let r = match in_mm(unit) {
-                Some((k, hint)) => {
-                    let k = f64::from(k.max(1e-6));
-                    ui.add(
-                        slider
-                            .custom_formatter(move |n, _| format!("{:.2}", n * k))
-                            .custom_parser(move |s| s.trim().parse::<f64>().ok().map(|mm| mm / k))
-                            .suffix(" mm"),
-                    )
-                    .on_hover_text(hint)
-                }
-                None => ui.add(slider.suffix(unit).fixed_decimals(*decimals)),
-            };
+            let r = ui
+                .horizontal(|ui| match in_mm(unit) {
+                    Some((k, hint)) => {
+                        let k = f64::from(k.max(1e-6));
+                        let r = ui
+                            .add(
+                                slider
+                                    .custom_formatter(move |n, _| format!("{:.2}", n * k))
+                                    .custom_parser(move |s| {
+                                        s.trim().parse::<f64>().ok().map(|mm| mm / k)
+                                    }),
+                            )
+                            .on_hover_text(hint);
+                        layers_ui::unit(ui, "mm");
+                        r
+                    }
+                    None => {
+                        let r = ui.add(slider.fixed_decimals(*decimals));
+                        layers_ui::unit(ui, unit);
+                        r
+                    }
+                })
+                .inner;
             r.changed().then(|| Value::from(v))
         }
         ParamKind::Int { min, max, unit, .. } => {
             let mut v = p.i32(id);
-            ui.add(Slider::new(&mut v, *min..=*max).suffix(unit))
-                .changed()
-                .then(|| Value::from(v))
+            ui.horizontal(|ui| {
+                let r = ui.add(Slider::new(&mut v, *min..=*max));
+                layers_ui::unit(ui, unit);
+                r
+            })
+            .inner
+            .changed()
+            .then(|| Value::from(v))
         }
         ParamKind::Bool { .. } => {
             let mut v = p.bool(id);

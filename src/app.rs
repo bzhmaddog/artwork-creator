@@ -184,12 +184,38 @@ pub fn set_interaction(ctx: &egui::Context) {
     });
 }
 
+/// How long a notice stays in the status bar, in seconds.
+pub(crate) const NOTICE_SECONDS: f64 = 6.0;
+
+fn notice_id() -> egui::Id {
+    egui::Id::unique("status_notice")
+}
+
+/// Shows `text` as a warning in the status bar for a few seconds, without stopping
+/// what the user is doing (unlike a message, which waits for OK).
+pub(crate) fn notify(ctx: &egui::Context, text: String) {
+    let now = ctx.input(|i| i.time);
+    ctx.data_mut(|d| d.insert_temp(notice_id(), (text, now)));
+}
+
+/// The notice shown in the status bar, if one is still up.
+pub(crate) fn notice(ctx: &egui::Context) -> Option<String> {
+    let (text, at) = ctx.data(|d| d.get_temp::<(String, f64)>(notice_id()))?;
+    let left = at + NOTICE_SECONDS - ctx.input(|i| i.time);
+    if left <= 0.0 {
+        ctx.data_mut(|d| d.remove::<(String, f64)>(notice_id()));
+        return None;
+    }
+    ctx.request_repaint_after(std::time::Duration::from_secs_f64(left));
+    Some(text)
+}
+
 /// Room between a window's or dialog's border and what it holds, in points (egui's is 6).
 const DIALOG_MARGIN: i8 = 14;
 
 /// A modal dialog, framed like a window but with more room: egui frames modals like
 /// menus.
-fn dialog(ctx: &egui::Context, id: &str) -> egui::Modal {
+pub(crate) fn dialog(ctx: &egui::Context, id: &str) -> egui::Modal {
     egui::Modal::new(egui::Id::unique(id)).frame(
         egui::Frame::window(&ctx.global_style()).inner_margin(egui::Margin::same(DIALOG_MARGIN)),
     )
@@ -197,20 +223,34 @@ fn dialog(ctx: &egui::Context, id: &str) -> egui::Modal {
 
 /// The bottom row of a window: `ok` (enabled when `can`) at the right edge of what is
 /// above it, Cancel on its left. Returns which was clicked: (ok, cancel).
-fn dialog_buttons(ui: &mut egui::Ui, ok: &str, can: bool) -> (bool, bool) {
+pub(crate) fn dialog_buttons(ui: &mut egui::Ui, ok: &str, can: bool) -> (bool, bool) {
+    dialog_button_row(ui, |ui| {
+        let ok = ui.add_enabled(can, egui::Button::new(ok)).clicked();
+        let cancel = ui.button(tr!("CANCEL")).clicked();
+        (ok, cancel)
+    })
+}
+
+/// The bottom row of a window or dialog, as wide as what is above it: `add` lays its
+/// buttons out from the right edge, the main one first (the rightmost), then Cancel. A
+/// button that should sit at the left edge (such as "Close without saving") goes last, in
+/// [`at_left_edge`].
+pub(crate) fn dialog_button_row<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     // As wide as the rows above, not more: the window sizes itself to its contents.
     let width = ui.min_rect().width();
     let height = ui.spacing().interact_size.y;
     ui.allocate_ui_with_layout(
         egui::vec2(width, height),
         egui::Layout::right_to_left(egui::Align::Center),
-        |ui| {
-            let ok = ui.add_enabled(can, egui::Button::new(ok)).clicked();
-            let cancel = ui.button(tr!("CANCEL")).clicked();
-            (ok, cancel)
-        },
+        add,
     )
     .inner
+}
+
+/// In a [`dialog_button_row`], a button at the row's left edge, after the others.
+pub(crate) fn at_left_edge<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), add)
+        .inner
 }
 
 /// A window's contents with `DIALOG_MARGIN` of room around them. egui's window margin
@@ -663,9 +703,13 @@ impl ArtworkApp {
             for name in &names {
                 ui.label(name);
             }
-            ui.weak(tr_n!("FILES_ALREADY_EXIST", names.len(), folder = folder));
+            crate::callout::callout(
+                ui,
+                crate::callout::Tone::Warning,
+                &tr_n!("FILES_ALREADY_EXIST", names.len(), folder = folder),
+            );
             ui.add_space(8.0);
-            ui.horizontal(|ui| {
+            dialog_button_row(ui, |ui| {
                 replace |= ui.button(tr!("REPLACE")).clicked();
                 cancel |= ui.button(tr!("CANCEL")).clicked();
             });
@@ -1196,13 +1240,13 @@ impl ArtworkApp {
                                 .range(document::CUSTOM_PAGE_RANGE_MM)
                                 .speed(1.0)
                                 .fixed_decimals(1)
-                                .prefix(prefix)
-                                .suffix(" mm"),
+                                .prefix(prefix),
                         )
                         .changed()
                     };
                     let a = field(ui, &mut w, tr!("PAGE_CUSTOM_WIDTH"));
                     let b = field(ui, &mut h, tr!("PAGE_CUSTOM_HEIGHT"));
+                    crate::layers_ui::unit(ui, "mm");
                     a || b
                 })
                 .inner;
@@ -1255,17 +1299,17 @@ impl ArtworkApp {
         }
         crate::layers_ui::section(
             ui,
-            "colors",
-            RichText::new(tr!("COLORS_SECTION")).heading(),
-            |_| false,
-            |ui| self.dirty |= crate::colors::palette_ui(ui, &mut self.doc),
-        );
-        crate::layers_ui::section(
-            ui,
             "variables",
             RichText::new(tr!("VARIABLES_SECTION")).heading(),
             |_| false,
             |ui| self.dirty |= variables::variables_ui(ui, &mut self.doc),
+        );
+        crate::layers_ui::section(
+            ui,
+            "colors_in_use",
+            RichText::new(tr!("COLORS_IN_USE_SECTION")).heading(),
+            |_| false,
+            |ui| self.dirty |= crate::colors::in_use_ui(ui, &mut self.doc),
         );
     }
 
@@ -1301,16 +1345,15 @@ impl ArtworkApp {
                 egui::DragValue::new(&mut p.offset_mm[0])
                     .speed(0.2)
                     .fixed_decimals(1)
-                    .prefix("x ")
-                    .suffix(" mm"),
+                    .prefix("x "),
             );
             ui.add(
                 egui::DragValue::new(&mut p.offset_mm[1])
                     .speed(0.2)
                     .fixed_decimals(1)
-                    .prefix("y ")
-                    .suffix(" mm"),
+                    .prefix("y "),
             );
+            crate::layers_ui::unit(ui, "mm");
         });
         if ui.small_button(tr!("CENTER_TEMPLATE_ON_PAGE")).clicked() {
             p.offset_mm = [0.0, 0.0];
@@ -1324,16 +1367,21 @@ impl ArtworkApp {
                     .range(0.0..=crate::print::MAX_MARGIN_MM)
                     .speed(0.1)
                     .fixed_decimals(1)
-                    .suffix(" mm")
             }
             ui.label(tr!("BLEED")).on_hover_text(tr!("BLEED_HINT"));
-            ui.add(mm(&mut self.doc.bleed_mm))
-                .on_hover_text(tr!("BLEED_HINT"));
+            ui.horizontal(|ui| {
+                ui.add(mm(&mut self.doc.bleed_mm))
+                    .on_hover_text(tr!("BLEED_HINT"));
+                crate::layers_ui::unit(ui, "mm");
+            });
             ui.end_row();
             ui.label(tr!("SAFE_MARGIN"))
                 .on_hover_text(tr!("SAFE_MARGIN_HINT"));
-            ui.add(mm(&mut self.doc.safe_margin_mm))
-                .on_hover_text(tr!("SAFE_MARGIN_HINT"));
+            ui.horizontal(|ui| {
+                ui.add(mm(&mut self.doc.safe_margin_mm))
+                    .on_hover_text(tr!("SAFE_MARGIN_HINT"));
+                crate::layers_ui::unit(ui, "mm");
+            });
             ui.end_row();
         });
         if margins != (self.doc.bleed_mm, self.doc.safe_margin_mm) {
@@ -1488,6 +1536,10 @@ impl ArtworkApp {
                 ui.separator();
                 ui.spinner();
                 ui.label(tr!("EXPORT_IN_PROGRESS"));
+            }
+            if let Some(text) = notice(ui.ctx()) {
+                ui.separator();
+                ui.colored_label(ui.visuals().warn_fg_color, text);
             }
         });
     }
@@ -1671,22 +1723,16 @@ impl ArtworkApp {
         if !printing || cfg!(not(windows)) {
             ui.horizontal(|ui| {
                 ui.label(tr!("EXPORT_RESOLUTION"));
-                ui.add(
-                    egui::DragValue::new(&mut s.dpi)
-                        .range(72..=1200)
-                        .suffix(" DPI"),
-                );
+                ui.add(egui::DragValue::new(&mut s.dpi).range(72..=1200));
+                crate::layers_ui::unit(ui, "DPI");
             });
         }
         ui.horizontal(|ui| {
             ui.label(tr!("EXPORT_MIN_IMAGE_DPI"))
                 .on_hover_text(tr!("EXPORT_MIN_IMAGE_DPI_HINT"));
-            ui.add(
-                egui::DragValue::new(&mut s.min_image_dpi)
-                    .range(0..=1200)
-                    .suffix(" DPI"),
-            )
-            .on_hover_text(tr!("EXPORT_MIN_IMAGE_DPI_HINT"));
+            ui.add(egui::DragValue::new(&mut s.min_image_dpi).range(0..=1200))
+                .on_hover_text(tr!("EXPORT_MIN_IMAGE_DPI_HINT"));
+            crate::layers_ui::unit(ui, "DPI");
         });
         let low = self.doc.low_resolution(s.min_image_dpi as f32);
         if !low.is_empty() {
@@ -1694,9 +1740,10 @@ impl ArtworkApp {
                 .iter()
                 .map(|(l, dpi)| format!("{} ({dpi:.0} DPI)", l.name))
                 .collect();
-            ui.colored_label(
-                ui.visuals().warn_fg_color,
-                format!("⚠ {}", tr_n!("EXPORT_LOW_RESOLUTION", low.len())),
+            crate::callout::callout(
+                ui,
+                crate::callout::Tone::Warning,
+                &tr_n!("EXPORT_LOW_RESOLUTION", low.len()),
             )
             .on_hover_text(names.join("\n"));
         }
@@ -1784,8 +1831,9 @@ impl ArtworkApp {
                         mn[0] < lo[0] || mn[1] < lo[1] || mx[0] > hi[0] || mx[1] > hi[1]
                     });
                 if off {
-                    ui.colored_label(
-                        ui.visuals().warn_fg_color,
+                    crate::callout::callout(
+                        ui,
+                        crate::callout::Tone::Warning,
                         if s.tile {
                             tr!("EXPORT_MARKS_OFF_SHEETS")
                         } else {
@@ -1830,17 +1878,22 @@ impl ArtworkApp {
                         .range(0.0..=50.0)
                         .speed(0.2)
                         .fixed_decimals(1)
-                        .suffix(" mm")
                 }
                 ui.label(tr!("EXPORT_SHEET_MARGIN"))
                     .on_hover_text(tr!("EXPORT_SHEET_MARGIN_HINT"));
-                ui.add(mm(&mut s.sheet_margin_mm))
-                    .on_hover_text(tr!("EXPORT_SHEET_MARGIN_HINT"));
+                ui.horizontal(|ui| {
+                    ui.add(mm(&mut s.sheet_margin_mm))
+                        .on_hover_text(tr!("EXPORT_SHEET_MARGIN_HINT"));
+                    crate::layers_ui::unit(ui, "mm");
+                });
                 ui.end_row();
                 ui.label(tr!("EXPORT_TILE_OVERLAP"))
                     .on_hover_text(tr!("EXPORT_TILE_OVERLAP_HINT"));
-                ui.add(mm(&mut s.tile_overlap_mm))
-                    .on_hover_text(tr!("EXPORT_TILE_OVERLAP_HINT"));
+                ui.horizontal(|ui| {
+                    ui.add(mm(&mut s.tile_overlap_mm))
+                        .on_hover_text(tr!("EXPORT_TILE_OVERLAP_HINT"));
+                    crate::layers_ui::unit(ui, "mm");
+                });
                 ui.end_row();
                 ui.label(tr!("EXPORT_TILE_POSITION"))
                     .on_hover_text(tr!("EXPORT_TILE_POSITION_HINT"));
@@ -1850,11 +1903,11 @@ impl ArtworkApp {
                             egui::DragValue::new(v)
                                 .speed(0.5)
                                 .fixed_decimals(1)
-                                .prefix(prefix)
-                                .suffix(" mm"),
+                                .prefix(prefix),
                         )
                         .on_hover_text(tr!("EXPORT_TILE_POSITION_HINT"));
                     }
+                    crate::layers_ui::unit(ui, "mm");
                     if ui
                         .add_enabled(
                             s.tile_offset_mm != [0.0, 0.0],
@@ -2006,7 +2059,11 @@ impl ArtworkApp {
         {
             let printers = self.printers.clone().unwrap_or_default();
             if printers.names.is_empty() {
-                ui.colored_label(ui.visuals().warn_fg_color, tr!("PRINT_NO_PRINTERS"));
+                crate::callout::callout(
+                    ui,
+                    crate::callout::Tone::Warning,
+                    tr!("PRINT_NO_PRINTERS"),
+                );
             } else {
                 egui::Grid::new("print-to").show(ui, |ui| {
                     ui.label(tr!("PRINT_PRINTER"));
@@ -2031,7 +2088,11 @@ impl ArtworkApp {
         }
         #[cfg(windows)]
         {
-            ui.weak(tr!("PRINT_SYSTEM_DIALOG_HINT"));
+            crate::callout::callout(
+                ui,
+                crate::callout::Tone::Info,
+                tr!("PRINT_SYSTEM_DIALOG_HINT"),
+            );
             self.export_job.is_none()
         }
     }
@@ -2057,7 +2118,11 @@ impl ArtworkApp {
                         ui.vertical(|ui| {
                             ui.set_min_width(250.0);
                             self.output_settings(ui, true);
-                            ui.weak(tr!("PRINT_SETTINGS_SHARED"));
+                            crate::callout::callout(
+                                ui,
+                                crate::callout::Tone::Info,
+                                tr!("PRINT_SETTINGS_SHARED"),
+                            );
                             ui.add_space(6.0);
                             let can = self.print_controls(ui);
                             ui.add_space(10.0);
@@ -2088,7 +2153,7 @@ impl ArtworkApp {
             ui.set_max_width(420.0);
             ui.label(msg);
             ui.add_space(8.0);
-            ui.button("OK").clicked()
+            dialog_button_row(ui, |ui| ui.button(tr!("OK")).clicked())
         });
         if response.inner || response.should_close() {
             self.messages.remove(0);
@@ -2274,12 +2339,21 @@ impl ArtworkApp {
                     name = self.project_name()
                 ));
                 ui.add_space(4.0);
-                ui.weak(tr!("UNSAVED_CHANGES_WARNING"));
+                crate::callout::callout(
+                    ui,
+                    crate::callout::Tone::Warning,
+                    tr!("UNSAVED_CHANGES_WARNING"),
+                );
                 ui.add_space(8.0);
-                ui.horizontal(|ui| {
-                    save |= ui.button(tr!("SAVE")).clicked();
-                    discard |= ui.button(tr!("DONT_SAVE")).clicked();
+                // Both buttons that close the app say so. Save and close at the right edge,
+                // Cancel (back to the project) on its left, Close without saving (the one
+                // that loses work) apart at the left.
+                dialog_button_row(ui, |ui| {
+                    save |= ui.button(tr!("SAVE_AND_CLOSE")).clicked();
                     cancel |= ui.button(tr!("CANCEL")).clicked();
+                    at_left_edge(ui, |ui| {
+                        discard |= ui.button(tr!("CLOSE_WITHOUT_SAVING")).clicked();
+                    });
                 });
             });
             cancel |= response.should_close();
@@ -2433,9 +2507,9 @@ impl eframe::App for ArtworkApp {
         if let Some((purpose, paths)) = self.browser.show(&ctx) {
             self.on_files(&ctx, purpose, paths, false);
         }
-        // Colors saved from a picker go into the palette.
-        for swatch in crate::colors::take_saved(&ctx) {
-            self.dirty |= crate::colors::save(&mut self.doc, swatch);
+        // Colors saved from a picker become color variables.
+        for var in crate::colors::take_saved(&ctx) {
+            self.dirty |= crate::colors::save(&mut self.doc, var);
         }
         self.overwrite_modal(&ctx);
         self.message_modal(&ctx);
@@ -2445,10 +2519,11 @@ impl eframe::App for ArtworkApp {
         // shape scaled by a drag that just ended takes its new size first, so the drag
         // and that are one step.
         let finished = !ctx.input(|i| i.pointer.any_down()) && !ctx.egui_wants_keyboard_input();
-        // Linked fields follow their variables, and linked colors the saved colors,
+        // Linked fields follow their variables, and linked colors their color variables,
         // before shapes and texts are laid out.
         variables::apply(&mut self.doc, &mut self.applied);
         crate::colors::apply(&mut self.doc);
+        crate::text_links::apply(&mut self.doc);
         shape::sync(&ctx, &mut self.doc, !ctx.input(|i| i.pointer.any_down()));
         // Texts following a shape edited on the canvas go with it in the same step.
         text::sync(&ctx, &mut self.doc, &self.fonts);
@@ -2503,6 +2578,58 @@ mod tests {
             .unwrap()
             .1;
         assert!((x("Export…") - content_right).abs() < 12.0, "{texts:?}");
+    }
+
+    #[test]
+    fn a_dialog_with_three_buttons_keeps_the_main_one_right_and_one_apart_left() {
+        let ctx = egui::Context::default();
+        let mut found = Vec::new();
+        for _ in 0..4 {
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                dialog(ui.ctx(), "t").show(ui.ctx(), |ui| {
+                    ui.set_max_width(420.0);
+                    ui.label("Save the changes before closing?");
+                    dialog_button_row(ui, |ui| {
+                        let _ = ui.button("Save and close");
+                        let _ = ui.button("Cancel");
+                        at_left_edge(ui, |ui| ui.button("Close without saving"));
+                    });
+                });
+            });
+            out.textures_delta.clear();
+            let mut texts: Vec<(String, f32, f32)> = Vec::new();
+            for clipped in &out.shapes {
+                if let egui::Shape::Text(t) = &clipped.shape {
+                    texts.push((
+                        t.galley.text().to_owned(),
+                        t.pos.x,
+                        t.pos.x + t.galley.size().x,
+                    ));
+                }
+            }
+            found.push(texts);
+        }
+        let texts = found.last().unwrap();
+        let at = |name: &str| {
+            texts
+                .iter()
+                .find(|(t, ..)| t == name)
+                .map(|(_, a, b)| ((), *a, *b))
+                .unwrap()
+        };
+        let (_, label_left, label_right) = at("Save the changes before closing?");
+        assert!(
+            at("Save and close").1 > at("Cancel").1
+                && at("Cancel").1 > at("Close without saving").1
+        );
+        assert!(
+            (at("Save and close").2 - label_right).abs() < 12.0,
+            "Save at the right: {texts:?}"
+        );
+        assert!(
+            (at("Close without saving").1 - label_left).abs() < 12.0,
+            "Close without saving at the left"
+        );
     }
 
     #[test]

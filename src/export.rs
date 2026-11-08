@@ -10,13 +10,15 @@ use printpdf::{
 };
 use tiny_skia::PathSegment;
 
-use crate::document::{Homography, P2};
+use crate::document::{Homography, Orientation, P2, PageSize};
 use crate::i18n::tr;
+use crate::print;
 use crate::render::{self, Cuts, OUTLINE_WIDTH_MM, Part, Scene};
-use crate::template::{ElementKind, KINDS};
+use crate::template::{ElementKind, KINDS, Polyline};
 
-/// Options of the Export window.
-#[derive(Clone, Debug)]
+/// Options of the Export window, saved with the project.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct ExportSettings {
     /// Write a PNG, with the cut lines drawn in.
     pub png: bool,
@@ -26,8 +28,68 @@ pub struct ExportSettings {
     pub dpi: u32,
     /// Print the lines of each element kind (`ElementKind::index`).
     pub print_lines: [bool; KINDS],
-    /// Clip to the outline and leave holes blank.
+    /// Clip to the outline and leave holes blank. Its bleed comes from the project.
     pub cuts: Cuts,
+    /// Print crop marks at the corners of the outline's box, outside the bleed.
+    pub crop_marks: bool,
+    /// Print registration targets at the middle of each side of the outline's box.
+    pub registration_marks: bool,
+    /// Split the page over several sheets of `sheet`.
+    pub tile: bool,
+    /// Paper the tiles are printed on (not `PageSize::Custom`).
+    pub sheet: PageSize,
+    pub sheet_orientation: Orientation,
+    /// Blank border of each sheet, in mm.
+    pub sheet_margin_mm: f32,
+    /// Artwork shared by neighboring sheets, in mm.
+    pub tile_overlap_mm: f32,
+    /// Crop marks and trim ticks in each sheet's margin.
+    pub tile_marks: bool,
+    /// Where the sheets sit, in mm from the grid centered on the page.
+    pub tile_offset_mm: P2,
+    /// Mirror the page left to right, to print on the back of clear film or plexi.
+    pub mirror: bool,
+    /// Image layers printed below this resolution (DPI) are flagged.
+    pub min_image_dpi: u32,
+}
+
+impl ExportSettings {
+    /// How the page is split over sheets, if it is.
+    pub fn tiling(&self) -> Option<print::Tiling> {
+        let [w, h] = self.sheet.portrait_mm()?;
+        self.tile.then_some(print::Tiling {
+            sheet_mm: match self.sheet_orientation {
+                Orientation::Portrait => [w, h],
+                Orientation::Landscape => [h, w],
+            },
+            margin_mm: self.sheet_margin_mm,
+            overlap_mm: self.tile_overlap_mm,
+            marks: self.tile_marks,
+            offset_mm: self.tile_offset_mm,
+        })
+    }
+
+    /// The files an export of a `page_mm` page to `base` writes: a PNG per sheet when
+    /// tiled, and one PDF.
+    pub fn files(&self, base: &Path, page_mm: P2) -> Vec<PathBuf> {
+        let mut out = Vec::new();
+        if self.png {
+            match self.tiling() {
+                Some(t) => out.extend(t.tiles(page_mm).iter().map(|&tile| tile_path(base, tile))),
+                None => out.push(base.with_extension("png")),
+            }
+        }
+        if self.pdf {
+            out.push(base.with_extension("pdf"));
+        }
+        out
+    }
+}
+
+/// The PNG of one sheet: the base name followed by its row and column, e.g. "art-r1c2.png".
+fn tile_path(base: &Path, tile: print::Tile) -> PathBuf {
+    let stem = base.file_stem().unwrap_or_default().to_string_lossy();
+    base.with_file_name(format!("{stem}-r{}c{}.png", tile.row + 1, tile.col + 1))
 }
 
 impl Default for ExportSettings {
@@ -39,6 +101,17 @@ impl Default for ExportSettings {
             // Anchors are construction marks: printed only when asked for.
             print_lines: ElementKind::ALL.map(|k| k != ElementKind::Anchors),
             cuts: Cuts::default(),
+            crop_marks: false,
+            registration_marks: false,
+            tile: false,
+            sheet: PageSize::A4,
+            sheet_orientation: Orientation::Portrait,
+            sheet_margin_mm: 10.0,
+            tile_overlap_mm: 10.0,
+            tile_marks: true,
+            tile_offset_mm: [0.0, 0.0],
+            mirror: false,
+            min_image_dpi: 150,
         }
     }
 }
@@ -62,7 +135,7 @@ impl Progress {
         self.0.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn set(&self, stage: &str, fraction: f32) {
+    pub(crate) fn set(&self, stage: &str, fraction: f32) {
         let mut s = self.state();
         s.stage = stage.to_owned();
         s.fraction = fraction.clamp(0.0, 1.0);
@@ -120,7 +193,10 @@ fn write_all(
         progress.set(tr!("EXPORT_STEP_RENDERING"), f * RENDER_SHARE);
         !progress.is_canceled()
     })?;
-    let saves = settings.png as u32 + settings.pdf as u32;
+    let tiling = settings.tiling();
+    let tiles = tiling.map(|t| t.tiles(scene.page_mm)).unwrap_or_default();
+    let pngs = if settings.png { tiles.len().max(1) } else { 0 };
+    let saves = pngs as u32 + settings.pdf as u32;
     let mut done = 0;
     let mut step = |stage: &str| -> Result<(), String> {
         if progress.is_canceled() {
@@ -132,22 +208,121 @@ fn write_all(
         Ok(())
     };
     if settings.png {
-        step(tr!("EXPORT_STEP_SAVING_PNG"))?;
-        let path = base.with_extension("png");
-        let mut pixmap = render::flatten(&parts, scene, dpi)?;
-        render::draw_lines(&mut pixmap, scene, dpi);
-        written.push(path.clone());
-        write_png(&pixmap, dpi, &path)?;
+        for_each_sheet(&parts, scene, settings, dpi, &mut |tile, pixmap| {
+            step(tr!("EXPORT_STEP_SAVING_PNG"))?;
+            let path = match tile {
+                Some(tile) => tile_path(base, tile),
+                None => base.with_extension("png"),
+            };
+            written.push(path.clone());
+            write_png(pixmap, dpi, &path)
+        })?;
     }
     if settings.pdf {
         step(tr!("EXPORT_STEP_SAVING_PDF"))?;
         let path = base.with_extension("pdf");
         // Text and cut lines go in as vectors so they stay sharp at any zoom.
         written.push(path.clone());
-        write_pdf(scene, &parts, dpi, &path)?;
+        write_pdf(scene, &parts, dpi, &path, tiling)?;
     }
     progress.set(tr!("EXPORT_STEP_DONE"), 1.0);
     Ok(())
+}
+
+/// Called with each piece of paper's picture, and its tile when the page is split.
+pub(crate) type SheetFn<'a> =
+    dyn FnMut(Option<print::Tile>, &tiny_skia::Pixmap) -> Result<(), String> + 'a;
+
+/// What goes on each piece of paper, from the parts rendered at `dpi`: the page with its
+/// lines and marks, or when split, each sheet with its tile. `each` gets them one at a
+/// time, so only one sheet is held at once.
+pub(crate) fn for_each_sheet(
+    parts: &[Part],
+    scene: &Scene,
+    settings: &ExportSettings,
+    dpi: f32,
+    each: &mut SheetFn,
+) -> Result<(), String> {
+    let mut page = render::flatten(parts, scene, dpi)?;
+    match settings.tiling() {
+        None => {
+            render::draw_lines(&mut page, scene, dpi);
+            each(None, &page)
+        }
+        Some(t) => {
+            // Sheets draw the lines themselves: marks may lie past the page, on a sheet.
+            for tile in t.tiles(scene.page_mm) {
+                let sheet = sheet_pixmap(&page, scene, &t, tile, dpi)?;
+                each(Some(tile), &sheet)?;
+            }
+            Ok(())
+        }
+    }
+}
+
+/// One sheet of a tiled print: white paper, the part of the rendered `page` (without
+/// lines) that falls on the tile within the margins, the template lines and the marks
+/// around the outline over the whole of that area, even past the page, and the sheet's
+/// own marks.
+fn sheet_pixmap(
+    page: &tiny_skia::Pixmap,
+    scene: &Scene,
+    tiling: &print::Tiling,
+    tile: print::Tile,
+    dpi: f32,
+) -> Result<tiny_skia::Pixmap, String> {
+    let page_mm = scene.page_mm;
+    let [w, h] = render::pixel_size(tiling.sheet_mm, dpi);
+    let mut sheet =
+        tiny_skia::Pixmap::new(w, h).ok_or_else(|| tr!("CANNOT_ALLOCATE_IMAGE", w = w, h = h))?;
+    sheet.fill(tiny_skia::Color::WHITE);
+    let k = dpi / 25.4;
+    let px = |mm: f32| (mm * k).round() as i64;
+    let ([mx, my], _) = tiling.content_box();
+    let [cw, ch] = tiling.content_mm().map(px);
+    let [ox, oy] = tile.origin_mm.map(px);
+    // The tile's artwork, cut to what the page has: the outer sheets reach past it.
+    let (x0, y0) = (ox.max(0), oy.max(0));
+    let rw = (ox + cw).min(page.width() as i64) - x0;
+    let rh = (oy + ch).min(page.height() as i64) - y0;
+    if rw > 0
+        && rh > 0
+        && let Some(rect) =
+            tiny_skia::IntRect::from_xywh(x0 as i32, y0 as i32, rw as u32, rh as u32)
+        && let Some(part) = page.clone_rect(rect)
+    {
+        sheet.draw_pixmap(
+            (px(mx) + x0 - ox) as i32,
+            (px(my) + y0 - oy) as i32,
+            part.as_ref(),
+            &tiny_skia::PixmapPaint::default(),
+            tiny_skia::Transform::identity(),
+            None,
+        );
+    }
+    // The page's lines, moved onto the sheet and kept to its artwork area.
+    let ([cx0, cy0], [cx1, cy1]) = tiling.content_box();
+    let mut clip =
+        tiny_skia::Mask::new(w, h).ok_or_else(|| tr!("CANNOT_ALLOCATE_IMAGE", w = w, h = h))?;
+    if let Some(rect) = tiny_skia::Rect::from_ltrb(cx0 * k, cy0 * k, cx1 * k, cy1 * k) {
+        clip.fill_path(
+            &tiny_skia::PathBuilder::from_rect(rect),
+            tiny_skia::FillRule::Winding,
+            false,
+            tiny_skia::Transform::identity(),
+        );
+    }
+    let shift = [mx - tile.origin_mm[0], my - tile.origin_mm[1]];
+    render::draw_lines_at(&mut sheet, scene, dpi, shift, Some(&clip));
+    render::stroke_polylines(
+        &mut sheet,
+        tiling.marks(tile, page_mm).iter(),
+        (print::MARK_COLOR, print::MARK_WIDTH_MM),
+        dpi,
+        [0.0, 0.0],
+        None,
+    );
+    Ok(sheet)
 }
 
 /// Saves an opaque RGB PNG that records its DPI, so it prints at true size.
@@ -406,40 +581,119 @@ fn page_ops(doc: &mut PdfDocument, scene: &Scene, parts: &[Part], dpi: f32) -> V
     ops.push(Op::RestoreGraphicsState);
 
     for element in scene.elements.iter().filter(|e| e.print) {
-        ops.push(Op::SetOutlineColor {
-            col: rgb(element.color),
-        });
-        ops.push(Op::SetOutlineThickness {
-            pt: Pt(mm_to_pt(OUTLINE_WIDTH_MM)),
-        });
-        for poly in element.placed.printed_lines() {
-            let points = poly
-                .points
-                .iter()
-                .map(|&p| LinePoint {
-                    p: to_pdf(page_h, p),
-                    bezier: false,
-                })
-                .collect();
-            ops.push(Op::DrawLine {
-                line: Line {
-                    points,
-                    is_closed: poly.closed,
-                },
-            });
-        }
+        let lines: Vec<_> = element.placed.printed_lines().collect();
+        ops.extend(line_ops(
+            lines.iter().map(|l| l.as_ref()),
+            element.color,
+            OUTLINE_WIDTH_MM,
+            page_h,
+        ));
+    }
+    if !scene.marks.is_empty() {
+        ops.extend(line_ops(
+            scene.marks.iter(),
+            print::MARK_COLOR,
+            print::MARK_WIDTH_MM,
+            page_h,
+        ));
     }
     ops
 }
 
-/// Saves a one-page PDF: the artwork as images, with its text and shape layers and the
-/// printed template lines on top as vectors.
-fn write_pdf(scene: &Scene, parts: &[Part], dpi: f32, path: &Path) -> Result<(), String> {
+/// Lines in page mm, stroked in `color`, on a page `page_h` mm tall.
+fn line_ops<'a>(
+    polylines: impl Iterator<Item = &'a Polyline>,
+    color: [u8; 3],
+    width_mm: f32,
+    page_h: f32,
+) -> Vec<Op> {
+    let mut ops = vec![
+        Op::SetOutlineColor { col: rgb(color) },
+        Op::SetOutlineThickness {
+            pt: Pt(mm_to_pt(width_mm)),
+        },
+    ];
+    for poly in polylines {
+        let points = poly
+            .points
+            .iter()
+            .map(|&p| LinePoint {
+                p: to_pdf(page_h, p),
+                bezier: false,
+            })
+            .collect();
+        ops.push(Op::DrawLine {
+            line: Line {
+                points,
+                is_closed: poly.closed,
+            },
+        });
+    }
+    ops
+}
+
+/// The pages of a tiled print: on each sheet, the page's drawing moved so the tile's
+/// artwork falls within the margins, clipped there, then the sheet's marks.
+fn tile_pages(page_ops: &[Op], page_mm: P2, tiling: &print::Tiling) -> Vec<PdfPage> {
+    let [sw, sh] = tiling.sheet_mm;
+    let ([x0, y0], [x1, y1]) = tiling.content_box();
+    tiling
+        .tiles(page_mm)
+        .into_iter()
+        .map(|tile| {
+            let [ox, oy] = tile.origin_mm;
+            let mut ops = vec![
+                Op::SaveGraphicsState,
+                Op::DrawPolygon {
+                    polygon: polygon(
+                        &[vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]]],
+                        sh,
+                        PaintMode::Clip,
+                    ),
+                },
+                // Page point (x, y) lands at (x - ox + x0, y - oy + y0) on the sheet.
+                Op::SetTransformationMatrix {
+                    matrix: printpdf::CurTransMat::Translate(
+                        Pt(mm_to_pt(x0 - ox)),
+                        Pt(mm_to_pt(sh - y0 + oy - page_mm[1])),
+                    ),
+                },
+            ];
+            ops.extend_from_slice(page_ops);
+            ops.push(Op::RestoreGraphicsState);
+            ops.extend(line_ops(
+                tiling.marks(tile, page_mm).iter(),
+                print::MARK_COLOR,
+                print::MARK_WIDTH_MM,
+                sh,
+            ));
+            PdfPage::new(Mm(sw), Mm(sh), ops)
+        })
+        .collect()
+}
+
+/// Saves the PDF: the artwork as images, with its text and shape layers and the printed
+/// template lines on top as vectors. One page, or a page per sheet when tiled; the
+/// images are stored once and shared by the sheets.
+fn write_pdf(
+    scene: &Scene,
+    parts: &[Part],
+    dpi: f32,
+    path: &Path,
+    tiling: Option<print::Tiling>,
+) -> Result<(), String> {
     let mut doc = PdfDocument::new(tr!("PDF_DOCUMENT_TITLE"));
     let ops = page_ops(&mut doc, scene, parts, dpi);
-    let page = PdfPage::new(Mm(scene.page_mm[0]), Mm(scene.page_mm[1]), ops);
+    let pages = match tiling {
+        Some(t) => tile_pages(&ops, scene.page_mm, &t),
+        None => vec![PdfPage::new(
+            Mm(scene.page_mm[0]),
+            Mm(scene.page_mm[1]),
+            ops,
+        )],
+    };
     let bytes = doc
-        .with_pages(vec![page])
+        .with_pages(pages)
         .save(&PdfSaveOptions::default(), &mut Vec::new());
     std::fs::write(path, bytes).map_err(|e| tr!("CANNOT_WRITE_FILE", path = path.display(), e = e))
 }
@@ -728,6 +982,254 @@ mod tests {
         };
         let base = std::path::PathBuf::from(dir).join("text-on-path");
         run(&scene, &settings, &base, &Progress::default()).unwrap();
+    }
+
+    #[test]
+    fn pdf_bleed_and_marks() {
+        // The page with its text layer as vectors, which the outline clips.
+        let ops_of = |bleed_mm: f32, marks: bool| {
+            let mut scene = text_scene(false);
+            scene.cuts.bleed_mm = bleed_mm;
+            scene.elements.iter_mut().for_each(|e| e.print = false);
+            let scene = scene.with_marks(marks, marks);
+            let parts = render::compose_parts(&scene, 100.0, true, &mut |_| true).unwrap();
+            page_ops(&mut PdfDocument::new("test"), &scene, &parts, 100.0)
+        };
+        let clip_width = |ops: &[Op]| {
+            let xs: Vec<f32> = ops
+                .iter()
+                .find_map(|op| match op {
+                    Op::DrawPolygon { polygon } if polygon.mode == PaintMode::Clip => Some(polygon),
+                    _ => None,
+                })
+                .unwrap()
+                .rings
+                .iter()
+                .flat_map(|r| &r.points)
+                .map(|p| p.p.x.0)
+                .collect();
+            xs.iter().fold(f32::MIN, |a, &b| a.max(b)) - xs.iter().fold(f32::MAX, |a, &b| a.min(b))
+        };
+        let lines = |ops: &[Op]| {
+            ops.iter()
+                .filter(|op| matches!(op, Op::DrawLine { .. }))
+                .count()
+        };
+        let plain = ops_of(0.0, false);
+        let bled = ops_of(3.0, true);
+        let grown = clip_width(&bled) - clip_width(&plain);
+        assert!((grown - mm_to_pt(6.0)).abs() < 0.5, "{grown}");
+        assert_eq!(lines(&plain), 0);
+        assert_eq!(
+            lines(&bled),
+            8 + 4 * 4,
+            "crop marks and registration targets"
+        );
+
+        // A sample to look at, when asked for.
+        if let Some(dir) = std::env::var_os("ARTWORK_PDF_SAMPLE") {
+            let mut scene = text_scene(false);
+            scene.cuts.bleed_mm = 3.0;
+            let settings = ExportSettings {
+                dpi: 150,
+                ..Default::default()
+            };
+            let base = std::path::PathBuf::from(dir).join("bleed-and-marks");
+            run(
+                &scene.with_marks(true, true),
+                &settings,
+                &base,
+                &Progress::default(),
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn tiled_export_writes_a_sheet_per_tile() {
+        use crate::document::{Layer, Node};
+        let dir = std::env::var_os("ARTWORK_PDF_SAMPLE")
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| {
+                std::env::temp_dir().join(format!("artwork-tiles-{}", std::process::id()))
+            });
+        std::fs::create_dir_all(&dir).unwrap();
+        // A 400 x 250 mm page covered by a gradient, its text on top.
+        let mut doc = Document {
+            page: PageSize::Custom,
+            custom_page_mm: [400.0, 250.0],
+            orientation: Orientation::Portrait,
+            ..Default::default()
+        };
+        let img = image::RgbaImage::from_fn(400, 250, |x, y| {
+            image::Rgba([(x * 255 / 400) as u8, (y * 255 / 250) as u8, 160, 255])
+        });
+        let mut l = Layer::new(1, "gradient".into(), "x.png".into());
+        l.size_px = [400, 250];
+        l.transform.center = [200.0, 125.0];
+        l.pixmap = Some(std::sync::Arc::new(
+            render::premultiplied_pixmap(&img).unwrap(),
+        ));
+        let mut t = crate::shape::new_layer(2, crate::shape::ShapeKind::Star, [200.0, 125.0]);
+        crate::shape::set_geometry_size(&mut t, [120.0, 120.0]);
+        doc.layers = vec![Node::Layer(Box::new(l)), Node::Layer(Box::new(t))];
+        crate::shape::prepare_export(&mut doc, 100.0);
+        let scene = Scene::new(
+            &doc,
+            None,
+            [[255, 0, 255]; crate::template::KINDS],
+            [true; crate::template::KINDS],
+            Cuts::default(),
+        );
+        // The grid moved from centered (550 x 277 mm of sheets) to the page's corner.
+        let settings = ExportSettings {
+            dpi: 100,
+            tile: true,
+            tile_offset_mm: [75.0, 13.5],
+            ..Default::default()
+        };
+        // A4 portrait, 190 x 277 mm of artwork each: 3 across, 1 down.
+        let base = dir.join("tiled");
+        let expected = settings.files(&base, scene.page_mm);
+        let out = run(&scene, &settings, &base, &Progress::default()).unwrap();
+        assert_eq!(out, expected);
+        assert_eq!(out.len(), 4, "3 PNG sheets and the PDF");
+        assert!(out[1].ends_with("tiled-r1c2.png"));
+        let sheet = image::open(&out[0]).unwrap().to_rgb8();
+        assert_eq!(sheet.dimensions(), (827, 1169), "A4 portrait at 100 DPI");
+        // Artwork within the margin, blank paper outside it and below the page.
+        let k = 100.0 / 25.4;
+        let at = |x: f32, y: f32| sheet.get_pixel((x * k) as u32, (y * k) as u32).0;
+        assert_eq!(at(5.0, 100.0), [255, 255, 255]);
+        assert_eq!(at(15.0, 15.0)[2], 160, "the gradient's corner");
+        assert_eq!(at(100.0, 270.0), [255, 255, 255], "past the page's bottom");
+        // The second sheet starts 180 mm into the page: 190 minus the overlap.
+        let second = image::open(&out[1]).unwrap().to_rgb8();
+        let red =
+            |img: &image::RgbImage, x: f32| img.get_pixel((x * k) as u32, (50.0 * k) as u32).0[0];
+        assert!(red(&second, 10.5).abs_diff((180.5 * 255.0 / 400.0) as u8) <= 3);
+        assert_eq!(
+            red(&sheet, 190.5),
+            red(&second, 10.5),
+            "the overlap matches"
+        );
+
+        // Centered, the first sheet starts 75 mm before the page and 13.5 mm above it:
+        // its artwork begins 85 mm across and 23.5 mm down.
+        let centered = ExportSettings {
+            tile_offset_mm: [0.0, 0.0],
+            pdf: false,
+            ..settings.clone()
+        };
+        let first = run(
+            &scene,
+            &centered,
+            &dir.join("centered"),
+            &Progress::default(),
+        )
+        .unwrap();
+        let sheet = image::open(&first[0]).unwrap().to_rgb8();
+        let at = |x: f32, y: f32| sheet.get_pixel((x * k) as u32, (y * k) as u32).0;
+        assert_eq!(at(83.0, 100.0), [255, 255, 255]);
+        assert_eq!(at(87.0, 100.0)[2], 160);
+        assert_eq!(at(100.0, 22.0), [255, 255, 255]);
+        assert_eq!(at(100.0, 25.0)[2], 160);
+
+        let pdf = std::fs::read(&out[3]).unwrap();
+        let text = String::from_utf8_lossy(&pdf);
+        let pages = text.matches("/Type/Page").count() - text.matches("/Type/Pages").count();
+        assert_eq!(pages, 3, "a PDF page per sheet");
+        if std::env::var_os("ARTWORK_PDF_SAMPLE").is_none() {
+            std::fs::remove_dir_all(&dir).ok();
+        }
+    }
+
+    #[test]
+    fn sheets_print_marks_past_the_page() {
+        // A 100 x 50 mm page, centered on one A5 sheet: 128 x 190 mm of artwork, so the
+        // sheet's artwork starts 14 mm left of the page and 70 mm above it.
+        let scene = Scene {
+            page_mm: [100.0, 50.0],
+            background: [255, 255, 255],
+            layers: Vec::new(),
+            elements: Vec::new(),
+            cuts: Cuts::default(),
+            marks: vec![Polyline {
+                points: vec![[10.0, -3.0], [40.0, -3.0]],
+                closed: false,
+            }],
+        };
+        let tiling = print::Tiling {
+            sheet_mm: [148.0, 210.0],
+            margin_mm: 10.0,
+            overlap_mm: 10.0,
+            marks: false,
+            offset_mm: [0.0, 0.0],
+        };
+        let tile = tiling.tiles(scene.page_mm)[0];
+        assert_eq!(tile.origin_mm, [-14.0, -70.0]);
+        let page = render::compose(&scene, 254.0, false).unwrap();
+        let sheet = sheet_pixmap(&page, &scene, &tiling, tile, 254.0).unwrap();
+        // 3 mm above the page, at 10 px per mm: y 10 + 67 mm, x 10 + 24 to 10 + 54 mm.
+        let dark = |x: u32, y: u32| sheet.pixel(x, y).unwrap().red() < 128;
+        assert!(dark(500, 770), "the mark above the page is on the sheet");
+        assert!(!dark(500, 760) && !dark(300, 770));
+        // Moved so the mark falls in the sheet's margin: it is left out.
+        let moved = print::Tiling {
+            offset_mm: [0.0, 69.0],
+            ..tiling
+        };
+        let tile = moved.tiles(scene.page_mm)[0];
+        let sheet = sheet_pixmap(&page, &scene, &moved, tile, 254.0).unwrap();
+        assert!((0..sheet.height()).all(|y| sheet.pixel(500, y).unwrap().red() == 255));
+    }
+
+    #[test]
+    fn mirrored_export_is_the_page_flipped() {
+        // Text, squares, template lines and crop marks, at 10 px per mm: the page is a
+        // whole number of pixels wide, so mirrored pixels line up exactly.
+        let scene = || text_scene(false).with_marks(true, true);
+        let dpi = 254.0;
+        let plain = render::compose(&scene(), dpi, true).unwrap();
+        let mirrored = render::compose(&scene().mirrored(), dpi, true).unwrap();
+        let (w, h) = (plain.width(), plain.height());
+        assert_eq!(w as f32, scene().page_mm[0] * 10.0);
+        let mut differ = 0;
+        for y in 0..h {
+            for x in 0..w {
+                let a = plain.pixel(x, y).unwrap();
+                let b = mirrored.pixel(w - 1 - x, y).unwrap();
+                let d = [
+                    a.red().abs_diff(b.red()),
+                    a.green().abs_diff(b.green()),
+                    a.blue().abs_diff(b.blue()),
+                ];
+                if d.iter().any(|&d| d > 40) {
+                    differ += 1;
+                }
+            }
+        }
+        assert!(differ < (w * h) as usize / 2000, "{differ} pixels differ");
+        // Something to mirror: the page isn't symmetric.
+        assert!((0..w).any(|x| plain.pixel(x, h / 2) != plain.pixel(w - 1 - x, h / 2)));
+
+        // In the PDF, the text's points are mirrored across the page.
+        let letters = |scene: &Scene| -> Vec<f32> {
+            let parts = render::compose_parts(scene, 100.0, true, &mut |_| true).unwrap();
+            let ops = page_ops(&mut PdfDocument::new("test"), scene, &parts, 100.0);
+            ops.iter()
+                .find_map(|op| match op {
+                    Op::DrawPolygon { polygon } if polygon.mode == PaintMode::Fill => {
+                        Some(polygon.rings[0].points.iter().map(|p| p.p.x.0).collect())
+                    }
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let page_w = mm_to_pt(scene().page_mm[0]);
+        for (a, b) in letters(&scene()).iter().zip(letters(&scene().mirrored())) {
+            assert!((a - (page_w - b)).abs() < 0.01, "{a} {b}");
+        }
     }
 
     #[test]

@@ -12,6 +12,8 @@ mod file_dialog;
 mod history;
 mod i18n;
 mod layers_ui;
+mod print;
+mod printing;
 mod project;
 mod recent;
 mod render;

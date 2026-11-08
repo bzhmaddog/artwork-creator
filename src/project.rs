@@ -13,6 +13,7 @@ use zip::write::SimpleFileOptions;
 use zip::{CompressionMethod, ZipArchive, ZipWriter};
 
 use crate::document::{Document, Layer};
+use crate::export::ExportSettings;
 use crate::i18n::tr;
 
 /// Extension of project archives.
@@ -30,14 +31,15 @@ pub fn is_archive(path: &Path) -> bool {
         .is_some_and(|e| e.eq_ignore_ascii_case(EXTENSION))
 }
 
-/// Loads a project archive or a linked JSON project. Images from an archive come back
-/// in each layer's `data`, with `source` set to their name inside the archive; images
-/// of JSON projects are read from disk later.
-pub fn load(path: &Path) -> Result<Document, String> {
+/// Loads a project archive or a linked JSON project, with its export settings. Images
+/// from an archive come back in each layer's `data`, with `source` set to their name
+/// inside the archive; images of JSON projects are read from disk later.
+pub fn load(path: &Path) -> Result<(Document, ExportSettings), String> {
     let bytes =
         std::fs::read(path).map_err(|e| tr!("CANNOT_READ_FILE", path = path.display(), e = e))?;
     if !bytes.starts_with(b"PK\x03\x04") {
-        return Document::load(path);
+        let doc = Document::load(path)?;
+        return Ok((doc, export_of(&String::from_utf8_lossy(&bytes))));
     }
     let invalid =
         |e: &dyn std::fmt::Display| tr!("INVALID_PROJECT_FILE_AT", path = path.display(), e = e);
@@ -45,6 +47,7 @@ pub fn load(path: &Path) -> Result<Document, String> {
     let json = read_entry(&mut zip, JSON_ENTRY).map_err(|e| invalid(&e))?;
     let text = String::from_utf8(json).map_err(|e| invalid(&e))?;
     let mut doc = Document::from_json(&text)?;
+    let export = export_of(&text);
 
     // Each image is read once, even when several layers use it.
     let mut images: HashMap<String, Option<Arc<Vec<u8>>>> = HashMap::new();
@@ -70,7 +73,31 @@ pub fn load(path: &Path) -> Result<Document, String> {
             }
         }
     });
-    Ok(doc)
+    Ok((doc, export))
+}
+
+/// The export settings saved in a project's JSON: the defaults when there are none
+/// (projects saved before they were) or they can't be read.
+fn export_of(json: &str) -> ExportSettings {
+    #[derive(serde::Deserialize)]
+    struct Saved {
+        export: ExportSettings,
+    }
+    serde_json::from_str::<Saved>(json)
+        .map(|s| s.export)
+        .unwrap_or_default()
+}
+
+/// A project's JSON with its export settings added, beside the document's fields.
+fn with_export(json: &str, export: &ExportSettings) -> Result<String, String> {
+    let mut value: serde_json::Value = serde_json::from_str(json).map_err(|e| e.to_string())?;
+    if let Some(map) = value.as_object_mut() {
+        map.insert(
+            "export".into(),
+            serde_json::to_value(export).map_err(|e| e.to_string())?,
+        );
+    }
+    serde_json::to_string_pretty(&value).map_err(|e| e.to_string())
 }
 
 fn read_entry(zip: &mut ZipArchive<Cursor<Vec<u8>>>, name: &str) -> Result<Vec<u8>, String> {
@@ -88,7 +115,7 @@ fn read_entry(zip: &mut ZipArchive<Cursor<Vec<u8>>>, name: &str) -> Result<Vec<u
 /// whose license forbids embedding it, keep their link to the font file and will look
 /// for their font family where the project is opened. Writes to a temporary file first, so a failed save
 /// leaves an existing project untouched.
-pub fn save(doc: &Document, path: &Path) -> Result<Vec<String>, String> {
+pub fn save(doc: &Document, export: &ExportSettings, path: &Path) -> Result<Vec<String>, String> {
     let mut doc = doc.clone();
     let mut images: Vec<(String, Arc<Vec<u8>>)> = Vec::new();
     let mut missing = Vec::new();
@@ -115,7 +142,8 @@ pub fn save(doc: &Document, path: &Path) -> Result<Vec<String>, String> {
             None => missing.push(layer.name.clone()),
         }
     });
-    let json = serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())?;
+    let json = serde_json::to_string(&doc).map_err(|e| e.to_string())?;
+    let json = with_export(&json, export)?;
     write_safely(path, |tmp| write_archive(tmp, &json, &images))?;
     Ok(missing)
 }
@@ -123,7 +151,11 @@ pub fn save(doc: &Document, path: &Path) -> Result<Vec<String>, String> {
 /// Saves the project as linked JSON. Images it only has in memory (from an archive)
 /// are written to an "<name> images" folder next to the project and linked from there.
 /// Returns the names of layers whose image is neither on disk nor in memory.
-pub fn save_json(doc: &Document, path: &Path) -> Result<Vec<String>, String> {
+pub fn save_json(
+    doc: &Document,
+    export: &ExportSettings,
+    path: &Path,
+) -> Result<Vec<String>, String> {
     let base = path.parent().unwrap_or(Path::new(""));
     let folder = base.join(format!("{} images", crate::recent::label(path)));
     let mut doc = doc.clone();
@@ -171,7 +203,7 @@ pub fn save_json(doc: &Document, path: &Path) -> Result<Vec<String>, String> {
     if let Some(e) = error {
         return Err(e);
     }
-    let json = doc.to_json_relative(base)?;
+    let json = with_export(&doc.to_json_relative(base)?, export)?;
     write_safely(path, |tmp| {
         std::fs::write(tmp, &json).map_err(|e| e.to_string())
     })?;
@@ -314,12 +346,12 @@ mod tests {
         doc.layers.push(Node::Layer(Box::new(l)));
         for path in [dir.join("s.artwork"), dir.join("s.json")] {
             let missing = if path.extension().is_some_and(|e| e == "json") {
-                save_json(&doc, &path).unwrap()
+                save_json(&doc, &ExportSettings::default(), &path).unwrap()
             } else {
-                save(&doc, &path).unwrap()
+                save(&doc, &ExportSettings::default(), &path).unwrap()
             };
             assert!(missing.is_empty(), "nothing reported missing");
-            let back = load(&path).unwrap();
+            let back = load(&path).unwrap().0;
             let l = back.layer(1).unwrap();
             assert_eq!(l.shape, want);
             assert!(l.source.as_os_str().is_empty() && l.data.is_none());
@@ -358,10 +390,12 @@ mod tests {
 
         let path = dir.join("t.artwork");
         assert!(
-            save(&doc, &path).unwrap().is_empty(),
+            save(&doc, &ExportSettings::default(), &path)
+                .unwrap()
+                .is_empty(),
             "nothing reported missing"
         );
-        let back = load(&path).unwrap();
+        let back = load(&path).unwrap().0;
         let a = back.layer(1).unwrap();
         assert_eq!(a.data.as_deref(), Some(hack.as_ref()), "font read back");
         assert!(a.source.to_string_lossy().starts_with(FONT_DIR));
@@ -384,7 +418,7 @@ mod tests {
 
         // A linked project writes the archive's font next to it.
         let json = dir.join("t.json");
-        save_json(&back, &json).unwrap();
+        save_json(&back, &ExportSettings::default(), &json).unwrap();
         let linked = Document::load(&json).unwrap();
         let src = &linked.layer(1).unwrap().source;
         assert!(src.is_file() && src.extension().is_some_and(|e| e == "ttf"));
@@ -414,7 +448,7 @@ mod tests {
             ..Default::default()
         };
         let path = dir.join("p.artwork");
-        let missing = save(&doc, &path).unwrap();
+        let missing = save(&doc, &ExportSettings::default(), &path).unwrap();
         assert_eq!(missing, ["lost"]);
         assert!(!dir.join("p.artwork.tmp").exists());
 
@@ -429,7 +463,7 @@ mod tests {
         );
         assert!(zip.by_name(JSON_ENTRY).is_ok());
 
-        let back = load(&path).unwrap();
+        let back = load(&path).unwrap().0;
         let data = |id| back.layer(id).unwrap().data.clone();
         assert_eq!(data(1).as_deref(), Some(&*red));
         assert!(
@@ -445,9 +479,9 @@ mod tests {
         assert_eq!(back.next_id, 5);
 
         // Saving again over the same file works too.
-        save(&back, &path).unwrap();
+        save(&back, &ExportSettings::default(), &path).unwrap();
         assert_eq!(
-            load(&path).unwrap().layer(3).unwrap().data.as_deref(),
+            load(&path).unwrap().0.layer(3).unwrap().data.as_deref(),
             Some(&*blue)
         );
         std::fs::remove_dir_all(&dir).ok();
@@ -477,10 +511,10 @@ mod tests {
             ..Default::default()
         };
         let path = dir.join("My stick.json");
-        let missing = save_json(&doc, &path).unwrap();
+        let missing = save_json(&doc, &ExportSettings::default(), &path).unwrap();
         assert_eq!(missing, ["lost"]);
 
-        let back = load(&path).unwrap();
+        let back = load(&path).unwrap().0;
         let red_file = &back.layer(1).unwrap().source;
         assert!(
             red_file.starts_with(dir.join("My stick images")),
@@ -498,6 +532,39 @@ mod tests {
     }
 
     #[test]
+    fn export_settings_are_saved_with_the_project() {
+        use crate::document::{Orientation, PageSize};
+        let dir = std::env::temp_dir().join(format!("artwork-export-set-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let export = ExportSettings {
+            png: false,
+            dpi: 600,
+            crop_marks: true,
+            tile: true,
+            sheet: PageSize::Letter,
+            sheet_orientation: Orientation::Landscape,
+            tile_overlap_mm: 15.0,
+            tile_offset_mm: [12.5, -4.0],
+            ..Default::default()
+        };
+        let doc = Document::default();
+        for path in [dir.join("e.artwork"), dir.join("e.json")] {
+            if path.extension().is_some_and(|e| e == "json") {
+                save_json(&doc, &export, &path).unwrap();
+            } else {
+                save(&doc, &export, &path).unwrap();
+            }
+            let (_, back) = load(&path).unwrap();
+            assert_eq!(back, export, "{}", path.display());
+        }
+        // Projects saved before export settings were get the defaults.
+        let old = dir.join("old.json");
+        std::fs::write(&old, r#"{"layers":[]}"#).unwrap();
+        assert_eq!(load(&old).unwrap().1, ExportSettings::default());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn older_json_projects_still_open() {
         let dir = std::env::temp_dir().join(format!("artwork-legacy-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -511,7 +578,7 @@ mod tests {
         )
         .unwrap();
         assert!(!is_archive(&path));
-        let doc = load(&path).unwrap();
+        let doc = load(&path).unwrap().0;
         let l = doc.layer(1).unwrap();
         assert_eq!(l.source, dir.join("img/a.png"), "relative to the project");
         assert!(l.data.is_none(), "read from disk later");

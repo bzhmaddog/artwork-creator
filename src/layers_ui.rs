@@ -34,6 +34,9 @@ pub struct LayersPanel {
     pub shape_kind: ShapeKind,
     /// The shape layer whose points are being edited on the canvas.
     pub edit_points: Option<u64>,
+    /// Image layers printed below this resolution (DPI) are flagged; set by the app from
+    /// the export settings.
+    pub min_dpi: f32,
 }
 
 /// What the Align buttons line the selection up with.
@@ -992,6 +995,20 @@ pub fn show(
                             thumbnail(ui, tex, l.size_px, l.image_uv());
                         }
                     }
+                    // Visible image layers that will print below the chosen resolution.
+                    let low_dpi = node
+                        .as_layer()
+                        .filter(|l| l.visible && !row.parent_hidden)
+                        .and_then(Layer::print_dpi)
+                        .filter(|&d| d < state.min_dpi);
+                    if let Some(dpi) = low_dpi {
+                        ui.colored_label(ui.visuals().warn_fg_color, "⚠")
+                            .on_hover_text(tr!(
+                                "LAYER_LOW_RESOLUTION",
+                                dpi = format!("{dpi:.0}"),
+                                min = format!("{:.0}", state.min_dpi)
+                            ));
+                    }
                     let broken = node.as_layer().filter(|l| l.broken);
                     let missing = broken.map(|l| l.source.display().to_string());
                     let name = name_mut(node);
@@ -1792,8 +1809,9 @@ fn shape_section(
     changed
 }
 
-/// The part of Properties for an image layer: its print resolution and source size.
-fn image_section(ui: &mut Ui, layer: &Layer) {
+/// The part of Properties for an image layer: its print resolution, flagged below
+/// `min_dpi`, and source size.
+fn image_section(ui: &mut Ui, layer: &Layer, min_dpi: f32) {
     section(
         ui,
         "image_props",
@@ -1801,15 +1819,14 @@ fn image_section(ui: &mut Ui, layer: &Layer) {
         |_| false,
         |ui| {
             // Print resolution of this layer, from its pixel count and printed size.
-            let [w_mm, h_mm] = layer.size_mm();
-            let dpi = (layer.size_px[0] as f32 / (w_mm / 25.4))
-                .min(layer.size_px[1] as f32 / (h_mm / 25.4));
+            let dpi = layer.print_dpi().unwrap_or(f32::INFINITY);
             let shown = format!("{dpi:.0}");
-            if dpi < 150.0 {
+            if dpi < min_dpi {
                 ui.colored_label(
                     ui.visuals().warn_fg_color,
                     tr!("PRINT_RESOLUTION_LOW", dpi = shown),
-                );
+                )
+                .on_hover_text(tr!("LOW_RESOLUTION_HINT", min = format!("{min_dpi:.0}")));
             } else {
                 ui.weak(tr!("PRINT_RESOLUTION", dpi = shown));
             }
@@ -2170,7 +2187,7 @@ fn properties(
                     } else if layer.shape.is_some() {
                         out.changed |= shape_section(ui, layer, locked, &mut state.edit_points);
                     } else {
-                        image_section(ui, layer);
+                        image_section(ui, layer, state.min_dpi);
                     }
                 },
             );

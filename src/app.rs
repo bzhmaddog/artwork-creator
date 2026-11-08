@@ -9,7 +9,7 @@ use egui::{
 };
 
 use crate::canvas_points;
-use crate::document::{Document, Layer, Node, Orientation, P2, PageSize};
+use crate::document::{self, Document, Layer, Node, Orientation, P2, PageSize};
 use crate::effects::cache::EffectCache;
 use crate::export::{self, ExportSettings};
 use crate::file_dialog::{self, FileBrowser, Filter, Purpose, Request};
@@ -30,6 +30,8 @@ const MAX_TEXTURE_SIDE: u32 = 4096;
 const MAX_PREVIEW_SIDE: u32 = 2048;
 /// Width of the preview in the Export window, in points.
 const EXPORT_PREVIEW_WIDTH: f32 = 360.0;
+/// Outline of the sheets over the export preview, apart from the template element colors.
+const TILE_COLOR: Color32 = Color32::from_rgb(220, 20, 60);
 const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp", "gif"];
 const IMAGE_FILTERS: &[Filter] = &[Filter::new(tr_noop!("FILTER_IMAGES"), IMAGE_EXTENSIONS)];
 const EXPORT_FILTERS: &[Filter] = &[Filter::new("PNG / PDF", &["png", "pdf"])];
@@ -51,6 +53,7 @@ const SHORTCUT_NEW: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND,
 const SHORTCUT_OPEN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::O);
 const SHORTCUT_SAVE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::S);
 const SHORTCUT_EXPORT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::E);
+const SHORTCUT_PRINT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::P);
 const SHORTCUT_DUPLICATE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::D);
 const SHORTCUT_TEXT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::T);
 const SHORTCUT_IMAGE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::I);
@@ -83,11 +86,28 @@ pub struct ArtworkApp {
     /// Recently opened or saved projects, for File > Open Recent.
     recent: RecentFiles,
     export_settings: ExportSettings,
+    /// The export settings as last saved or opened with the project: they count as an
+    /// unsaved change when they differ, without being undo steps.
+    saved_export: ExportSettings,
     export_open: bool,
     export_job: Option<ExportJob>,
     /// Progress of the running export, shared with its thread.
     export_progress: export::Progress,
     export_started: Instant,
+    /// The running job prints rather than exports: for its title and messages.
+    job_prints: bool,
+    /// The Print window is open.
+    print_open: bool,
+    /// Print was asked for: the system print dialog opens on the next frame, which has
+    /// the window to put it over.
+    #[cfg(windows)]
+    print_pending: bool,
+    /// The printers CUPS offers, asked for when the Print window opens.
+    #[cfg(not(windows))]
+    printers: Option<crate::printing::Printers>,
+    /// The printer picked in the Print window, and the number of copies.
+    #[cfg(not(windows))]
+    print_to: (String, u32),
     /// Small render of the export shown in the Export window, with the hash of what it
     /// shows.
     export_preview: Option<(u64, egui::TextureHandle)>,
@@ -147,8 +167,49 @@ pub fn set_interaction(ctx: &egui::Context) {
     ctx.options_mut(|o| {
         o.input_options.surrender_focus_on = egui::SurrenderFocusOn::Presses;
     });
-    // Labels can't be selected, so the text cursor only shows over what can be edited.
-    ctx.all_styles_mut(|s| s.interaction.selectable_labels = false);
+    ctx.all_styles_mut(|s| {
+        // Labels can't be selected, so the text cursor only shows over what can be edited.
+        s.interaction.selectable_labels = false;
+    });
+}
+
+/// Room between a window's or dialog's border and what it holds, in points (egui's is 6).
+const DIALOG_MARGIN: i8 = 14;
+
+/// A modal dialog, framed like a window but with more room: egui frames modals like
+/// menus.
+fn dialog(ctx: &egui::Context, id: &str) -> egui::Modal {
+    egui::Modal::new(egui::Id::unique(id)).frame(
+        egui::Frame::window(&ctx.global_style()).inner_margin(egui::Margin::same(DIALOG_MARGIN)),
+    )
+}
+
+/// The bottom row of a window: `ok` (enabled when `can`) at the right edge of what is
+/// above it, Cancel on its left. Returns which was clicked: (ok, cancel).
+fn dialog_buttons(ui: &mut egui::Ui, ok: &str, can: bool) -> (bool, bool) {
+    // As wide as the rows above, not more: the window sizes itself to its contents.
+    let width = ui.min_rect().width();
+    let height = ui.spacing().interact_size.y;
+    ui.allocate_ui_with_layout(
+        egui::vec2(width, height),
+        egui::Layout::right_to_left(egui::Align::Center),
+        |ui| {
+            let ok = ui.add_enabled(can, egui::Button::new(ok)).clicked();
+            let cancel = ui.button(tr!("CANCEL")).clicked();
+            (ok, cancel)
+        },
+    )
+    .inner
+}
+
+/// A window's contents with `DIALOG_MARGIN` of room around them. egui's window margin
+/// also sets its title bar's, which stays as it is.
+fn padded<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let extra = (DIALOG_MARGIN - ui.spacing().window_margin.left).max(0);
+    egui::Frame::NONE
+        .inner_margin(egui::Margin::same(extra))
+        .show(ui, add)
+        .inner
 }
 
 impl ArtworkApp {
@@ -180,10 +241,19 @@ impl ArtworkApp {
             history: History::new(&Document::default()),
             recent: RecentFiles::load(cc.storage),
             export_settings: ExportSettings::default(),
+            saved_export: ExportSettings::default(),
             export_open: false,
             export_job: None,
             export_progress: export::Progress::default(),
             export_started: Instant::now(),
+            job_prints: false,
+            print_open: false,
+            #[cfg(windows)]
+            print_pending: false,
+            #[cfg(not(windows))]
+            printers: None,
+            #[cfg(not(windows))]
+            print_to: (String::new(), 1),
             export_preview: None,
             effect_cache: EffectCache::default(),
             fonts: FontLibrary::new(),
@@ -252,7 +322,12 @@ impl ArtworkApp {
         {
             self.selected = None;
         }
-        self.dirty = self.history.is_modified();
+        self.dirty = self.is_modified();
+    }
+
+    /// The project differs from the saved file: its document or its export settings.
+    fn is_modified(&self) -> bool {
+        self.history.is_modified() || self.export_settings != self.saved_export
     }
 
     // ---- Templates ----
@@ -519,14 +594,7 @@ impl ArtworkApp {
     /// The files a save or export to `path` writes.
     fn files_written(&self, purpose: Purpose, path: &Path) -> Vec<PathBuf> {
         match purpose {
-            Purpose::Export => {
-                let s = &self.export_settings;
-                [(s.png, "png"), (s.pdf, "pdf")]
-                    .into_iter()
-                    .filter(|&(on, _)| on)
-                    .map(|(_, ext)| path.with_extension(ext))
-                    .collect()
-            }
+            Purpose::Export => self.export_settings.files(path, self.doc.page_mm()),
             _ => vec![path.to_path_buf()],
         }
     }
@@ -563,7 +631,7 @@ impl ArtworkApp {
             .unwrap_or_default();
         let mut replace = false;
         let mut cancel = false;
-        let response = egui::Modal::new(egui::Id::unique("overwrite")).show(ctx, |ui| {
+        let response = dialog(ctx, "overwrite").show(ctx, |ui| {
             ui.set_max_width(420.0);
             ui.strong(if names.len() == 1 {
                 tr!("CONFIRM_REPLACE_FILE")
@@ -616,6 +684,8 @@ impl ArtworkApp {
         self.project_path = None;
         self.select_template(template, true);
         self.canvas.fit_pending = true;
+        self.export_settings = ExportSettings::default();
+        self.saved_export = self.export_settings.clone();
         self.dirty = false;
         self.history.reset(&self.doc);
     }
@@ -638,8 +708,10 @@ impl ArtworkApp {
     /// Loads a project and its images. Missing images are reported and drawn crossed out.
     fn open_project_path(&mut self, ctx: &egui::Context, path: PathBuf) {
         match project::load(&path) {
-            Ok(doc) => {
+            Ok((doc, export)) => {
                 self.doc = doc;
+                self.saved_export = export.clone();
+                self.export_settings = export;
                 let mut missing = Vec::new();
                 self.doc.for_each_layer_mut(|layer| {
                     if layer.is_drawn() {
@@ -722,9 +794,9 @@ impl ArtworkApp {
     /// extension, and marks it as saved.
     fn save_to(&mut self, path: PathBuf) {
         let saved = if project::is_archive(&path) {
-            project::save(&self.doc, &path)
+            project::save(&self.doc, &self.export_settings, &path)
         } else {
-            project::save_json(&self.doc, &path)
+            project::save_json(&self.doc, &self.export_settings, &path)
         };
         match saved {
             Ok(missing) => {
@@ -737,6 +809,7 @@ impl ArtworkApp {
                 self.recent.add(&path);
                 self.project_path = Some(path);
                 self.history.mark_saved(&self.doc);
+                self.saved_export = self.export_settings.clone();
                 self.dirty = false;
                 if std::mem::take(&mut self.close_after_save) {
                     self.closing = true;
@@ -763,29 +836,96 @@ impl ArtworkApp {
 
     // ---- Export ----
 
-    /// Renders and writes the export on a background thread.
-    fn start_export(&mut self, base: PathBuf) {
+    /// What the export cuts: the Export window's choices, with the project's bleed.
+    fn cuts(&self) -> render::Cuts {
+        render::Cuts {
+            bleed_mm: self.doc.bleed_mm,
+            ..self.export_settings.cuts
+        }
+    }
+
+    /// What gets exported or printed, with text and shapes drawn for `dpi`.
+    fn output_scene(&self, dpi: f32) -> Scene {
         let colors = self.canvas.element_color.map(|c| [c.r(), c.g(), c.b()]);
-        // Text and shapes are drawn again at the export resolution.
+        // Text and shapes are drawn again at the output resolution.
         let mut doc = self.doc.clone();
-        let dpi = self.export_settings.dpi.clamp(72, 1200) as f32;
         text::prepare_export(&mut doc, dpi);
         shape::prepare_export(&mut doc, dpi);
+        let s = &self.export_settings;
         let scene = Scene::new(
             &doc,
             self.template.as_ref(),
             colors,
-            self.export_settings.print_lines,
-            self.export_settings.cuts,
-        );
-        let settings = self.export_settings.clone();
+            s.print_lines,
+            self.cuts(),
+        )
+        .with_marks(s.crop_marks, s.registration_marks);
+        if s.mirror { scene.mirrored() } else { scene }
+    }
+
+    /// Runs `job` on a background thread, with the progress window.
+    fn start_job(
+        &mut self,
+        prints: bool,
+        job: impl FnOnce(&export::Progress) -> Result<Vec<PathBuf>, String> + Send + 'static,
+    ) {
         self.export_open = false;
+        self.print_open = false;
+        self.job_prints = prints;
         self.export_progress = export::Progress::default();
         self.export_started = Instant::now();
         let progress = self.export_progress.clone();
-        self.export_job = Some(std::thread::spawn(move || {
-            export::run(&scene, &settings, &base, &progress)
-        }));
+        self.export_job = Some(std::thread::spawn(move || job(&progress)));
+    }
+
+    /// Renders and writes the export on a background thread.
+    fn start_export(&mut self, base: PathBuf) {
+        let scene = self.output_scene(self.export_settings.dpi.clamp(72, 1200) as f32);
+        let settings = self.export_settings.clone();
+        self.start_job(false, move |progress| {
+            export::run(&scene, &settings, &base, progress)
+        });
+    }
+
+    /// Opens the system print dialog over the app's window, then prints in the
+    /// background.
+    #[cfg(windows)]
+    fn choose_printer(&mut self, frame: &eframe::Frame) {
+        use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+        let owner = frame.window_handle().ok().and_then(|h| match h.as_raw() {
+            RawWindowHandle::Win32(w) => Some(w.hwnd.get()),
+            _ => None,
+        });
+        let paper = crate::printing::Paper::of(&self.doc, &self.export_settings);
+        match crate::printing::choose(owner, &paper) {
+            Ok(Some(printer)) => {
+                let scene = self.output_scene(crate::printing::MAX_PRINT_DPI);
+                let settings = self.export_settings.clone();
+                let title = self.project_name();
+                self.start_job(true, move |progress| {
+                    crate::printing::print(printer, &scene, &settings, &title, None, progress)
+                        .map(|()| Vec::new())
+                });
+            }
+            Ok(None) => {}
+            Err(e) => self.messages.push(e),
+        }
+    }
+
+    /// Prints through CUPS in the background.
+    #[cfg(not(windows))]
+    fn start_print(&mut self) {
+        let (printer, copies) = self.print_to.clone();
+        let paper = crate::printing::Paper::of(&self.doc, &self.export_settings);
+        let scene = self.output_scene(self.export_settings.dpi.clamp(72, 1200) as f32);
+        let settings = self.export_settings.clone();
+        let title = self.project_name();
+        self.start_job(true, move |progress| {
+            crate::printing::print(
+                &printer, copies, &paper, &scene, &settings, &title, progress,
+            )
+            .map(|()| Vec::new())
+        });
     }
 
     /// Reports a failed or canceled export once its thread has finished.
@@ -799,9 +939,12 @@ impl ArtworkApp {
         match result {
             // Success is silent: the progress window closing is enough.
             Some(Ok(Ok(paths))) => log::info!("exported {paths:?}"),
-            Some(Ok(Err(e))) if e == render::CANCELED => {
-                self.messages.push(tr!("EXPORT_CANCELED").into())
-            }
+            Some(Ok(Err(e))) if e == render::CANCELED => self.messages.push(if self.job_prints {
+                tr!("PRINT_CANCELED").into()
+            } else {
+                tr!("EXPORT_CANCELED").into()
+            }),
+            Some(Ok(Err(e))) if self.job_prints => self.messages.push(tr!("PRINT_FAILED", e = e)),
             Some(Ok(Err(e))) => self.messages.push(tr!("EXPORT_FAILED", e = e)),
             Some(Err(_)) => self.messages.push(tr!("EXPORT_FAILED_UNEXPECTEDLY").into()),
             None => {}
@@ -870,7 +1013,10 @@ impl ArtworkApp {
                 }
                 ui.separator();
                 if item(ui, tr!("EXPORT"), Some(&SHORTCUT_EXPORT)) {
-                    self.export_open = true;
+                    self.open_export();
+                }
+                if item(ui, tr!("PRINT"), Some(&SHORTCUT_PRINT)) {
+                    self.open_print();
                 }
                 ui.separator();
                 if item(ui, tr!("QUIT"), None) {
@@ -965,14 +1111,51 @@ impl ArtworkApp {
         ui.separator();
         ui.heading(tr!("PAGE_SECTION"));
         let before = (self.doc.page, self.doc.orientation);
+        let custom = self.doc.custom_page_mm;
         egui::ComboBox::from_id_salt("page")
             .width(ui.available_width())
-            .selected_text(self.doc.page.label())
+            .selected_text(self.doc.page.label(custom))
             .show_ui(ui, |ui| {
                 for p in PageSize::ALL {
-                    ui.selectable_value(&mut self.doc.page, p, p.label());
+                    ui.selectable_value(&mut self.doc.page, p, p.label(custom));
                 }
             });
+        if self.doc.page == PageSize::Custom {
+            if before.0 != PageSize::Custom
+                && let Some(size) = before.0.portrait_mm()
+            {
+                // Starts from the size picked before, to adjust from there.
+                self.doc.custom_page_mm = size;
+            }
+            // Width and height as the page shows them, orientation applied.
+            let [mut w, mut h] = self.doc.page_mm();
+            let changed = ui
+                .horizontal(|ui| {
+                    let field = |ui: &mut egui::Ui, v: &mut f32, prefix: &str| {
+                        ui.add(
+                            egui::DragValue::new(v)
+                                .range(document::CUSTOM_PAGE_RANGE_MM)
+                                .speed(1.0)
+                                .fixed_decimals(1)
+                                .prefix(prefix)
+                                .suffix(" mm"),
+                        )
+                        .changed()
+                    };
+                    let a = field(ui, &mut w, tr!("PAGE_CUSTOM_WIDTH"));
+                    let b = field(ui, &mut h, tr!("PAGE_CUSTOM_HEIGHT"));
+                    a || b
+                })
+                .inner;
+            if changed {
+                self.doc.custom_page_mm = match self.doc.orientation {
+                    Orientation::Portrait => [w, h],
+                    Orientation::Landscape => [h, w],
+                };
+                self.canvas.fit_pending = true;
+                self.dirty = true;
+            }
+        }
         ui.horizontal(|ui| {
             ui.radio_value(
                 &mut self.doc.orientation,
@@ -1058,6 +1241,30 @@ impl ArtworkApp {
         });
         if ui.small_button(tr!("CENTER_TEMPLATE_ON_PAGE")).clicked() {
             p.offset_mm = [0.0, 0.0];
+        }
+
+        ui.add_space(4.0);
+        let margins = (self.doc.bleed_mm, self.doc.safe_margin_mm);
+        egui::Grid::new("print-margins").show(ui, |ui| {
+            fn mm(v: &mut f32) -> egui::DragValue<'_> {
+                egui::DragValue::new(v)
+                    .range(0.0..=crate::print::MAX_MARGIN_MM)
+                    .speed(0.1)
+                    .fixed_decimals(1)
+                    .suffix(" mm")
+            }
+            ui.label(tr!("BLEED")).on_hover_text(tr!("BLEED_HINT"));
+            ui.add(mm(&mut self.doc.bleed_mm))
+                .on_hover_text(tr!("BLEED_HINT"));
+            ui.end_row();
+            ui.label(tr!("SAFE_MARGIN"))
+                .on_hover_text(tr!("SAFE_MARGIN_HINT"));
+            ui.add(mm(&mut self.doc.safe_margin_mm))
+                .on_hover_text(tr!("SAFE_MARGIN_HINT"));
+            ui.end_row();
+        });
+        if margins != (self.doc.bleed_mm, self.doc.safe_margin_mm) {
+            self.dirty = true;
         }
 
         ui.add_space(4.0);
@@ -1232,7 +1439,9 @@ impl ArtworkApp {
         serde_json::to_string(&self.doc)
             .unwrap_or_default()
             .hash(&mut h);
-        (colors, s.print_lines, s.cuts, &self.template_stamp).hash(&mut h);
+        let cuts = self.cuts();
+        (colors, s.print_lines, cuts, &self.template_stamp).hash(&mut h);
+        (s.crop_marks, s.registration_marks, s.mirror).hash(&mut h);
         // Images loaded or reloaded change the pixels, not the saved project.
         for leaf in self.doc.leaves() {
             leaf.layer.shown_preview().map(Arc::as_ptr).hash(&mut h);
@@ -1246,8 +1455,10 @@ impl ArtworkApp {
             self.template.as_ref(),
             colors,
             s.print_lines,
-            s.cuts,
-        );
+            cuts,
+        )
+        .with_marks(s.crop_marks, s.registration_marks);
+        let scene = if s.mirror { scene.mirrored() } else { scene };
         let [pw, ph] = self.doc.page_mm();
         // Rendered at twice the shown width, for high-DPI screens.
         let dpi = EXPORT_PREVIEW_WIDTH * 2.0 / (pw.max(ph) / 25.4);
@@ -1277,9 +1488,13 @@ impl ArtworkApp {
         }
         let (fraction, stage) = self.export_progress.get();
         let canceling = self.export_progress.is_canceled();
-        egui::Modal::new(egui::Id::unique("export-progress")).show(ctx, |ui| {
+        dialog(ctx, "export-progress").show(ctx, |ui| {
             ui.set_width(320.0);
-            ui.heading(tr!("EXPORT_PROGRESS_TITLE"));
+            ui.heading(if self.job_prints {
+                tr!("PRINT_PROGRESS_TITLE")
+            } else {
+                tr!("EXPORT_PROGRESS_TITLE")
+            });
             ui.add_space(4.0);
             ui.label(if canceling {
                 tr!("EXPORT_CANCELING")
@@ -1309,113 +1524,336 @@ impl ArtworkApp {
         });
     }
 
+    /// The export preview, with the sheets over it when the page is split; they are
+    /// dragged on it to move them. Shared by the Export and Print windows.
+    fn output_preview(&mut self, ui: &mut egui::Ui) {
+        let Some((tex, size)) = self
+            .export_preview
+            .as_ref()
+            .map(|(_, t)| (t.id(), t.size_vec2()))
+        else {
+            return;
+        };
+        let page_mm = self.doc.page_mm();
+        let tiling = self.export_settings.tiling();
+        let size = size * (EXPORT_PREVIEW_WIDTH / size.x);
+        ui.vertical(|ui| {
+            // When tiled, the sheets are dragged around on the preview.
+            let sense = if tiling.is_some() {
+                egui::Sense::drag()
+            } else {
+                egui::Sense::hover()
+            };
+            let image = egui::Frame::new()
+                .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+                .show(ui, |ui| ui.add(egui::Image::new((tex, size)).sense(sense)))
+                .inner;
+            let shown = image.rect;
+            if let Some(t) = tiling {
+                let k = shown.width() / page_mm[0];
+                let offset = &mut self.export_settings.tile_offset_mm;
+                if image.dragged() {
+                    let d = image.drag_delta() / k;
+                    *offset = [offset[0] + d.x, offset[1] + d.y];
+                }
+                image
+                    .on_hover_cursor(egui::CursorIcon::Grab)
+                    .on_hover_text(tr!("EXPORT_TILE_DRAG_HINT"));
+                // Each sheet's artwork, where the overlaps show as
+                // bands between double lines.
+                let [cw, ch] = t.content_mm();
+                let painter = ui.painter_at(shown);
+                for tile in t.tiles(page_mm) {
+                    let [x, y] = tile.origin_mm;
+                    let r = egui::Rect::from_min_size(
+                        shown.min + egui::vec2(x * k, y * k),
+                        egui::vec2(cw * k, ch * k),
+                    );
+                    painter.rect_stroke(
+                        r,
+                        0.0,
+                        egui::Stroke::new(1.5, TILE_COLOR),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+            }
+            ui.weak(tr!("EXPORT_PREVIEW"));
+        });
+        ui.add_space(8.0);
+    }
+
+    /// The export settings, shared by the Export and Print windows; `printing` leaves
+    /// out what only applies to files.
+    fn output_settings(&mut self, ui: &mut egui::Ui, printing: bool) {
+        let page_mm = self.doc.page_mm();
+        let s = &mut self.export_settings;
+        if !printing {
+            ui.horizontal(|ui| {
+                ui.label(tr!("EXPORT_FORMATS"));
+                ui.checkbox(&mut s.png, "PNG");
+                ui.checkbox(&mut s.pdf, "PDF");
+            });
+        }
+        // A printer on Windows takes its own resolution.
+        if !printing || cfg!(not(windows)) {
+            ui.horizontal(|ui| {
+                ui.label(tr!("EXPORT_RESOLUTION"));
+                ui.add(
+                    egui::DragValue::new(&mut s.dpi)
+                        .range(72..=1200)
+                        .suffix(" DPI"),
+                );
+            });
+        }
+        ui.horizontal(|ui| {
+            ui.label(tr!("EXPORT_MIN_IMAGE_DPI"))
+                .on_hover_text(tr!("EXPORT_MIN_IMAGE_DPI_HINT"));
+            ui.add(
+                egui::DragValue::new(&mut s.min_image_dpi)
+                    .range(0..=1200)
+                    .suffix(" DPI"),
+            )
+            .on_hover_text(tr!("EXPORT_MIN_IMAGE_DPI_HINT"));
+        });
+        let low = self.doc.low_resolution(s.min_image_dpi as f32);
+        if !low.is_empty() {
+            let names: Vec<String> = low
+                .iter()
+                .map(|(l, dpi)| format!("{} ({dpi:.0} DPI)", l.name))
+                .collect();
+            ui.colored_label(
+                ui.visuals().warn_fg_color,
+                format!("⚠ {}", tr_n!("EXPORT_LOW_RESOLUTION", low.len())),
+            )
+            .on_hover_text(names.join("\n"));
+        }
+        ui.checkbox(&mut s.mirror, tr!("EXPORT_MIRROR"))
+            .on_hover_text(tr!("EXPORT_MIRROR_HINT"));
+        let template = self.template.as_ref();
+        let has = |k: ElementKind| template.is_some_and(|t| t.has(k));
+        if let Some(template) = template {
+            ui.add_space(4.0);
+            ui.strong(tr!("EXPORT_TEMPLATE_SECTION"));
+            ui.horizontal(|ui| {
+                ui.label(tr!("EXPORT_PRINT_LINES"));
+                for k in ElementKind::ALL.into_iter().filter(|&k| has(k)) {
+                    ui.checkbox(&mut s.print_lines[k.index()], translate(k.label()));
+                }
+            });
+            ui.add_enabled(
+                has(ElementKind::Outline),
+                egui::Checkbox::new(
+                    &mut s.cuts.clip_to_outline,
+                    tr!("EXPORT_BLANK_OUTSIDE_OUTLINE"),
+                ),
+            );
+            if has(ElementKind::Buttons) || has(ElementKind::Cutouts) {
+                ui.horizontal(|ui| {
+                    ui.label(tr!("EXPORT_BLANK_INSIDE"));
+                    if has(ElementKind::Buttons) {
+                        ui.checkbox(
+                            &mut s.cuts.blank_buttons,
+                            tr!("EXPORT_BLANK_INSIDE_BUTTONS"),
+                        );
+                    }
+                    if has(ElementKind::Cutouts) {
+                        ui.checkbox(
+                            &mut s.cuts.blank_cutouts,
+                            tr!("EXPORT_BLANK_INSIDE_CUTOUTS"),
+                        );
+                    }
+                });
+            }
+            if self.doc.bleed_mm > 0.0 {
+                ui.weak(tr!(
+                    "EXPORT_BLEED",
+                    mm = format!("{:.1}", self.doc.bleed_mm)
+                ));
+            }
+            let outline = has(ElementKind::Outline);
+            ui.add_enabled_ui(outline, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(tr!("EXPORT_MARKS"));
+                    ui.checkbox(&mut s.crop_marks, tr!("EXPORT_CROP_MARKS"))
+                        .on_hover_text(tr!("EXPORT_CROP_MARKS_HINT"));
+                    ui.checkbox(&mut s.registration_marks, tr!("EXPORT_REGISTRATION_MARKS"))
+                        .on_hover_text(tr!("EXPORT_REGISTRATION_MARKS_HINT"));
+                });
+            });
+            if outline && (s.crop_marks || s.registration_marks) {
+                let elements = render::placed_elements(&self.doc, template);
+                let marks = render::trim_box(elements.iter()).map(|trim| {
+                    let mut marks = crate::print::marks(
+                        trim,
+                        self.doc.bleed_mm,
+                        s.crop_marks,
+                        s.registration_marks,
+                    );
+                    // Where they print: the sheets lie over the
+                    // mirrored page.
+                    if s.mirror {
+                        for p in marks.iter_mut().flat_map(|m| &mut m.points) {
+                            p[0] = page_mm[0] - p[0];
+                        }
+                    }
+                    marks
+                });
+                // What gets printed: the page, or when split, the
+                // sheets' artwork, which may reach past the page.
+                let (lo, hi) = match s.tiling() {
+                    Some(t) => t.covered(page_mm),
+                    None => ([0.0, 0.0], page_mm),
+                };
+                let off = marks
+                    .as_ref()
+                    .and_then(crate::print::bounds)
+                    .is_some_and(|(mn, mx)| {
+                        mn[0] < lo[0] || mn[1] < lo[1] || mx[0] > hi[0] || mx[1] > hi[1]
+                    });
+                if off {
+                    ui.colored_label(
+                        ui.visuals().warn_fg_color,
+                        if s.tile {
+                            tr!("EXPORT_MARKS_OFF_SHEETS")
+                        } else {
+                            tr!("EXPORT_MARKS_OFF_PAGE")
+                        },
+                    );
+                }
+            }
+            ui.add_space(4.0);
+        }
+        ui.add_space(4.0);
+        ui.checkbox(&mut s.tile, tr!("EXPORT_TILE"))
+            .on_hover_text(tr!("EXPORT_TILE_HINT"));
+        if s.tile {
+            egui::Grid::new("tiling").show(ui, |ui| {
+                ui.label(tr!("EXPORT_SHEET"));
+                ui.horizontal(|ui| {
+                    egui::ComboBox::from_id_salt("sheet")
+                        .selected_text(s.sheet.label([0.0; 2]))
+                        .show_ui(ui, |ui| {
+                            for p in PageSize::ALL
+                                .into_iter()
+                                .filter(|p| p.portrait_mm().is_some())
+                            {
+                                ui.selectable_value(&mut s.sheet, p, p.label([0.0; 2]));
+                            }
+                        });
+                    ui.radio_value(
+                        &mut s.sheet_orientation,
+                        Orientation::Portrait,
+                        tr!("PAGE_PORTRAIT"),
+                    );
+                    ui.radio_value(
+                        &mut s.sheet_orientation,
+                        Orientation::Landscape,
+                        tr!("PAGE_LANDSCAPE"),
+                    );
+                });
+                ui.end_row();
+                fn mm(v: &mut f32) -> egui::DragValue<'_> {
+                    egui::DragValue::new(v)
+                        .range(0.0..=50.0)
+                        .speed(0.2)
+                        .fixed_decimals(1)
+                        .suffix(" mm")
+                }
+                ui.label(tr!("EXPORT_SHEET_MARGIN"))
+                    .on_hover_text(tr!("EXPORT_SHEET_MARGIN_HINT"));
+                ui.add(mm(&mut s.sheet_margin_mm))
+                    .on_hover_text(tr!("EXPORT_SHEET_MARGIN_HINT"));
+                ui.end_row();
+                ui.label(tr!("EXPORT_TILE_OVERLAP"))
+                    .on_hover_text(tr!("EXPORT_TILE_OVERLAP_HINT"));
+                ui.add(mm(&mut s.tile_overlap_mm))
+                    .on_hover_text(tr!("EXPORT_TILE_OVERLAP_HINT"));
+                ui.end_row();
+                ui.label(tr!("EXPORT_TILE_POSITION"))
+                    .on_hover_text(tr!("EXPORT_TILE_POSITION_HINT"));
+                ui.horizontal(|ui| {
+                    for (v, prefix) in s.tile_offset_mm.iter_mut().zip(["x ", "y "]) {
+                        ui.add(
+                            egui::DragValue::new(v)
+                                .speed(0.5)
+                                .fixed_decimals(1)
+                                .prefix(prefix)
+                                .suffix(" mm"),
+                        )
+                        .on_hover_text(tr!("EXPORT_TILE_POSITION_HINT"));
+                    }
+                    if ui
+                        .add_enabled(
+                            s.tile_offset_mm != [0.0, 0.0],
+                            egui::Button::new(tr!("EXPORT_TILE_CENTER")).small(),
+                        )
+                        .clicked()
+                    {
+                        s.tile_offset_mm = [0.0, 0.0];
+                    }
+                });
+                ui.end_row();
+            });
+            ui.checkbox(&mut s.tile_marks, tr!("EXPORT_TILE_MARKS"))
+                .on_hover_text(tr!("EXPORT_TILE_MARKS_HINT"));
+        }
+    }
+
     /// Export options; the Export button opens the save dialog.
     fn export_window(&mut self, ctx: &egui::Context) {
         if !self.export_open {
-            // Free the preview texture while the window is closed.
-            self.export_preview = None;
             return;
         }
-        self.update_export_preview(ctx);
-        let preview = self
-            .export_preview
-            .as_ref()
-            .map(|(_, t)| (t.id(), t.size_vec2()));
+        let page_mm = self.doc.page_mm();
         let mut open = self.export_open;
         let mut go = false;
+        let mut close = false;
         egui::Window::new(tr!("EXPORT_WINDOW_TITLE"))
             .open(&mut open)
             .collapsible(false)
             .resizable(false)
             .show(ctx, |ui| {
-                ui.horizontal_top(|ui| {
-                    if let Some((tex, size)) = preview {
-                        let size = size * (EXPORT_PREVIEW_WIDTH / size.x);
-                        ui.vertical(|ui| {
-                            egui::Frame::new()
-                                .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
-                                .show(ui, |ui| ui.image((tex, size)));
-                            ui.weak(tr!("EXPORT_PREVIEW"));
-                        });
+                padded(ui, |ui| {
+                    ui.horizontal_top(|ui| {
+                        self.output_preview(ui);
                         ui.add_space(8.0);
-                    }
-                    ui.vertical(|ui| {
-                        // At least wide enough that the checkbox labels don't wrap; rows
-                        // that need more widen the column.
-                        ui.set_min_width(250.0);
-                        let s = &mut self.export_settings;
-                        ui.horizontal(|ui| {
-                            ui.label(tr!("EXPORT_FORMATS"));
-                            ui.checkbox(&mut s.png, "PNG");
-                            ui.checkbox(&mut s.pdf, "PDF");
-                        });
-                        ui.horizontal(|ui| {
-                            ui.label(tr!("EXPORT_RESOLUTION"));
-                            ui.add(
-                                egui::DragValue::new(&mut s.dpi)
-                                    .range(72..=1200)
-                                    .suffix(" DPI"),
-                            );
-                        });
-                        let template = self.template.as_ref();
-                        let has = |k: ElementKind| template.is_some_and(|t| t.has(k));
-                        if template.is_some() {
-                            ui.add_space(4.0);
-                            ui.strong(tr!("EXPORT_TEMPLATE_SECTION"));
-                            ui.horizontal(|ui| {
-                                ui.label(tr!("EXPORT_PRINT_LINES"));
-                                for k in ElementKind::ALL.into_iter().filter(|&k| has(k)) {
-                                    ui.checkbox(
-                                        &mut s.print_lines[k.index()],
-                                        translate(k.label()),
-                                    );
-                                }
-                            });
-                            ui.add_enabled(
-                                has(ElementKind::Outline),
-                                egui::Checkbox::new(
-                                    &mut s.cuts.clip_to_outline,
-                                    tr!("EXPORT_BLANK_OUTSIDE_OUTLINE"),
-                                ),
-                            );
-                            if has(ElementKind::Buttons) || has(ElementKind::Cutouts) {
-                                ui.horizontal(|ui| {
-                                    ui.label(tr!("EXPORT_BLANK_INSIDE"));
-                                    if has(ElementKind::Buttons) {
-                                        ui.checkbox(
-                                            &mut s.cuts.blank_buttons,
-                                            tr!("EXPORT_BLANK_INSIDE_BUTTONS"),
-                                        );
-                                    }
-                                    if has(ElementKind::Cutouts) {
-                                        ui.checkbox(
-                                            &mut s.cuts.blank_cutouts,
-                                            tr!("EXPORT_BLANK_INSIDE_CUTOUTS"),
-                                        );
-                                    }
-                                });
+                        ui.vertical(|ui| {
+                            // At least wide enough that the checkbox labels don't wrap; rows
+                            // that need more widen the column.
+                            ui.set_min_width(250.0);
+                            self.output_settings(ui, false);
+                            let s = &self.export_settings;
+                            let dpi = s.dpi as f32;
+                            if let Some(t) = s.tiling() {
+                                let [cols, rows] = t.grid(page_mm);
+                                let [w, h] = render::pixel_size(t.sheet_mm, dpi);
+                                ui.weak(tr_n!(
+                                    "EXPORT_SHEET_COUNT",
+                                    cols * rows,
+                                    cols = cols,
+                                    rows = rows,
+                                    w = w,
+                                    h = h
+                                ));
+                            } else {
+                                let [w, h] = render::pixel_size(page_mm, dpi);
+                                ui.weak(tr!(
+                                    "EXPORT_PIXEL_SIZE",
+                                    page = self.doc.page.label(self.doc.custom_page_mm),
+                                    w = w,
+                                    h = h
+                                ));
                             }
-                            ui.add_space(4.0);
-                        }
-                        let [w, h] = render::pixel_size(self.doc.page_mm(), s.dpi as f32);
-                        ui.weak(tr!(
-                            "EXPORT_PIXEL_SIZE",
-                            page = self.doc.page.label(),
-                            w = w,
-                            h = h
-                        ));
-                        ui.add_space(6.0);
-                        let can = (s.png || s.pdf) && self.export_job.is_none();
-                        if ui
-                            .add_enabled(can, egui::Button::new(tr!("START_EXPORT")))
-                            .clicked()
-                        {
-                            go = true;
-                        }
-                    });
+                            ui.add_space(10.0);
+                            let can = (s.png || s.pdf) && self.export_job.is_none();
+                            let (ok, cancel) = dialog_buttons(ui, tr!("START_EXPORT"), can);
+                            go = ok;
+                            close = cancel;
+                        });
+                    })
                 });
             });
-        self.export_open = open;
+        self.export_open = open && !close;
         if go {
             let name = self.project_name();
             self.request_file(
@@ -1432,12 +1870,148 @@ impl ArtworkApp {
         }
     }
 
+    /// Opens the Export window, in place of the Print window: they share their settings.
+    fn open_export(&mut self) {
+        self.export_open = true;
+        self.print_open = false;
+    }
+
+    /// Opens the Print window, in place of the Export window; on Linux, asks CUPS for its
+    /// printers again, in case one was added.
+    fn open_print(&mut self) {
+        self.print_open = true;
+        self.export_open = false;
+        #[cfg(not(windows))]
+        {
+            let printers = crate::printing::printers();
+            if !printers.names.contains(&self.print_to.0) {
+                self.print_to.0 = printers
+                    .default
+                    .clone()
+                    .or_else(|| printers.names.first().cloned())
+                    .unwrap_or_default();
+            }
+            self.printers = Some(printers);
+        }
+    }
+
+    /// What the print will be, and the printer to use where the app picks it. Returns
+    /// whether it can be printed.
+    fn print_controls(&mut self, ui: &mut egui::Ui) -> bool {
+        let s = &self.export_settings;
+        let paper = crate::printing::Paper::of(&self.doc, s);
+        let paper_name = match paper.preset {
+            Some(p) => p.label([0.0; 2]),
+            None => format!("{:.0} x {:.0} mm", paper.size_mm[0], paper.size_mm[1]),
+        };
+        let orientation = match paper.orientation() {
+            Orientation::Landscape => tr!("PAGE_LANDSCAPE"),
+            Orientation::Portrait => tr!("PAGE_PORTRAIT"),
+        };
+        match s.tiling() {
+            Some(t) => {
+                let [cols, rows] = t.grid(self.doc.page_mm());
+                ui.label(tr_n!(
+                    "PRINT_SHEETS",
+                    cols * rows,
+                    cols = cols,
+                    rows = rows,
+                    paper = paper_name,
+                    orientation = orientation
+                ));
+            }
+            None => {
+                ui.label(tr!(
+                    "PRINT_PAGE",
+                    paper = paper_name,
+                    orientation = orientation
+                ));
+            }
+        }
+        ui.add_space(4.0);
+        #[cfg(not(windows))]
+        {
+            let printers = self.printers.clone().unwrap_or_default();
+            if printers.names.is_empty() {
+                ui.colored_label(ui.visuals().warn_fg_color, tr!("PRINT_NO_PRINTERS"));
+            } else {
+                egui::Grid::new("print-to").show(ui, |ui| {
+                    ui.label(tr!("PRINT_PRINTER"));
+                    egui::ComboBox::from_id_salt("printer")
+                        .selected_text(self.print_to.0.as_str())
+                        .show_ui(ui, |ui| {
+                            for name in &printers.names {
+                                ui.selectable_value(
+                                    &mut self.print_to.0,
+                                    name.clone(),
+                                    name.as_str(),
+                                );
+                            }
+                        });
+                    ui.end_row();
+                    ui.label(tr!("PRINT_COPIES"));
+                    ui.add(egui::DragValue::new(&mut self.print_to.1).range(1..=99));
+                    ui.end_row();
+                });
+            }
+            !self.print_to.0.is_empty() && self.export_job.is_none()
+        }
+        #[cfg(windows)]
+        {
+            ui.weak(tr!("PRINT_SYSTEM_DIALOG_HINT"));
+            self.export_job.is_none()
+        }
+    }
+
+    /// The Print window: the preview and the export settings, as in the Export window,
+    /// then what will be printed and where.
+    fn print_window(&mut self, ctx: &egui::Context) {
+        if !self.print_open {
+            return;
+        }
+        let mut open = true;
+        let mut go = false;
+        let mut close = false;
+        egui::Window::new(tr!("PRINT_WINDOW_TITLE"))
+            .open(&mut open)
+            .collapsible(false)
+            .resizable(false)
+            .show(ctx, |ui| {
+                padded(ui, |ui| {
+                    ui.horizontal_top(|ui| {
+                        self.output_preview(ui);
+                        ui.add_space(8.0);
+                        ui.vertical(|ui| {
+                            ui.set_min_width(250.0);
+                            self.output_settings(ui, true);
+                            ui.weak(tr!("PRINT_SETTINGS_SHARED"));
+                            ui.add_space(6.0);
+                            let can = self.print_controls(ui);
+                            ui.add_space(10.0);
+                            let (ok, cancel) = dialog_buttons(ui, tr!("START_PRINT"), can);
+                            go = ok;
+                            close = cancel;
+                        });
+                    })
+                });
+            });
+        self.print_open = open && !close;
+        if go {
+            #[cfg(windows)]
+            {
+                self.print_pending = true;
+            }
+            #[cfg(not(windows))]
+            self.start_print();
+        }
+    }
+
     /// Shows queued messages (errors, a canceled export) one at a time.
     fn message_modal(&mut self, ctx: &egui::Context) {
         let Some(msg) = self.messages.first().cloned() else {
             return;
         };
-        let response = egui::Modal::new(egui::Id::unique("message")).show(ctx, |ui| {
+        let response = dialog(ctx, "message").show(ctx, |ui| {
             ui.set_max_width(420.0);
             ui.label(msg);
             ui.add_space(8.0);
@@ -1461,7 +2035,10 @@ impl ArtworkApp {
             self.save_project(ctx, false);
         }
         if pressed(&SHORTCUT_EXPORT) {
-            self.export_open = true;
+            self.open_export();
+        }
+        if pressed(&SHORTCUT_PRINT) {
+            self.open_print();
         }
         if ctx.egui_wants_keyboard_input() {
             return;
@@ -1547,7 +2124,7 @@ impl ArtworkApp {
     fn close_modal(&mut self, ctx: &egui::Context) {
         if self.confirm_close {
             let (mut save, mut discard, mut cancel) = (false, false, false);
-            let response = egui::Modal::new(egui::Id::unique("confirm_close")).show(ctx, |ui| {
+            let response = dialog(ctx, "confirm_close").show(ctx, |ui| {
                 ui.set_max_width(420.0);
                 ui.strong(tr!(
                     "CONFIRM_SAVE_BEFORE_CLOSING",
@@ -1605,7 +2182,13 @@ impl eframe::App for ArtworkApp {
 
     /// One frame: input, panels, canvas and dialogs, then an undo step if the project
     /// changed.
-    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, frame: &mut eframe::Frame) {
+        #[cfg(windows)]
+        if std::mem::take(&mut self.print_pending) {
+            self.choose_printer(frame);
+        }
+        #[cfg(not(windows))]
+        let _ = frame;
         let ctx = ui.ctx().clone();
 
         let dropped: Vec<PathBuf> = ctx.input(|i| {
@@ -1670,7 +2253,9 @@ impl eframe::App for ArtworkApp {
         // Settings may have moved the template this frame.
         let elements = self.elements();
         self.canvas.distort_mode = self.layers_panel.distort;
-        self.canvas.cuts = self.export_settings.cuts;
+        self.layers_panel.min_dpi = self.export_settings.min_image_dpi as f32;
+        self.canvas.cuts = self.cuts();
+        self.canvas.safe_margin_mm = self.doc.safe_margin_mm;
         // Edit points is turned on and off in Properties as well as on the canvas.
         let panel_points = self.layers_panel.edit_points;
         if panel_points != self.canvas.points.as_ref().map(|e| e.layer) {
@@ -1687,7 +2272,14 @@ impl eframe::App for ArtworkApp {
         });
         self.layers_panel.edit_points = self.canvas.points.as_ref().map(|e| e.layer);
 
+        // The preview both windows show, freed while neither is open.
+        if self.export_open || self.print_open {
+            self.update_export_preview(&ctx);
+        } else {
+            self.export_preview = None;
+        }
         self.export_window(&ctx);
+        self.print_window(&ctx);
         self.export_progress_window(&ctx);
         if let Some((purpose, paths)) = self.browser.show(&ctx) {
             self.on_files(&ctx, purpose, paths, false);
@@ -1704,7 +2296,7 @@ impl eframe::App for ArtworkApp {
         // Texts following a shape edited on the canvas go with it in the same step.
         text::sync(&ctx, &mut self.doc, &self.fonts);
         self.history.update(&self.doc, finished);
-        self.dirty = self.history.is_modified();
+        self.dirty = self.is_modified();
         self.update_title(&ctx);
     }
 }
@@ -1712,6 +2304,49 @@ impl eframe::App for ArtworkApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn dialog_buttons_sit_right_without_widening_the_window() {
+        let ctx = egui::Context::default();
+        let mut found = Vec::new();
+        for _ in 0..4 {
+            let mut window = egui::Rect::NOTHING;
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let shown = egui::Window::new("w")
+                    .resizable(false)
+                    .show(ui.ctx(), |ui| {
+                        padded(ui, |ui| {
+                            ui.vertical(|ui| {
+                                ui.set_min_width(250.0);
+                                ui.label("A row of settings, longer than the minimum width");
+                                ui.add_space(10.0);
+                                dialog_buttons(ui, "Export…", true);
+                            })
+                        })
+                    });
+                window = shown.unwrap().response.rect;
+            });
+            out.textures_delta.clear();
+            // Where the button texts were drawn: Cancel then Export, at the right edge.
+            let mut texts: Vec<(String, f32)> = Vec::new();
+            for clipped in &out.shapes {
+                if let egui::Shape::Text(t) = &clipped.shape {
+                    texts.push((t.galley.text().to_owned(), t.pos.x + t.galley.size().x));
+                }
+            }
+            found.push((window.width(), texts));
+        }
+        let (width, texts) = found.last().unwrap();
+        assert_eq!(found[1].0, *width, "the window keeps its width");
+        let x = |name: &str| texts.iter().find(|(t, _)| t == name).unwrap().1;
+        assert!(x("Cancel") < x("Export…"));
+        let content_right = texts
+            .iter()
+            .find(|(t, _)| t.starts_with("A row"))
+            .unwrap()
+            .1;
+        assert!((x("Export…") - content_right).abs() < 12.0, "{texts:?}");
+    }
 
     #[test]
     fn project_save_path_adds_archive_extension() {

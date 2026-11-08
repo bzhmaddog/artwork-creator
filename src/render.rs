@@ -10,6 +10,7 @@ use tiny_skia::{
 use crate::document::{Affine, Document, Homography, Node, P2};
 use crate::effects::{self, EffectInstance};
 use crate::i18n::tr;
+use crate::print;
 use crate::template::{ElementKind, KINDS, Polyline, Template};
 use crate::text;
 
@@ -185,7 +186,8 @@ impl PlacedElement {
 }
 
 /// How the template cuts the artwork.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
 pub struct Cuts {
     /// Nothing outside the outline is printed.
     pub clip_to_outline: bool,
@@ -193,6 +195,18 @@ pub struct Cuts {
     pub blank_buttons: bool,
     /// Nothing is printed inside cutouts.
     pub blank_cutouts: bool,
+    /// The artwork goes this far past the cut lines, in mm, so a cut slightly off the
+    /// line leaves no blank edge: the outline grows by it and the holes shrink by it.
+    /// Set from the project's bleed, so not saved with the export settings.
+    #[serde(skip)]
+    pub bleed_mm: f32,
+}
+
+impl std::hash::Hash for Cuts {
+    fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
+        (self.clip_to_outline, self.blank_buttons, self.blank_cutouts).hash(h);
+        self.bleed_mm.to_bits().hash(h);
+    }
 }
 
 impl Cuts {
@@ -212,6 +226,7 @@ impl Default for Cuts {
             clip_to_outline: true,
             blank_buttons: true,
             blank_cutouts: true,
+            bleed_mm: 0.0,
         }
     }
 }
@@ -238,6 +253,8 @@ pub struct Scene {
     pub elements: Vec<SceneElement>,
     /// What the template cuts away.
     pub cuts: Cuts,
+    /// Crop and registration marks in page mm, printed in `print::MARK_COLOR`.
+    pub marks: Vec<Polyline>,
 }
 
 impl Scene {
@@ -293,8 +310,69 @@ impl Scene {
             layers: scene_nodes(&doc.layers, preview),
             elements,
             cuts,
+            marks: Vec::new(),
         }
     }
+
+    /// Adds crop and / or registration marks around the outline, outside the bleed. Does
+    /// nothing without an outline.
+    pub fn with_marks(mut self, crop: bool, registration: bool) -> Self {
+        self.marks = trim_box(self.elements.iter().map(|e| &e.placed))
+            .map(|trim| print::marks(trim, self.cuts.bleed_mm, crop, registration))
+            .unwrap_or_default();
+        self
+    }
+}
+
+impl Scene {
+    /// The page mirrored left to right, everything on it included (layers, template
+    /// lines, cuts and marks): for printing on the back of a clear sheet, to be seen
+    /// through it.
+    pub fn mirrored(mut self) -> Self {
+        let m = Affine::scale(-1.0, 1.0).then(Affine::translate(self.page_mm[0], 0.0));
+        mirror_nodes(&mut self.layers, m);
+        let flip = |p: &mut P2| *p = m.apply(*p);
+        for e in &mut self.elements {
+            e.placed
+                .polylines
+                .iter_mut()
+                .flat_map(|p| &mut p.points)
+                .for_each(flip);
+            e.placed.anchors.iter_mut().for_each(flip);
+        }
+        self.marks
+            .iter_mut()
+            .flat_map(|p| &mut p.points)
+            .for_each(flip);
+        self
+    }
+}
+
+/// Maps every layer of `nodes`, and its vector shapes, through `m` after its own map.
+fn mirror_nodes(nodes: &mut [SceneNode], m: Affine) {
+    for node in nodes {
+        match node {
+            SceneNode::Image(l) => {
+                l.map = l.map.then_affine(m);
+                if let Some(v) = &l.vector {
+                    l.vector = Some(Arc::new(Outlines {
+                        fills: v.fills.clone(),
+                        map: v.map.then_affine(m),
+                    }));
+                }
+            }
+            SceneNode::Group { children, .. } => mirror_nodes(children, m),
+        }
+    }
+}
+
+/// The box around the template's outline, where the print is trimmed: corners in mm.
+pub fn trim_box<'a>(elements: impl Iterator<Item = &'a PlacedElement>) -> Option<(P2, P2)> {
+    print::bounds(
+        elements
+            .filter(|e| e.kind == ElementKind::Outline)
+            .flat_map(|e| &e.polylines),
+    )
 }
 
 /// Template elements mapped onto the page, in mm.
@@ -318,14 +396,11 @@ pub fn placed_elements(doc: &Document, template: &Template) -> Vec<PlacedElement
         .collect()
 }
 
-/// Closed polylines as one path, mapped by `to_px`.
-fn closed_path<'a>(
-    polylines: impl Iterator<Item = &'a Polyline>,
-    to_px: Affine,
-) -> Option<tiny_skia::Path> {
+/// Closed rings as one path, mapped by `to_px`.
+fn closed_path(rings: &[Vec<P2>], to_px: Affine) -> Option<tiny_skia::Path> {
     let mut pb = PathBuilder::new();
-    for poly in polylines.filter(|p| p.closed && p.points.len() > 2) {
-        let mut pts = poly.points.iter().map(|&p| to_px.apply(p));
+    for ring in rings.iter().filter(|r| r.len() > 2) {
+        let mut pts = ring.iter().map(|&p| to_px.apply(p));
         let Some(first) = pts.next() else { continue };
         pb.move_to(first[0], first[1]);
         for p in pts {
@@ -334,6 +409,30 @@ fn closed_path<'a>(
         pb.close();
     }
     pb.finish()
+}
+
+/// What the template cuts away, as closed shapes in page mm filled under the non-zero
+/// rule: the outline that clips, grown by the bleed (`None` if nothing is clipped), and
+/// the holes left blank, shrunk by it. An outline without closed paths clips nothing.
+pub fn cut_rings(elements: &[PlacedElement], cuts: Cuts) -> (Option<Vec<Vec<P2>>>, Vec<Vec<P2>>) {
+    let rings = |keep: &dyn Fn(ElementKind) -> bool| -> Vec<Vec<P2>> {
+        elements
+            .iter()
+            .filter(|e| keep(e.kind))
+            .flat_map(|e| &e.polylines)
+            .filter(|p| p.closed && p.points.len() > 2)
+            .map(|p| p.points.clone())
+            .collect()
+    };
+    let outline = if cuts.clip_to_outline {
+        Some(rings(&|k| k == ElementKind::Outline))
+            .filter(|r| !r.is_empty())
+            .map(|r| print::offset(&r, cuts.bleed_mm))
+    } else {
+        None
+    };
+    let holes = print::offset(&rings(&|k| cuts.blanks(k)), -cuts.bleed_mm);
+    (outline, holes)
 }
 
 /// Coverage of what gets printed (255) and what the template cuts away (0), for a
@@ -348,34 +447,25 @@ pub fn keep_mask(
 ) -> Option<Vec<u8>> {
     let to_px =
         Affine::translate(-origin_mm[0], -origin_mm[1]).then(Affine::scale(px_per_mm, px_per_mm));
-    let of = |keep: &dyn Fn(ElementKind) -> bool| {
-        let polylines = elements
-            .iter()
-            .filter(|e| keep(e.kind))
-            .flat_map(|e| &e.polylines);
-        closed_path(polylines, to_px)
-    };
-    let outline = cuts
-        .clip_to_outline
-        .then(|| of(&|k| k == ElementKind::Outline))
-        .flatten();
-    let holes = of(&|k| cuts.blanks(k));
-    if outline.is_none() && holes.is_none() {
+    let (outline, holes) = cut_rings(elements, cuts);
+    if outline.is_none() && holes.is_empty() {
         return None;
     }
     let [w, h] = size_px;
     // Non-zero winding: shapes drawn twice or overlapping still count once.
-    let fill = |path: &tiny_skia::Path| {
+    let fill = |rings: &[Vec<P2>]| {
         let mut m = Mask::new(w, h)?;
-        m.fill_path(path, FillRule::Winding, true, Transform::identity());
+        if let Some(path) = closed_path(rings, to_px) {
+            m.fill_path(&path, FillRule::Winding, true, Transform::identity());
+        }
         Some(m.take())
     };
     let mut keep = match &outline {
-        Some(p) => fill(p)?,
+        Some(rings) => fill(rings)?,
         None => vec![255; w as usize * h as usize],
     };
-    if let Some(p) = &holes {
-        for (k, hole) in keep.iter_mut().zip(fill(p)?) {
+    if !holes.is_empty() {
+        for (k, hole) in keep.iter_mut().zip(fill(&holes)?) {
             *k = ((*k as u32 * (255 - hole as u32) + 127) / 255) as u8;
         }
     }
@@ -881,54 +971,81 @@ pub fn flatten(parts: &[Part], scene: &Scene, dpi: f32) -> Result<Pixmap, String
     Ok(out)
 }
 
-/// What the template cuts away, as closed shapes in page mm: the outline that clips
-/// (none if nothing is clipped), and the holes left blank. As for `keep_mask`, both are
-/// filled under the non-zero rule, and an outline without closed paths clips nothing.
+/// What the template cuts away, as for `cut_rings`, with no outline when nothing clips.
 pub fn cut_shapes(scene: &Scene) -> (Vec<Vec<P2>>, Vec<Vec<P2>>) {
-    let shapes = |keep: &dyn Fn(ElementKind) -> bool| -> Vec<Vec<P2>> {
-        scene
-            .elements
-            .iter()
-            .filter(|e| keep(e.placed.kind))
-            .flat_map(|e| &e.placed.polylines)
-            .filter(|p| p.closed && p.points.len() > 2)
-            .map(|p| p.points.clone())
-            .collect()
-    };
-    let outline = if scene.cuts.clip_to_outline {
-        shapes(&|k| k == ElementKind::Outline)
-    } else {
-        Vec::new()
-    };
-    (outline, shapes(&|k| scene.cuts.blanks(k)))
+    let (outline, holes) = cut_rings(&scene.placed(), scene.cuts);
+    (outline.unwrap_or_default(), holes)
 }
 
-/// Draws the lines of the template elements marked for printing, at least 1 px wide.
+/// Draws the lines of the template elements marked for printing, then the crop and
+/// registration marks, all at least 1 px wide.
 pub fn draw_lines(pixmap: &mut Pixmap, scene: &Scene, dpi: f32) {
+    draw_lines_at(pixmap, scene, dpi, [0.0, 0.0], None);
+}
+
+/// Like `draw_lines`, with page point (x, y) drawn at (x + shift x, y + shift y) mm, and
+/// only where `clip` covers, if given.
+pub fn draw_lines_at(
+    pixmap: &mut Pixmap,
+    scene: &Scene,
+    dpi: f32,
+    shift_mm: P2,
+    clip: Option<&Mask>,
+) {
+    for element in scene.elements.iter().filter(|e| e.print) {
+        let lines: Vec<_> = element.placed.printed_lines().collect();
+        stroke_polylines(
+            pixmap,
+            lines.iter().map(|l| l.as_ref()),
+            (element.color, OUTLINE_WIDTH_MM),
+            dpi,
+            shift_mm,
+            clip,
+        );
+    }
+    stroke_polylines(
+        pixmap,
+        scene.marks.iter(),
+        (print::MARK_COLOR, print::MARK_WIDTH_MM),
+        dpi,
+        shift_mm,
+        clip,
+    );
+}
+
+/// Strokes lines in mm of `(color, width in mm)`, at least 1 px wide, onto a pixmap at
+/// `dpi`, shifted by `shift_mm`, and only where `clip` covers, if given.
+pub fn stroke_polylines<'a>(
+    pixmap: &mut Pixmap,
+    polylines: impl Iterator<Item = &'a Polyline>,
+    (color, width_mm): ([u8; 3], f32),
+    dpi: f32,
+    shift_mm: P2,
+    clip: Option<&Mask>,
+) {
     let k = dpi / 25.4;
     let stroke = Stroke {
-        width: (OUTLINE_WIDTH_MM * k).max(1.0),
+        width: (width_mm * k).max(1.0),
         ..Default::default()
     };
-    for element in scene.elements.iter().filter(|e| e.print) {
-        let mut paint = Paint::default();
-        let [r, g, b] = element.color;
-        paint.set_color_rgba8(r, g, b, 255);
-        paint.anti_alias = true;
-        for poly in element.placed.printed_lines() {
-            let mut pb = PathBuilder::new();
-            let mut pts = poly.points.iter();
-            let Some(first) = pts.next() else { continue };
-            pb.move_to(first[0] * k, first[1] * k);
-            for p in pts {
-                pb.line_to(p[0] * k, p[1] * k);
-            }
-            if poly.closed {
-                pb.close();
-            }
-            if let Some(path) = pb.finish() {
-                pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), None);
-            }
+    let mut paint = Paint::default();
+    let [r, g, b] = color;
+    paint.set_color_rgba8(r, g, b, 255);
+    paint.anti_alias = true;
+    let at = |p: &P2| ((p[0] + shift_mm[0]) * k, (p[1] + shift_mm[1]) * k);
+    for poly in polylines {
+        let mut pb = PathBuilder::new();
+        let mut pts = poly.points.iter().map(at);
+        let Some((x, y)) = pts.next() else { continue };
+        pb.move_to(x, y);
+        for (x, y) in pts {
+            pb.line_to(x, y);
+        }
+        if poly.closed {
+            pb.close();
+        }
+        if let Some(path) = pb.finish() {
+            pixmap.stroke_path(&path, &paint, &stroke, Transform::identity(), clip);
         }
     }
 }
@@ -1247,6 +1364,7 @@ mod tests {
                 print: true,
             }],
             cuts: Cuts::default(),
+            marks: Vec::new(),
         };
         let red = |pm: &Pixmap, x, y| pm.pixel(x, y).unwrap().green() < 50;
         let pm = compose(&scene, 254.0, true).unwrap(); // 10 px per mm
@@ -1297,6 +1415,7 @@ mod tests {
                 element(ElementKind::Cutouts, vec![screw.clone(), screw], false),
             ],
             cuts: Cuts::default(),
+            marks: Vec::new(),
         };
         let pm = compose(&scene, 25.4, false).unwrap(); // 1 px per mm
         let px = |x: u32, y: u32| {
@@ -1331,10 +1450,58 @@ mod tests {
             clip_to_outline: false,
             blank_buttons: false,
             blank_cutouts: false,
+            bleed_mm: 0.0,
         };
         let pm = compose(&scene, 25.4, false).unwrap();
         assert_eq!(pm.pixel(5, 5).unwrap().red(), 0);
         assert_eq!(pm.pixel(25, 25).unwrap().red(), 0);
+
+        // A bleed: the artwork goes past the outline and into the holes by 3 mm.
+        scene.cuts = Cuts {
+            bleed_mm: 3.0,
+            ..Cuts::default()
+        };
+        let pm = compose(&scene, 25.4, false).unwrap();
+        let black = |x, y| pm.pixel(x, y).unwrap().red() == 0;
+        let white = |x, y| pm.pixel(x, y).unwrap().red() == 255;
+        assert!(
+            black(8, 25) && black(50, 7),
+            "in the bleed past the outline"
+        );
+        assert!(white(5, 25) && white(50, 5), "past the bleed");
+        assert!(black(21, 25) && white(25, 25), "the button hole shrunk");
+        assert!(
+            black(72, 22),
+            "a screw hole thinner than the bleed is printed over"
+        );
+        // The PDF's vector cuts follow the bleed too.
+        let (outline, holes) = cut_shapes(&scene);
+        let rings: Vec<Polyline> = outline
+            .into_iter()
+            .map(|points| Polyline {
+                points,
+                closed: true,
+            })
+            .collect();
+        let (mn, mx) = print::bounds(&rings).unwrap();
+        assert!(
+            (mn[0] - 7.0).abs() < 0.05 && (mx[1] - 43.0).abs() < 0.05,
+            "{mn:?} {mx:?}"
+        );
+        assert_eq!(holes.len(), 1, "only the button is left");
+
+        // Marks around the outline's box, outside the bleed, in black.
+        let mut scene = scene.with_marks(true, false);
+        assert_eq!(scene.marks.len(), 8);
+        scene.elements.iter_mut().for_each(|e| e.print = false);
+        let pm = compose(&scene, 25.4, true).unwrap();
+        let p = pm.pixel(3, 10).unwrap();
+        assert!(
+            p.red() < 200 && p.green() < 200,
+            "crop mark left of the top-left corner"
+        );
+        scene.elements.clear();
+        assert!(scene.with_marks(true, true).marks.is_empty());
     }
 
     #[test]
@@ -1378,6 +1545,7 @@ mod tests {
             layers: scene_nodes(&[Node::Layer(Box::new(l))], false),
             elements: Vec::new(),
             cuts: Cuts::default(),
+            marks: Vec::new(),
         };
         let pm = compose(&scene, 25.4, false).unwrap();
         let px = pm.pixel(5, 5).unwrap();
@@ -1420,7 +1588,9 @@ mod tests {
                 clip_to_outline: false,
                 blank_buttons: false,
                 blank_cutouts: false,
+                bleed_mm: 0.0,
             },
+            marks: Vec::new(),
         };
         let pm = compose(&scene, 254.0, true).unwrap(); // 10 px per mm
         assert_eq!((pm.width(), pm.height()), (1000, 500));

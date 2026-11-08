@@ -43,11 +43,25 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sys-locale = "0.3"
 zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
+# Polygon offsets: the outline grown by the bleed, shrunk to the safe area.
+i_overlay = "9.1"
 
 # On Wayland (e.g. WSLg) the window draws its own title bar. eframe leaves out winit's
 # decorations, so without this the bar has no title text.
 [target.'cfg(target_os = "linux")'.dependencies]
 winit = { version = "0.30.13", default-features = false, features = ["wayland-csd-adwaita"] }
+
+# Printing on Windows: the system print dialog and GDI. The dialog belongs to the app's
+# window, found through its raw handle.
+[target.'cfg(windows)'.dependencies]
+raw-window-handle = "0.6"
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Storage_Xps",
+    "Win32_System_Memory",
+    "Win32_UI_Controls_Dialogs",
+] }
 
 [profile.release]
 opt-level = 3

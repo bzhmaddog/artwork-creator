@@ -56,22 +56,31 @@ Done:
 
 ### Printing
 
-- **Bleed and safe area**: extend the artwork past the outline by a chosen margin, and show
-  a safe-area guide inside it.
+Done:
+
+- **Bleed and safe area**: the artwork extends past the outline (and into the holes) by a
+  chosen margin, and a safe-area guide is shown inside it.
 - **Crop marks** and registration marks in the export.
-- **Tiled printing**: split artwork larger than the page over several sheets, with overlap
-  and alignment marks.
-- **Custom page sizes** and more presets (A3, Letter, Tabloid...).
+- **Page sizes**: A5, A4, A3, A2, Letter, Legal and Tabloid, or a custom size.
+- **Tiled printing**: a page larger than the paper split over several sheets, with
+  margins, overlap and alignment marks.
 - **Mirrored export**, for printing on the back of clear film or plexi.
-- **Low resolution warning**: flag images whose effective DPI at their printed size is
-  below a threshold.
+- **Low resolution warning**: images whose effective DPI at their printed size is below
+  a threshold are flagged.
+- **Print directly from the app**, at true size with the export options: the system
+  print dialog on Windows, CUPS on Linux.
+
+Planned:
+
 - **CMYK / ICC profile** support for PDF export to print shops.
 
 ### Editing
 
+- **Copy/Paste layers**: Beeing able to copy/paste from the canvas area
 - **Clipping masks**: clip a layer to the shape of the layer below it, or to a group.
 - **Blend modes** (multiply, screen, overlay...).
 - **Gradient and pattern fills** for shapes, text and a background layer.
+- **Color manager** to store and reuse colors already used in the project
 - **Background color** layer filling the whole outline.
 - **Flip** layers horizontally and vertically.
 - **Rulers and guides** dragged from the rulers, with snapping.
@@ -97,3 +106,4 @@ Done:
 
 - **Customizable shortcuts**.
 - **More languages**.
+- **Panel position customisation** : let user drag and place panel where he want (floating or snapped to borders of the window)

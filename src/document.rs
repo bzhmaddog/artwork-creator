@@ -233,27 +233,64 @@ pub fn is_convex(q: [P2; 4]) -> bool {
 /// Paper size of the printed page.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub enum PageSize {
+    A5,
     #[default]
     A4,
     A3,
+    A2,
+    Letter,
+    Legal,
+    Tabloid,
+    /// Any size, from `Document::custom_page_mm`.
+    Custom,
 }
 
-impl PageSize {
-    pub const ALL: [PageSize; 2] = [PageSize::A4, PageSize::A3];
+/// Smallest and largest side of a custom page, in mm.
+pub const CUSTOM_PAGE_RANGE_MM: std::ops::RangeInclusive<f32> = 20.0..=1500.0;
 
-    /// Width and height in portrait orientation.
-    pub fn portrait_mm(self) -> P2 {
-        match self {
+impl PageSize {
+    pub const ALL: [PageSize; 8] = [
+        PageSize::A5,
+        PageSize::A4,
+        PageSize::A3,
+        PageSize::A2,
+        PageSize::Letter,
+        PageSize::Legal,
+        PageSize::Tabloid,
+        PageSize::Custom,
+    ];
+
+    /// Width and height in portrait orientation; `None` for a custom size.
+    pub fn portrait_mm(self) -> Option<P2> {
+        const INCH: f32 = 25.4;
+        Some(match self {
+            PageSize::A5 => [148.0, 210.0],
             PageSize::A4 => [210.0, 297.0],
             PageSize::A3 => [297.0, 420.0],
-        }
+            PageSize::A2 => [420.0, 594.0],
+            PageSize::Letter => [8.5 * INCH, 11.0 * INCH],
+            PageSize::Legal => [8.5 * INCH, 14.0 * INCH],
+            PageSize::Tabloid => [11.0 * INCH, 17.0 * INCH],
+            PageSize::Custom => return None,
+        })
     }
 
-    /// Name with dimensions, for the page menu.
-    pub fn label(self) -> &'static str {
+    /// Name with dimensions, for the page menu. `custom` is the custom size, as for
+    /// `Document::custom_page_mm`.
+    pub fn label(self, custom: P2) -> String {
         match self {
-            PageSize::A4 => "A4 (210 x 297 mm)",
-            PageSize::A3 => "A3 (297 x 420 mm)",
+            PageSize::A5 => "A5 (148 x 210 mm)".into(),
+            PageSize::A4 => "A4 (210 x 297 mm)".into(),
+            PageSize::A3 => "A3 (297 x 420 mm)".into(),
+            PageSize::A2 => "A2 (420 x 594 mm)".into(),
+            PageSize::Letter => "Letter (8.5 x 11 in)".into(),
+            PageSize::Legal => "Legal (8.5 x 14 in)".into(),
+            PageSize::Tabloid => "Tabloid (11 x 17 in)".into(),
+            PageSize::Custom => crate::i18n::tr!(
+                "PAGE_CUSTOM_SIZE",
+                w = format!("{:.0}", custom[0]),
+                h = format!("{:.0}", custom[1])
+            ),
         }
     }
 }
@@ -520,6 +557,27 @@ impl Layer {
             && q[1] <= self.size_px[1] as f32
     }
 
+    /// Print resolution of an image layer, in DPI: its pixels over its printed size,
+    /// along its most stretched edge, so a distorted layer counts where it is thinnest.
+    /// `None` for text and shapes, which are drawn at the export resolution.
+    pub fn print_dpi(&self) -> Option<f32> {
+        if self.is_drawn() || self.size_px.contains(&0) {
+            return None;
+        }
+        let [tl, tr, br, bl] = self.corners();
+        let len = |a: P2, b: P2| (a[0] - b[0]).hypot(a[1] - b[1]) / 25.4;
+        let [w, h] = self.size_px.map(|v| v as f32);
+        [
+            w / len(tl, tr),
+            w / len(bl, br),
+            h / len(tl, bl),
+            h / len(tr, br),
+        ]
+        .into_iter()
+        .filter(|d| d.is_finite())
+        .reduce(f32::min)
+    }
+
     /// Size on the page in mm (unrotated width and height).
     pub fn size_mm(&self) -> P2 {
         [
@@ -701,6 +759,8 @@ impl TemplatePlacement {
 pub struct Document {
     /// Paper size.
     pub page: PageSize,
+    /// Width and height in mm of a `PageSize::Custom` page, in portrait orientation.
+    pub custom_page_mm: P2,
     /// Portrait or landscape.
     pub orientation: Orientation,
     /// Name of the template folder, e.g. "cosmox - T16".
@@ -709,6 +769,11 @@ pub struct Document {
     pub template_placement: TemplatePlacement,
     /// Page color (RGB), printed under the layers.
     pub background: [u8; 3],
+    /// How far the artwork goes past the template's cut lines, in mm.
+    pub bleed_mm: f32,
+    /// Width of the margin inside the cut lines that important content should stay
+    /// out of, in mm; 0 shows no safe-area guide.
+    pub safe_margin_mm: f32,
     /// Layers and groups, bottom of the stack first.
     pub layers: Vec<Node>,
     /// Next id for a new layer or group.
@@ -719,10 +784,13 @@ impl Default for Document {
     fn default() -> Self {
         Self {
             page: PageSize::A4,
+            custom_page_mm: [210.0, 297.0],
             orientation: Orientation::Landscape,
             template: None,
             template_placement: TemplatePlacement::default(),
             background: [255, 255, 255],
+            bleed_mm: 0.0,
+            safe_margin_mm: 0.0,
             layers: Vec::new(),
             next_id: 1,
         }
@@ -732,7 +800,7 @@ impl Default for Document {
 impl Document {
     /// Page width and height in mm, orientation applied.
     pub fn page_mm(&self) -> P2 {
-        let [w, h] = self.page.portrait_mm();
+        let [w, h] = self.page.portrait_mm().unwrap_or(self.custom_page_mm);
         match self.orientation {
             Orientation::Portrait => [w, h],
             Orientation::Landscape => [h, w],
@@ -743,6 +811,19 @@ impl Document {
     pub fn page_center(&self) -> P2 {
         let [w, h] = self.page_mm();
         [w / 2.0, h / 2.0]
+    }
+
+    /// The visible image layers printed below `min_dpi`, with their print resolution,
+    /// bottom of the stack first.
+    pub fn low_resolution(&self, min_dpi: f32) -> Vec<(&Layer, f32)> {
+        self.leaves()
+            .into_iter()
+            .filter(|leaf| leaf.visible)
+            .filter_map(|leaf| {
+                let dpi = leaf.layer.print_dpi()?;
+                (dpi < min_dpi).then_some((leaf.layer, dpi))
+            })
+            .collect()
     }
 
     /// A fresh id for a new layer or group.
@@ -1048,12 +1129,60 @@ mod tests {
     }
 
     #[test]
+    fn print_resolution_of_image_layers() {
+        // 1000 x 500 px printed 254 x 127 mm wide: 100 DPI.
+        let mut l = Layer::new(1, "photo".into(), "a.png".into());
+        l.size_px = [1000, 500];
+        l.transform.scale = [0.254, 0.254];
+        let dpi = l.print_dpi().unwrap();
+        assert!((dpi - 100.0).abs() < 0.01, "{dpi}");
+        // Rotation doesn't change it; stretching the height lowers it.
+        l.transform.rotation_deg = 30.0;
+        assert!((l.print_dpi().unwrap() - 100.0).abs() < 0.01);
+        l.transform.scale[1] = 0.508;
+        assert!((l.print_dpi().unwrap() - 50.0).abs() < 0.01);
+        // A corner pulled out stretches its edges: they count.
+        l.transform.scale = [0.254, 0.254];
+        l.transform.distort[1] = [0.5, 0.0];
+        assert!(l.print_dpi().unwrap() < 100.0 / 1.4);
+
+        let mut doc = Document::default();
+        let mut sharp = Layer::new(2, "sharp".into(), "b.png".into());
+        sharp.size_px = [3000, 3000];
+        sharp.transform.scale = [0.0254, 0.0254];
+        let mut hidden = Layer::new(3, "hidden".into(), "c.png".into());
+        hidden.size_px = [10, 10];
+        hidden.visible = false;
+        let text = crate::text::new_layer(4, "Text", crate::text::BUILTIN_FAMILY.into(), [0.0; 2]);
+        assert!(text.print_dpi().is_none(), "drawn at the export resolution");
+        doc.layers = [l, sharp, hidden, text]
+            .map(|l| Node::Layer(Box::new(l)))
+            .into();
+        let low = doc.low_resolution(150.0);
+        assert_eq!(low.len(), 1);
+        assert_eq!(low[0].0.name, "photo");
+        assert!(doc.low_resolution(0.0).is_empty());
+    }
+
+    #[test]
     fn page_sizes() {
         let mut d = Document::default();
         assert_eq!(d.page_mm(), [297.0, 210.0]);
         d.page = PageSize::A3;
         d.orientation = Orientation::Portrait;
         assert_eq!(d.page_mm(), [297.0, 420.0]);
+        d.page = PageSize::Letter;
+        assert_eq!(d.page_mm(), [215.9, 279.4]);
+        d.page = PageSize::Custom;
+        d.custom_page_mm = [300.0, 200.0];
+        d.orientation = Orientation::Landscape;
+        assert_eq!(d.page_mm(), [200.0, 300.0]);
+        // Saved and opened again.
+        let back: Document = serde_json::from_str(&serde_json::to_string(&d).unwrap()).unwrap();
+        assert_eq!(
+            (back.page, back.custom_page_mm),
+            (PageSize::Custom, [300.0, 200.0])
+        );
     }
 
     #[test]

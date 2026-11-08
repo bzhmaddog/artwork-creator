@@ -34,6 +34,8 @@ const WARP_GRID: usize = 16;
 /// Color of the selection and of the anchor an image snapped to: crimson, apart from
 /// the template elements' default colors (magenta, blue, orange, green).
 const ACCENT: Color32 = Color32::from_rgb(220, 20, 60);
+/// Color of the safe-area guide, apart from the template element colors.
+const SAFE_AREA_COLOR: Color32 = Color32::from_rgb(130, 80, 220);
 /// Longest side of the offscreen render of a semi-transparent group.
 const MAX_GROUP_PREVIEW_SIDE: f32 = 2048.0;
 /// How close (screen points) an image's center or corner must come to an anchor to snap.
@@ -143,6 +145,10 @@ pub struct CanvasState {
     /// Opacity of the cut preview: below 1, what will be cut stays faintly visible.
     pub cut_opacity: f32,
     cut_preview: Option<CutPreview>,
+    /// The project's safe margin inside the cut lines, in mm; set by the app.
+    pub safe_margin_mm: f32,
+    /// The safe-area guide's rings in page mm, and the key they were made for.
+    safe_area: Option<(u64, Vec<Vec<P2>>)>,
     /// Mouse position on the page, for the status bar.
     pub cursor_mm: Option<P2>,
     /// Corner handles distort the selected layer instead of scaling it. Holding Ctrl
@@ -186,6 +192,8 @@ impl Default for CanvasState {
             cuts: Cuts::default(),
             cut_opacity: 0.8,
             cut_preview: None,
+            safe_margin_mm: 0.0,
+            safe_area: None,
             cursor_mm: None,
             distort_mode: false,
             snap_to_anchors: true,
@@ -1013,16 +1021,7 @@ fn paint_cuts(
     let mut h = std::collections::hash_map::DefaultHasher::new();
     state.cuts.hash(&mut h);
     px_per_mm.to_bits().hash(&mut h);
-    for e in elements {
-        e.kind.hash(&mut h);
-        for poly in &e.polylines {
-            poly.closed.hash(&mut h);
-            for p in &poly.points {
-                p[0].to_bits().hash(&mut h);
-                p[1].to_bits().hash(&mut h);
-            }
-        }
-    }
+    hash_elements(elements, &mut h);
     let key = h.finish();
     if state.cut_preview.as_ref().is_none_or(|c| c.key != key) {
         let Some(keep) =
@@ -1054,6 +1053,68 @@ fn paint_cuts(
         let corners =
             [[0.0, 0.0], [page[0], 0.0], page, [0.0, page[1]]].map(|p| cam.to_screen(rect, p));
         paint_quad(painter, c.texture.id(), corners, state.cut_opacity);
+    }
+}
+
+/// Feeds the template elements' shapes to `h`.
+fn hash_elements(elements: &[PlacedElement], h: &mut impl Hasher) {
+    for e in elements {
+        e.kind.hash(h);
+        for poly in &e.polylines {
+            poly.closed.hash(h);
+            for p in &poly.points {
+                p[0].to_bits().hash(h);
+                p[1].to_bits().hash(h);
+            }
+        }
+    }
+}
+
+/// Dashed line along the safe area's edge: `safe_margin_mm` inside the outline, and as
+/// far around every button and cutout. Only a guide: it is never printed.
+fn paint_safe_area(
+    painter: &egui::Painter,
+    elements: &[PlacedElement],
+    state: &mut CanvasState,
+    rect: Rect,
+) {
+    let margin = state.safe_margin_mm;
+    if margin <= 0.0 || elements.is_empty() {
+        state.safe_area = None;
+        return;
+    }
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    margin.to_bits().hash(&mut h);
+    hash_elements(elements, &mut h);
+    let key = h.finish();
+    if state.safe_area.as_ref().is_none_or(|(k, _)| *k != key) {
+        let rings = |keep: &dyn Fn(ElementKind) -> bool| -> Vec<Vec<P2>> {
+            elements
+                .iter()
+                .filter(|e| keep(e.kind))
+                .flat_map(|e| &e.polylines)
+                .filter(|p| p.closed && p.points.len() > 2)
+                .map(|p| p.points.clone())
+                .collect()
+        };
+        let mut guide = crate::print::offset(&rings(&|k| k == ElementKind::Outline), -margin);
+        guide.extend(crate::print::offset(
+            &rings(&|k| matches!(k, ElementKind::Buttons | ElementKind::Cutouts)),
+            margin,
+        ));
+        state.safe_area = Some((key, guide));
+    }
+    let Some((_, guide)) = &state.safe_area else {
+        return;
+    };
+    let cam = state.camera;
+    let stroke = Stroke::new(1.0, SAFE_AREA_COLOR);
+    for ring in guide {
+        let mut pts: Vec<Pos2> = ring.iter().map(|&p| cam.to_screen(rect, p)).collect();
+        if let Some(&first) = pts.first() {
+            pts.push(first);
+        }
+        painter.extend(Shape::dashed_line(&pts, stroke, 6.0, 4.0));
     }
 }
 
@@ -1151,6 +1212,9 @@ fn paint(
             painter.line_segment([p - v, p + v], stroke);
         }
     }
+    if state.show_template {
+        paint_safe_area(&painter, elements, state, rect);
+    }
     // The anchor the dragged image snapped to, shown even when anchors are hidden.
     if let Some(a) = state.snapped {
         let p = cam.to_screen(rect, a);
@@ -1241,6 +1305,51 @@ fn paint(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn safe_area_guide_is_inside_the_outline_and_around_holes() {
+        use crate::template::Polyline;
+        let rect_poly = |lo: P2, hi: P2| Polyline {
+            points: vec![lo, [hi[0], lo[1]], hi, [lo[0], hi[1]]],
+            closed: true,
+        };
+        let element = |kind, poly| PlacedElement {
+            kind,
+            polylines: vec![poly],
+            anchors: Vec::new(),
+        };
+        let elements = [
+            element(ElementKind::Outline, rect_poly([10.0, 10.0], [90.0, 40.0])),
+            element(ElementKind::Buttons, rect_poly([20.0, 20.0], [30.0, 30.0])),
+        ];
+        let ctx = egui::Context::default();
+        let mut state = CanvasState::default();
+        let run = |state: &mut CanvasState| {
+            let rect = Rect::from_min_size(Pos2::ZERO, vec2(400.0, 200.0));
+            let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+                paint_safe_area(ui.painter(), &elements, state, rect);
+            });
+            out.textures_delta.clear();
+        };
+        run(&mut state);
+        assert!(state.safe_area.is_none(), "no guide without a margin");
+        state.safe_margin_mm = 2.0;
+        run(&mut state);
+        let (_, rings) = state.safe_area.as_ref().unwrap();
+        assert_eq!(rings.len(), 2);
+        let b = |r: &Vec<P2>| {
+            crate::print::bounds(&[Polyline {
+                points: r.clone(),
+                closed: true,
+            }])
+            .unwrap()
+        };
+        let mut boxes: Vec<_> = rings.iter().map(b).collect();
+        boxes.sort_by(|a, b| a.0[0].total_cmp(&b.0[0]));
+        let near = |a: P2, b: P2| (a[0] - b[0]).abs() < 0.05 && (a[1] - b[1]).abs() < 0.05;
+        assert!(near(boxes[0].0, [12.0, 12.0]) && near(boxes[0].1, [88.0, 38.0]));
+        assert!(near(boxes[1].0, [18.0, 18.0]) && near(boxes[1].1, [32.0, 32.0]));
+    }
 
     #[test]
     fn dragging_a_member_of_the_selected_group_moves_the_group() {

@@ -172,6 +172,13 @@ is skipped if the `x86_64-pc-windows-gnu` target is not installed. Run them by h
 `make pre-commit`, or for one target with `make pre-commit ARGS=--linux` or
 `ARGS=--windows`.
 
+`make check-dependencies` scans `Cargo.lock` for crates with a known vulnerability or a
+malicious version, using [Trivy](https://trivy.dev) in a container. It uses Docker if
+installed, otherwise Podman (`CONTAINER=podman` forces one), and fails if anything is
+found. The Trivy image version is pinned in the Makefile (`TRIVY_VERSION`); raise it on
+purpose rather than following `latest`. Its vulnerability database is cached in
+`~/.cache/trivy`.
+
 ### Consistency
 
 When adding a tool or feature, give it the same treatment as its siblings. For example,

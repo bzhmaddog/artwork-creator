@@ -20,6 +20,9 @@
 #   make version      show the commits since the last release and suggest the next version
 #   make release      set the version, commit and tag it; V=X.Y.Z or V=major|minor|patch
 #                     picks the version, SDK=... releases the plugin SDK too
+#   make check-dependencies
+#                     scan Cargo.lock for known vulnerable or malicious crates with
+#                     Trivy, run in a Docker or Podman container
 #   make clean        remove build outputs
 
 CARGO   ?= cargo
@@ -36,8 +39,17 @@ WINDOWS_BIN := target/$(WINDOWS)/release/$(APP).exe
 PLUGINS     := halftone
 PLUGINS_DIR := plugins
 
+# Dependency scan (check-dependencies): Docker if installed, else Podman; CONTAINER=...
+# picks one. The Trivy version is pinned so a freshly published (possibly compromised)
+# image is never pulled on its own; raise TRIVY_VERSION on purpose. The vulnerability
+# database is cached in TRIVY_CACHE between runs.
+CONTAINER     ?= $(shell command -v docker >/dev/null 2>&1 && echo docker || echo podman)
+TRIVY_VERSION ?= 0.76.1
+TRIVY_IMAGE   ?= docker.io/aquasec/trivy:$(TRIVY_VERSION)
+TRIVY_CACHE   ?= $(HOME)/.cache/trivy
+
 .PHONY: all linux windows debug debug-linux debug-windows run run-windows \
-        test check fmt clippy hooks pre-commit plugins dist version release dist-linux dist-windows clean
+        test check check-dependencies fmt clippy hooks pre-commit plugins dist version release dist-linux dist-windows clean
 
 all: linux windows
 
@@ -84,6 +96,15 @@ pre-commit:
 check:
 	$(CARGO) check --workspace --target $(LINUX)
 	$(CARGO) check --workspace --target $(WINDOWS)
+
+# Fails (exit code 1) when Trivy finds an advisory.
+check-dependencies:
+	$(CONTAINER) pull $(TRIVY_IMAGE)
+	mkdir -p $(TRIVY_CACHE)
+	$(CONTAINER) run --rm \
+		-v "$(CURDIR)":/src:ro,z \
+		-v "$(TRIVY_CACHE)":/root/.cache/trivy:z \
+		$(TRIVY_IMAGE) fs --scanners vuln --skip-version-check --skip-dirs /src/target --exit-code 1 /src
 
 fmt:
 	$(CARGO) fmt

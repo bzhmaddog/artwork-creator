@@ -280,7 +280,7 @@ fn stack_ui(
 /// Controls for an effect's parameters. Returns true if one changed.
 fn params_ui(
     ui: &mut Ui,
-    salt: (u64, usize),
+    ui_key: (u64, usize),
     effect: &dyn Effect,
     inst: &mut EffectInstance,
     px_mm: Option<(f32, &str)>,
@@ -292,14 +292,15 @@ fn params_ui(
     let mut changed = false;
     // Built-in labels are translated; plugins' are shown as they give them.
     let builtin = effect.plugin().is_none();
-    egui::Grid::new(("effect_params", salt))
+    egui::Grid::new(("effect_params", ui_key))
         .num_columns(2)
         .spacing([8.0, 4.0])
         .show(ui, |ui| {
             for spec in specs {
                 ui.label(label_text(builtin, &spec.label));
                 let params = Params::new(specs, &inst.params);
-                if let Some(v) = param_ui(ui, salt, spec, builtin, &params, &mut inst.links, px_mm)
+                if let Some(v) =
+                    param_ui(ui, ui_key, spec, builtin, &params, &mut inst.links, px_mm)
                 {
                     inst.params.insert(spec.id.clone(), v);
                     changed = true;
@@ -319,7 +320,7 @@ fn label_text(builtin: bool, text: &str) -> &str {
 /// if it changed.
 fn param_ui(
     ui: &mut Ui,
-    salt: (u64, usize),
+    ui_key: (u64, usize),
     spec: &ParamSpec,
     builtin: bool,
     p: &Params,
@@ -394,7 +395,7 @@ fn param_ui(
                 .find(|(o, _)| *o == current)
                 .map_or(current.as_str(), |(_, l)| label_text(builtin, l));
             let mut picked = None;
-            ComboBox::from_id_salt(("effect_choice", salt, id))
+            ComboBox::from_id_salt(("effect_choice", ui_key, id))
                 .selected_text(label)
                 .show_ui(ui, |ui| {
                     for (o, l) in options {
@@ -411,7 +412,7 @@ fn param_ui(
         }
         ParamKind::Curve { .. } => {
             let mut c = p.curve(id);
-            curve_ui(ui, (salt, id), &mut c).then(|| crate::effects::curve_value(c))
+            curve_ui(ui, (ui_key, id), &mut c).then(|| crate::effects::curve_value(c))
         }
     }
 }
@@ -426,7 +427,7 @@ const CURVE_MARGIN: f32 = 8.0;
 /// Returns whether it changed.
 fn curve_ui(
     ui: &mut Ui,
-    salt: impl std::hash::Hash + std::fmt::Debug + Copy,
+    ui_key: impl std::hash::Hash + std::fmt::Debug + Copy,
     c: &mut [f32; 4],
 ) -> bool {
     let mut changed = false;
@@ -484,7 +485,7 @@ fn curve_ui(
             let at = to_screen(c[ix], c[iy]);
             let r = ui.interact(
                 egui::Rect::from_center_size(at, egui::Vec2::splat(16.0)),
-                ui.make_persistent_id((salt, "curve_handle", k)),
+                ui.make_persistent_id((ui_key, "curve_handle", k)),
                 Sense::drag(),
             );
             if r.dragged()

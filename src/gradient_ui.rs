@@ -28,9 +28,9 @@ const BAR: f32 = 18.0;
 const MARKER: f32 = 12.0;
 
 /// The switch between one color and a gradient, then the color button or a swatch of
-/// the gradient. Returns whether anything changed. `salt` tells this fill from others.
-pub fn inline(ui: &mut Ui, salt: impl std::hash::Hash + std::fmt::Debug, f: &mut Fill) -> bool {
-    let id = ui.make_persistent_id(("fill", salt));
+/// the gradient. Returns whether anything changed. `ui_key` tells this fill from others.
+pub fn inline(ui: &mut Ui, ui_key: impl std::hash::Hash + std::fmt::Debug, f: &mut Fill) -> bool {
+    let id = ui.make_persistent_id(("fill", ui_key));
     let mut changed = false;
     let kind = f.gradient.as_ref().map(|g| g.kind);
     let name = |k: Option<GradientKind>| match k {
@@ -85,11 +85,11 @@ pub fn inline(ui: &mut Ui, salt: impl std::hash::Hash + std::fmt::Debug, f: &mut
 
 /// A gradient's settings, under [`inline`]; nothing for one color. Returns whether
 /// anything changed.
-pub fn rows(ui: &mut Ui, salt: impl std::hash::Hash + std::fmt::Debug, f: &mut Fill) -> bool {
+pub fn rows(ui: &mut Ui, ui_key: impl std::hash::Hash + std::fmt::Debug, f: &mut Fill) -> bool {
     let Some(g) = f.gradient.as_mut() else {
         return false;
     };
-    let id = ui.make_persistent_id(("fill", salt));
+    let id = ui.make_persistent_id(("fill", ui_key));
     let mut changed = false;
     ui.vertical(|ui| {
         ui.horizontal(|ui| match g.kind {

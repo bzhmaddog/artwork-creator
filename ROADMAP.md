@@ -130,8 +130,9 @@ Done:
   order, floating over the canvas or in a window of its own, moved by dragging its title
   or from its menu; docked panels resized by dragging the line between them; shown,
   hidden and reset from View > Panels; kept between sessions.
+- **Customizable shortcuts**: View > Keyboard shortcuts changes the keys of every
+  command, including commands with no key by default; kept between sessions.
 
 Planned:
 
-- **Customizable shortcuts**.
 - **More languages**.

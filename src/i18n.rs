@@ -546,10 +546,7 @@ mod tests {
     #[test]
     fn missing_keys_fall_back_to_us_english() {
         let gb = Language::BritishEnglish;
-        assert_eq!(
-            lookup(gb, "ADD_TEXT_LAYER"),
-            Some("Add a text layer (Ctrl+T)")
-        );
+        assert_eq!(lookup(gb, "ADD_TEXT_LAYER"), Some("Add a text layer"));
         assert_eq!(lookup(gb, "PARAM_COLOR"), Some("Colour"));
         assert_eq!(lookup(Language::French, "PARAM_COLOR"), Some("Couleur"));
         // Not a key, such as a template's own element name: shown as it is.

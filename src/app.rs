@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
-use egui::{Color32, ColorImage, Key, KeyboardShortcut, Modifiers, TextureFilter, TextureOptions};
+use egui::{Color32, ColorImage, Key, TextureFilter, TextureOptions};
 
 use crate::canvas_points;
 use crate::clipboard::Clipboard;
@@ -20,6 +20,7 @@ use crate::project;
 use crate::recent::{self, RecentFiles};
 use crate::render::{self, PlacedElement, Scene};
 use crate::shape::{self, ShapeKind};
+use crate::shortcuts::{Command, Shortcuts};
 use crate::template::{self, ElementKind, Template, TemplateEntry};
 use crate::text::{self, FontLibrary};
 use crate::variables;
@@ -49,29 +50,6 @@ const SAVE_PROJECT_FILTERS: &[Filter] = &[
     ),
     Filter::new(tr_noop!("FILTER_LINKED_JSON_PROJECT"), &["json"]),
 ];
-
-const SHORTCUT_NEW: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::N);
-const SHORTCUT_OPEN: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::O);
-const SHORTCUT_SAVE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::S);
-const SHORTCUT_EXPORT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::E);
-const SHORTCUT_PRINT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::P);
-// Cut, copy and paste come as events, not keys (see `clipboard`); these only show them.
-const SHORTCUT_CUT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::X);
-const SHORTCUT_COPY: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::C);
-const SHORTCUT_PASTE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::V);
-const SHORTCUT_DELETE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::NONE, Key::Delete);
-const SHORTCUT_DUPLICATE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::D);
-const SHORTCUT_TEXT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::T);
-const SHORTCUT_IMAGE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::I);
-/// Adds a shape of the kind added last.
-const SHORTCUT_SHAPE: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::R);
-const SHORTCUT_GROUP: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::G);
-const SHORTCUT_UNGROUP: KeyboardShortcut =
-    KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::G);
-const SHORTCUT_UNDO: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Z);
-const SHORTCUT_REDO: KeyboardShortcut =
-    KeyboardShortcut::new(Modifiers::COMMAND.plus(Modifiers::SHIFT), Key::Z);
-const SHORTCUT_REDO_ALT: KeyboardShortcut = KeyboardShortcut::new(Modifiers::COMMAND, Key::Y);
 
 /// Background export thread; yields the written files or an error.
 type ExportJob = JoinHandle<Result<Vec<PathBuf>, String>>;
@@ -139,6 +117,10 @@ pub struct ArtworkApp {
     language: i18n::Preference,
     /// Where each panel is: docked on a side, floating or in its own window.
     panels: crate::panels::Layout,
+    /// Each command's keys.
+    shortcuts: Shortcuts,
+    /// The Keyboard shortcuts window, while open.
+    shortcuts_editor: Option<crate::shortcuts::Editor>,
     /// The window was asked to close with unsaved changes: ask what to do.
     confirm_close: bool,
     /// Close once the project is saved (Save in the close question, with a file still to
@@ -213,6 +195,35 @@ pub(crate) fn notice(ctx: &egui::Context) -> Option<String> {
 
 /// Room between a window's or dialog's border and what it holds, in points (egui's is 6).
 const DIALOG_MARGIN: i8 = 14;
+
+/// A menu entry with its command's shortcut, if it has one, at the right.
+fn menu_entry<'a>(label: &'a str, shortcut: Option<&String>) -> egui::Button<'a> {
+    let b = egui::Button::new(label);
+    match shortcut {
+        Some(s) => b.shortcut_text(s.as_str()),
+        None => b,
+    }
+}
+
+/// A menu checkbox, with its command's shortcut at the right as entries show theirs.
+fn menu_checkbox(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    value: &mut bool,
+    label: &str,
+    shortcut: Option<&String>,
+) -> egui::Response {
+    ui.horizontal(|ui| {
+        let r = ui.add_enabled(enabled, egui::Checkbox::new(value, label));
+        if let Some(s) = shortcut {
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.weak(s.as_str())
+            });
+        }
+        r
+    })
+    .inner
+}
 
 /// A modal dialog, framed like a window but with more room: egui frames modals like
 /// menus.
@@ -320,6 +331,8 @@ impl ArtworkApp {
             last_template_check: Instant::now(),
             language,
             panels: crate::panels::Layout::load(cc.storage),
+            shortcuts: Shortcuts::load(cc.storage),
+            shortcuts_editor: None,
             confirm_close: false,
             close_after_save: false,
             closing: false,
@@ -1058,114 +1071,147 @@ impl ArtworkApp {
         egui::MenuBar::new().ui(ui, |ui| {
             ui.menu_button(tr!("MENU_FILE"), |ui| {
                 let ctx = ui.ctx().clone();
-                let item = |ui: &mut egui::Ui, label: &str, sc: Option<&KeyboardShortcut>| {
-                    let mut b = egui::Button::new(label);
-                    if let Some(sc) = sc {
-                        b = b.shortcut_text(ctx.format_shortcut(sc));
-                    }
-                    ui.add(b).clicked()
+                let keys = self.shortcuts.texts(&ctx);
+                let item = |ui: &mut egui::Ui, label: &str, c: Command| {
+                    ui.add(menu_entry(label, keys.get(&c))).clicked()
                 };
-                if item(ui, tr!("NEW_PROJECT"), Some(&SHORTCUT_NEW)) {
+                if item(ui, tr!("NEW_PROJECT"), Command::NewProject) {
                     self.new_project();
                 }
-                if item(ui, tr!("OPEN_PROJECT"), Some(&SHORTCUT_OPEN)) {
+                if item(ui, tr!("OPEN_PROJECT"), Command::OpenProject) {
                     self.open_project(&ctx);
                 }
                 ui.add_enabled_ui(!self.recent.paths().is_empty(), |ui| {
                     ui.menu_button(tr!("MENU_OPEN_RECENT"), |ui| self.recent_menu(ui));
                 });
-                if item(ui, tr!("SAVE"), Some(&SHORTCUT_SAVE)) {
+                if item(ui, tr!("SAVE"), Command::Save) {
                     self.save_project(&ctx, false);
                 }
-                if item(ui, tr!("SAVE_PROJECT_AS"), None) {
+                if item(ui, tr!("SAVE_PROJECT_AS"), Command::SaveAs) {
                     self.save_project(&ctx, true);
                 }
                 ui.separator();
-                if item(ui, tr!("EXPORT"), Some(&SHORTCUT_EXPORT)) {
+                if item(ui, tr!("EXPORT"), Command::Export) {
                     self.open_export();
                 }
-                if item(ui, tr!("PRINT"), Some(&SHORTCUT_PRINT)) {
+                if item(ui, tr!("PRINT"), Command::Print) {
                     self.open_print();
                 }
                 ui.separator();
-                if item(ui, tr!("QUIT"), None) {
+                if item(ui, tr!("QUIT"), Command::Quit) {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             });
             ui.menu_button(tr!("MENU_EDIT"), |ui| {
                 let ctx = ui.ctx().clone();
-                let undo = egui::Button::new(tr!("UNDO"))
-                    .shortcut_text(ctx.format_shortcut(&SHORTCUT_UNDO));
+                let keys = self.shortcuts.texts(&ctx);
+                let undo = menu_entry(tr!("UNDO"), keys.get(&Command::Undo));
                 if ui.add_enabled(self.history.can_undo(), undo).clicked() {
                     self.undo();
                 }
-                let redo = egui::Button::new(tr!("REDO"))
-                    .shortcut_text(ctx.format_shortcut(&SHORTCUT_REDO));
+                let redo = menu_entry(tr!("REDO"), keys.get(&Command::Redo));
                 if ui.add_enabled(self.history.can_redo(), redo).clicked() {
                     self.redo();
                 }
                 ui.separator();
                 let has = self.selected.is_some();
-                let entry = |key: &str, sc: &KeyboardShortcut| {
-                    egui::Button::new(translate(key)).shortcut_text(ctx.format_shortcut(sc))
-                };
+                let entry =
+                    |key: &'static str, c: Command| menu_entry(translate(key), keys.get(&c));
                 if ui
-                    .add_enabled(has, entry(tr_noop!("CUT_LAYER"), &SHORTCUT_CUT))
+                    .add_enabled(has, entry(tr_noop!("CUT_LAYER"), Command::Cut))
                     .clicked()
                 {
                     self.edit(&ctx, Edit::Cut);
                 }
                 if ui
-                    .add_enabled(has, entry(tr_noop!("COPY_LAYER"), &SHORTCUT_COPY))
+                    .add_enabled(has, entry(tr_noop!("COPY_LAYER"), Command::Copy))
                     .clicked()
                 {
                     self.edit(&ctx, Edit::Copy);
                 }
-                let paste = entry(tr_noop!("PASTE_LAYER"), &SHORTCUT_PASTE);
+                let paste = entry(tr_noop!("PASTE_LAYER"), Command::Paste);
                 if ui
                     .add_enabled(self.clipboard.has_content(), paste)
                     .clicked()
                 {
                     self.edit(&ctx, Edit::Paste);
                 }
-                let duplicate = entry(tr_noop!("DUPLICATE_LAYER"), &SHORTCUT_DUPLICATE);
+                let duplicate = entry(tr_noop!("DUPLICATE_LAYER"), Command::Duplicate);
                 if ui.add_enabled(has, duplicate).clicked() {
                     self.dirty |= layers_ui::duplicate(&mut self.doc, &mut self.selected);
                 }
                 if ui
-                    .add_enabled(has, entry(tr_noop!("DELETE_LAYER"), &SHORTCUT_DELETE))
+                    .add_enabled(has, entry(tr_noop!("DELETE_LAYER"), Command::Delete))
                     .clicked()
                 {
                     self.dirty |= layers_ui::delete(&mut self.doc, &mut self.selected);
                 }
             });
             ui.menu_button(tr!("MENU_VIEW"), |ui| {
-                if ui.button(tr!("FIT_PAGE_IN_VIEW")).clicked() {
+                let keys = self.shortcuts.texts(ui.ctx());
+                if ui
+                    .add(menu_entry(
+                        tr!("FIT_PAGE_IN_VIEW"),
+                        keys.get(&Command::FitPage),
+                    ))
+                    .clicked()
+                {
                     self.canvas.fit_pending = true;
                 }
-                if ui.button(tr!("ZOOM_REAL_SIZE")).clicked() {
+                if ui
+                    .add(menu_entry(
+                        tr!("ZOOM_REAL_SIZE"),
+                        keys.get(&Command::RealSize),
+                    ))
+                    .clicked()
+                {
                     self.canvas.set_zoom(REAL_SIZE_ZOOM);
                 }
-                ui.checkbox(&mut self.canvas.show_template, tr!("SHOW_TEMPLATE_LINES"));
-                ui.checkbox(&mut self.canvas.preview_cuts, tr!("PREVIEW_CUTS"));
-                let has_anchors = self
-                    .template
-                    .as_ref()
-                    .is_some_and(|t| t.has(ElementKind::Anchors));
-                ui.add_enabled(
+                menu_checkbox(
+                    ui,
+                    true,
+                    &mut self.canvas.show_template,
+                    tr!("SHOW_TEMPLATE_LINES"),
+                    keys.get(&Command::ShowTemplate),
+                );
+                menu_checkbox(
+                    ui,
+                    true,
+                    &mut self.canvas.preview_cuts,
+                    tr!("PREVIEW_CUTS"),
+                    keys.get(&Command::PreviewCuts),
+                );
+                let has_anchors = self.has_anchors();
+                menu_checkbox(
+                    ui,
                     has_anchors,
-                    egui::Checkbox::new(&mut self.canvas.snap_to_anchors, tr!("SNAP_TO_ANCHORS")),
+                    &mut self.canvas.snap_to_anchors,
+                    tr!("SNAP_TO_ANCHORS"),
+                    keys.get(&Command::SnapToAnchors),
                 )
                 .on_hover_text(tr!("SNAP_TO_ANCHORS_HINT"))
                 .on_disabled_hover_text(tr!("TEMPLATE_HAS_NO_ANCHORS"));
-                ui.checkbox(&mut self.canvas.snap_to_edges, tr!("SNAP_TO_EDGES"))
-                    .on_hover_text(tr!("SNAP_TO_EDGES_HINT"));
+                menu_checkbox(
+                    ui,
+                    true,
+                    &mut self.canvas.snap_to_edges,
+                    tr!("SNAP_TO_EDGES"),
+                    keys.get(&Command::SnapToEdges),
+                )
+                .on_hover_text(tr!("SNAP_TO_EDGES_HINT"));
                 ui.separator();
                 ui.menu_button(tr!("MENU_PANELS"), |ui| self.panels_menu(ui));
                 ui.menu_button(tr!("MENU_THEME"), crate::theme::menu);
                 ui.menu_button(tr!("MENU_LANGUAGE"), |ui| {
                     i18n::menu(ui, &mut self.language)
                 });
+                let entry = menu_entry(
+                    tr!("MENU_KEYBOARD_SHORTCUTS"),
+                    keys.get(&Command::KeyboardShortcuts),
+                );
+                if ui.add(entry).clicked() {
+                    self.open_shortcuts();
+                }
             });
             ui.menu_button(tr!("MENU_TOOLS"), |ui| {
                 ui.menu_button(tr!("MENU_TEMPLATES"), |ui| {
@@ -1539,7 +1585,10 @@ impl ArtworkApp {
             }
             if ui
                 .small_button(tr!("FIT_PAGE_IN_VIEW_SHORT"))
-                .on_hover_text(tr!("FIT_PAGE_IN_VIEW_HINT"))
+                .on_hover_text(crate::shortcuts::with_key(
+                    tr!("FIT_PAGE_IN_VIEW"),
+                    self.shortcuts.text(ui.ctx(), Command::FitPage).as_ref(),
+                ))
                 .clicked()
             {
                 self.canvas.fit_pending = true;
@@ -2260,41 +2309,18 @@ impl ArtworkApp {
         }
     }
 
-    /// Keyboard shortcuts. Editing ones are skipped while a text field has focus.
+    /// Keyboard shortcuts. Only the File ones work while a text field has focus. Off
+    /// while the Keyboard shortcuts window is open, which takes the keys.
     fn shortcuts(&mut self, ctx: &egui::Context) {
-        let pressed = |sc: &KeyboardShortcut| ctx.input_mut(|i| i.consume_shortcut(sc));
-        if pressed(&SHORTCUT_NEW) {
-            self.new_project();
-        }
-        if pressed(&SHORTCUT_OPEN) {
-            self.open_project(ctx);
-        }
-        if pressed(&SHORTCUT_SAVE) {
-            self.save_project(ctx, false);
-        }
-        if pressed(&SHORTCUT_EXPORT) {
-            self.open_export();
-        }
-        if pressed(&SHORTCUT_PRINT) {
-            self.open_print();
-        }
-        if ctx.egui_wants_keyboard_input() {
+        if self.shortcuts_editor.is_some() {
             return;
         }
-        // Ctrl+Z also matches Ctrl+Shift+Z, so test the longer one first.
-        if pressed(&SHORTCUT_REDO) || pressed(&SHORTCUT_REDO_ALT) {
-            self.redo();
-        } else if pressed(&SHORTCUT_UNDO) {
-            self.undo();
+        let typing = ctx.egui_wants_keyboard_input();
+        for command in self.shortcuts.pressed(ctx, typing) {
+            self.run_command(ctx, command);
         }
-        if pressed(&SHORTCUT_TEXT) {
-            self.add_text(ctx);
-        }
-        if pressed(&SHORTCUT_IMAGE) {
-            self.pick_images(ctx);
-        }
-        if pressed(&SHORTCUT_SHAPE) {
-            self.add_shape(ctx, self.layers_panel.shape_kind);
+        if typing {
+            return;
         }
         // egui turns Ctrl+X, C and V (and their Windows alternatives) into events.
         let edits: Vec<_> = ctx.input_mut(|i| {
@@ -2316,16 +2342,8 @@ impl ArtworkApp {
                 None => self.edit(ctx, edit),
             }
         }
-        if pressed(&SHORTCUT_DUPLICATE) {
-            self.dirty |= layers_ui::duplicate(&mut self.doc, &mut self.selected);
-        }
-        // Ctrl+G also matches Ctrl+Shift+G, so test the longer one first.
-        if pressed(&SHORTCUT_UNGROUP) {
-            self.dirty |= layers_ui::ungroup(&mut self.doc, &mut self.selected);
-        } else if pressed(&SHORTCUT_GROUP) {
-            self.dirty |= layers_ui::group(&mut self.doc, &mut self.selected);
-        }
-        let (del, fit, arrows) = ctx.input(|i| {
+        // The arrow keys nudge; they cannot be changed.
+        let arrows = ctx.input(|i| {
             let step = if i.modifiers.shift { 10.0 } else { 1.0 };
             let mut d = [0.0f32, 0.0];
             for (key, v) in [
@@ -2338,34 +2356,97 @@ impl ArtworkApp {
                     d = [d[0] + v[0], d[1] + v[1]];
                 }
             }
-            (
-                i.key_pressed(Key::Delete) || i.key_pressed(Key::Backspace),
-                i.key_pressed(Key::F) && i.modifiers.is_none(),
-                d,
-            )
+            d
         });
-        // While a shape's points are edited, the keys act on the point picked last.
-        let point = self
-            .canvas
-            .points
-            .as_ref()
-            .is_some_and(|e| e.selected.is_some());
-        if del {
-            self.dirty |= if point {
-                canvas_points::delete_selected(&mut self.canvas.points, &mut self.doc)
-            } else {
-                layers_ui::delete(&mut self.doc, &mut self.selected)
-            };
-        }
-        if fit {
-            self.canvas.fit_pending = true;
-        }
         if arrows != [0.0, 0.0] {
-            self.dirty |= if point {
+            self.dirty |= if self.point_picked() {
                 canvas_points::nudge_selected(&self.canvas.points, &mut self.doc, arrows)
             } else {
                 layers_ui::nudge(&mut self.doc, self.selected, arrows)
             };
+        }
+    }
+
+    /// While a shape's points are edited, Delete and the arrow keys act on the point
+    /// picked last.
+    fn point_picked(&self) -> bool {
+        self.canvas
+            .points
+            .as_ref()
+            .is_some_and(|e| e.selected.is_some())
+    }
+
+    /// The template has anchors to snap to.
+    fn has_anchors(&self) -> bool {
+        self.template
+            .as_ref()
+            .is_some_and(|t| t.has(ElementKind::Anchors))
+    }
+
+    /// Does what a shortcut's command does.
+    fn run_command(&mut self, ctx: &egui::Context, command: Command) {
+        match command {
+            Command::NewProject => self.new_project(),
+            Command::OpenProject => self.open_project(ctx),
+            Command::Save => self.save_project(ctx, false),
+            Command::SaveAs => self.save_project(ctx, true),
+            Command::Export => self.open_export(),
+            Command::Print => self.open_print(),
+            // The app's window, also from a panel's own window.
+            Command::Quit => {
+                ctx.send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Close)
+            }
+            Command::Undo => self.undo(),
+            Command::Redo => self.redo(),
+            Command::Duplicate => {
+                self.dirty |= layers_ui::duplicate(&mut self.doc, &mut self.selected);
+            }
+            Command::Delete => {
+                self.dirty |= if self.point_picked() {
+                    canvas_points::delete_selected(&mut self.canvas.points, &mut self.doc)
+                } else {
+                    layers_ui::delete(&mut self.doc, &mut self.selected)
+                };
+            }
+            Command::AddImages => self.pick_images(ctx),
+            Command::AddText => self.add_text(ctx),
+            Command::AddShape => self.add_shape(ctx, self.layers_panel.shape_kind),
+            Command::Group => self.dirty |= layers_ui::group(&mut self.doc, &mut self.selected),
+            Command::Ungroup => {
+                self.dirty |= layers_ui::ungroup(&mut self.doc, &mut self.selected);
+            }
+            Command::FitPage => self.canvas.fit_pending = true,
+            Command::RealSize => self.canvas.set_zoom(REAL_SIZE_ZOOM),
+            Command::ShowTemplate => self.canvas.show_template ^= true,
+            Command::PreviewCuts => self.canvas.preview_cuts ^= true,
+            Command::SnapToAnchors => {
+                if self.has_anchors() {
+                    self.canvas.snap_to_anchors ^= true;
+                }
+            }
+            Command::SnapToEdges => self.canvas.snap_to_edges ^= true,
+            Command::KeyboardShortcuts => self.open_shortcuts(),
+            // Handled as clipboard events and arrow keys.
+            Command::Cut | Command::Copy | Command::Paste | Command::Nudge => {}
+        }
+    }
+
+    fn open_shortcuts(&mut self) {
+        self.shortcuts_editor = Some(crate::shortcuts::Editor::new(&self.shortcuts));
+    }
+
+    /// The Keyboard shortcuts window, while open. OK uses the shortcuts it shows.
+    fn shortcuts_window(&mut self, ctx: &egui::Context) {
+        let Some(editor) = &mut self.shortcuts_editor else {
+            return;
+        };
+        match editor.show(ctx) {
+            crate::shortcuts::Outcome::Open => {}
+            crate::shortcuts::Outcome::Apply(s) => {
+                self.shortcuts = s;
+                self.shortcuts_editor = None;
+            }
+            crate::shortcuts::Outcome::Cancel => self.shortcuts_editor = None,
         }
     }
 
@@ -2462,6 +2543,7 @@ impl eframe::App for ArtworkApp {
         self.recent.save(storage);
         self.language.save(storage);
         self.panels.save(storage);
+        self.shortcuts.save(storage);
     }
 
     /// One frame: input, panels, canvas and dialogs, then an undo step if the project
@@ -2490,6 +2572,7 @@ impl eframe::App for ArtworkApp {
         crate::colors::publish(&ctx, &self.doc);
         variables::publish(&ctx, &self.doc);
         self.shortcuts(&ctx);
+        self.layers_panel.keys = self.shortcuts.texts(&ctx);
         self.poll_export(&ctx);
         self.watch_template(&ctx);
         // Undo, redo or a reload may have changed effects or images.
@@ -2554,6 +2637,7 @@ impl eframe::App for ArtworkApp {
         self.overwrite_modal(&ctx);
         self.message_modal(&ctx);
         self.close_modal(&ctx);
+        self.shortcuts_window(&ctx);
 
         // Record a step once the edit is over: no button held, no text being typed. A
         // shape scaled by a drag that just ended takes its new size first, so the drag

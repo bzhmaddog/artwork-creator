@@ -6,11 +6,14 @@ use egui::{
     Stroke, StrokeKind, Ui, pos2, vec2,
 };
 
+use std::collections::HashMap;
+
 use crate::colors::ColorField;
 use crate::document::{Document, Group, Layer, Node, P2};
 use crate::effects_ui;
 use crate::i18n::{tr, tr_n, tr_noop, translate};
 use crate::shape::{self, Cap, DashStyle, Join, ShapeKind};
+use crate::shortcuts::Command;
 use crate::text::{self, FontLibrary, PathKind, TextAlign};
 use crate::variables::{self, Field};
 
@@ -41,6 +44,15 @@ pub struct LayersPanel {
     pub min_dpi: f32,
     /// Something was cut or copied, for the rows' Paste entry; set by the app.
     pub can_paste: bool,
+    /// Each command's shortcut as text, for tooltips and menus; set by the app.
+    pub keys: HashMap<Command, String>,
+}
+
+impl LayersPanel {
+    /// A tooltip followed by its command's shortcut.
+    fn hint(&self, text: &str, command: Command) -> String {
+        crate::shortcuts::with_key(text, self.keys.get(&command))
+    }
 }
 
 /// What the Align buttons line the selection up with.
@@ -692,6 +704,8 @@ pub enum Tool {
     Up,
     Down,
     Bottom,
+    /// Back to the defaults: a circular arrow, turning left.
+    Reset,
     Align(Align),
 }
 
@@ -830,6 +844,28 @@ pub fn tool_icon(ui: &mut Ui, tool: Tool, enabled: bool, tip: &str) -> Response 
             for x in [-1.8, 1.8] {
                 p.line_segment([at(x, -2.0), at(x, 4.5)], s);
             }
+        }
+        Tool::Reset => {
+            // Most of a circle, open at the top, the arrowhead at its right end pointing
+            // back up and left.
+            let r = 6.0;
+            let start = -std::f32::consts::FRAC_PI_2 + 0.6;
+            let sweep = std::f32::consts::TAU - 1.2;
+            let point = |a: f32| at(r * a.cos(), r * a.sin() + 0.5);
+            let arc: Vec<Pos2> = (0..=24)
+                .map(|i| point(start + sweep * i as f32 / 24.0))
+                .collect();
+            p.add(Shape::line(arc, s));
+            // Against the way the arc goes from its start.
+            let dir = -vec2(-start.sin(), start.cos());
+            let side = vec2(-dir.y, dir.x);
+            let tip = point(start) + dir * 2.5;
+            let back = point(start) - dir * 1.5;
+            p.add(Shape::convex_polygon(
+                vec![tip, back + side * 3.0, back - side * 3.0],
+                c,
+                Stroke::NONE,
+            ));
         }
         Tool::Up => chevron(0.0, true),
         Tool::Down => chevron(0.0, false),
@@ -1066,19 +1102,27 @@ pub fn show(
         ui.spacing_mut().item_spacing.x = 2.0;
         let id = sel.unwrap_or(0);
         // One button per kind of layer, so each says what it adds.
-        if tool_button(ui, Tool::AddImage, true, tr!("ADD_IMAGE_LAYERS")) {
+        let hint = state.hint(tr!("ADD_IMAGE_LAYERS"), Command::AddImages);
+        if tool_button(ui, Tool::AddImage, true, &hint) {
             out.add_images = true;
         }
-        if tool_button(ui, Tool::AddText, true, tr!("ADD_TEXT_LAYER")) {
+        let hint = state.hint(tr!("ADD_TEXT_LAYER"), Command::AddText);
+        if tool_button(ui, Tool::AddText, true, &hint) {
             out.add_text = true;
         }
-        let button = tool_icon(ui, Tool::AddShape, true, tr!("ADD_SHAPE_LAYER"));
+        let hint = match state.keys.get(&Command::AddShape) {
+            Some(s) => tr!("ADD_SHAPE_LAYER_WITH_SHORTCUT", shortcut = s),
+            None => tr!("ADD_SHAPE_LAYER").to_owned(),
+        };
+        let button = tool_icon(ui, Tool::AddShape, true, &hint);
         egui::Popup::menu(&button).show(|ui| {
             for kind in ShapeKind::ALL {
                 let mut b = Button::new(translate(kind.name_key()));
                 // The shortcut adds the kind added last.
-                if kind == state.shape_kind {
-                    b = b.shortcut_text("Ctrl+R");
+                if kind == state.shape_kind
+                    && let Some(s) = state.keys.get(&Command::AddShape)
+                {
+                    b = b.shortcut_text(s.as_str());
                 }
                 if ui.add(b).clicked() {
                     out.add_shape = Some(kind);
@@ -1087,13 +1131,16 @@ pub fn show(
             }
         });
         ui.add_space(6.0);
-        if tool_button(ui, Tool::Group, true, tr!("GROUP_LAYERS")) {
+        let hint = state.hint(tr!("GROUP_LAYERS"), Command::Group);
+        if tool_button(ui, Tool::Group, true, &hint) {
             out.changed |= group(doc, selected);
         }
-        if tool_button(ui, Tool::Ungroup, is_group, tr!("UNGROUP_LAYERS")) {
+        let hint = state.hint(tr!("UNGROUP_LAYERS"), Command::Ungroup);
+        if tool_button(ui, Tool::Ungroup, is_group, &hint) {
             out.changed |= ungroup(doc, selected);
         }
-        if tool_button(ui, Tool::Duplicate, has, tr!("DUPLICATE_LAYER_HINT")) {
+        let hint = state.hint(tr!("DUPLICATE_LAYER"), Command::Duplicate);
+        if tool_button(ui, Tool::Duplicate, has, &hint) {
             out.changed |= duplicate(doc, selected);
         }
         ui.add_space(6.0);
@@ -1120,7 +1167,8 @@ pub fn show(
             out.changed |= move_to_end(doc, id, false);
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if tool_button(ui, Tool::Delete, has, tr!("DELETE_LAYER_HINT")) {
+            let hint = state.hint(tr!("DELETE_LAYER"), Command::Delete);
+            if tool_button(ui, Tool::Delete, has, &hint) {
                 out.changed |= delete(doc, selected);
             }
         });
@@ -1232,23 +1280,29 @@ pub fn show(
                         }
                         r.dnd_set_drag_payload(DraggedNode(row.id));
                         r.context_menu(|ui| {
-                            for (edit, key, shortcut, enabled) in [
-                                (Edit::Cut, tr_noop!("CUT_LAYER"), "Ctrl+X", true),
-                                (Edit::Copy, tr_noop!("COPY_LAYER"), "Ctrl+C", true),
+                            let entry = |key: &str, c: Command| {
+                                let b = Button::new(translate(key));
+                                match state.keys.get(&c) {
+                                    Some(s) => b.shortcut_text(s.as_str()),
+                                    None => b,
+                                }
+                            };
+                            for (edit, key, c, enabled) in [
+                                (Edit::Cut, tr_noop!("CUT_LAYER"), Command::Cut, true),
+                                (Edit::Copy, tr_noop!("COPY_LAYER"), Command::Copy, true),
                                 (
                                     Edit::Paste,
                                     tr_noop!("PASTE_LAYER"),
-                                    "Ctrl+V",
+                                    Command::Paste,
                                     state.can_paste,
                                 ),
                             ] {
-                                let b = Button::new(translate(key)).shortcut_text(shortcut);
-                                if ui.add_enabled(enabled, b).clicked() {
+                                if ui.add_enabled(enabled, entry(key, c)).clicked() {
                                     pending_edit = Some((row.id, edit));
                                 }
                             }
                             if ui
-                                .add(Button::new(tr!("DUPLICATE_LAYER")).shortcut_text("Ctrl+D"))
+                                .add(entry(tr_noop!("DUPLICATE_LAYER"), Command::Duplicate))
                                 .clicked()
                             {
                                 pending_duplicate = Some(row.id);
@@ -1831,12 +1885,13 @@ fn choice<T: Copy + PartialEq>(
 }
 
 /// The part of Properties for a shape layer: its kind, fill and stroke. Returns true if
-/// it changed.
+/// it changed. `delete_key` is the Delete command's shortcut, named in a tooltip.
 fn shape_section(
     ui: &mut Ui,
     layer: &mut Layer,
     locked: bool,
     edit_points: &mut Option<u64>,
+    delete_key: &str,
 ) -> bool {
     let id = layer.id;
     let mut changed = false;
@@ -1926,7 +1981,7 @@ fn shape_section(
                                     !locked,
                                     egui::Button::selectable(on, tr!("EDIT_POINTS")),
                                 )
-                                .on_hover_text(tr!("EDIT_POINTS_HINT"));
+                                .on_hover_text(tr!("EDIT_POINTS_HINT", delete = delete_key));
                             if r.clicked() {
                                 *edit_points = if on { None } else { Some(id) };
                             }
@@ -2404,7 +2459,14 @@ fn properties(
                     if layer.text.is_some() {
                         out.changed |= text_section(ui, layer, state, fonts, &shapes);
                     } else if layer.shape.is_some() {
-                        out.changed |= shape_section(ui, layer, locked, &mut state.edit_points);
+                        // Without a shortcut, the command's name.
+                        let delete = state
+                            .keys
+                            .get(&Command::Delete)
+                            .cloned()
+                            .unwrap_or_else(|| tr!("DELETE_LAYER").to_owned());
+                        out.changed |=
+                            shape_section(ui, layer, locked, &mut state.edit_points, &delete);
                     } else {
                         image_section(ui, layer, state.min_dpi);
                     }

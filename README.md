@@ -355,6 +355,22 @@ To add a language: add a `Language` variant and its table in `src/i18n.rs`, and 
 
 ## Shortcuts
 
+The keys of the commands can be changed in **View > Keyboard shortcuts**: click a
+command's key and press the new one (Esc to keep it), **+** to give it another one, and
+right-click a key to remove it; the trash at the end of the row removes them all. A key
+can belong to one command only: one already used by another command is refused: the
+window says which, and briefly highlights that command's row and key (shown whatever the
+search); remove it there first. The circular
+arrow at the end of the row gives a command its default keys back, those another command
+does not use by then, and
+**Reset all** does it for every command. Save As, Quit, Real size, the View options and the window itself have no key by
+default; you can give them one. Cut, Copy and Paste, and the arrow keys, keep theirs.
+Search by command name or by key. While you type in a text field, only the File commands
+work, and only with Ctrl or Alt held. The keys are kept between sessions; menus and
+tooltips show the current ones.
+
+The default keys:
+
 | Action | Shortcut |
 |---|---|
 | New / Open / Save project | Ctrl+N / Ctrl+O / Ctrl+S |
@@ -373,7 +389,7 @@ To add a language: add a `Language` variant and its table in `src/i18n.rs`, and 
 | Cut / Copy / Paste layer | Ctrl+X / Ctrl+C / Ctrl+V |
 | Duplicate | Ctrl+D |
 | Group / Ungroup | Ctrl+G / Ctrl+Shift+G |
-| Delete layer | Del |
+| Delete layer | Del or Backspace |
 | Nudge by 1 mm (10 mm with Shift) | Arrow keys |
 | Fit page in view | F |
 | Pan | Space+drag, middle or right drag, or drag on empty canvas |

@@ -58,10 +58,10 @@ layers panel on the right](doc/capture.png)
   outline (solid, dashed, dotted or dash-dot). They are stacked, reordered and toggled in the layer's properties, applied to
   the export at full resolution, and never change the image file. More effects can be
   added with [plugins](#plugins).
-- **Variables**: named values kept with the project, in the **Variables** section of the
-  left panel, each of a kind: a length in mm (`button = 30`), an angle in degrees, a text
-  size in pt, a number without a unit (`count = 3`), a color or a text. **Add a
-  variable** asks for the kind; the section lists the variables grouped by kind, each
+- **Variables**: named values kept with the project, in the **Variables** panel, each
+  of a kind: a length in mm (`button = 30`), an angle in degrees, a text size in pt, a
+  number without a unit (`count = 3`), a color or a text. **Add a
+  variable** asks for the kind; the panel lists the variables grouped by kind, each
   behind its kind's icon, with its unit after its value.
   - Type a variable's name, or a formula such as `button + 2` or
     `(panel - 2 * margin) / 3`, in a layer's width, height, x, y, stroke width or corner
@@ -98,7 +98,7 @@ layers panel on the right](doc/capture.png)
     changes, so one variable can fill several layers. Typing in the text, in the panel
     or on the canvas, unlinks it, with a warning in the status bar (undo links it
     again); **Unlink, keeping the value** unlinks it too.
-  - The **Colors in use** section, below Variables, lists the colors in use one per
+  - The **Colors in use** panel, below Variables by default, lists the colors in use one per
     row, as `#RRGGBB` followed by its opacity (`100%`). Double-click one to
     add a color variable of that color, even if another color variable has it.
   - Renaming a variable renames it in the formulas and links. Removing one that is in
@@ -164,6 +164,18 @@ layers panel on the right](doc/capture.png)
   and their position), so a project exports the same way every time. Changing them
   counts as an unsaved change, but not as an undo step.
   **File > Open Recent** lists the last 10 projects.
+- **Movable panels**: Controller, Page, Template, Variables, Colors in use, Layers and
+  Properties are each a panel. Drag a panel by its title onto the left or right side of
+  the window to dock it there, above or below the other panels of that side (a line shows
+  where it goes), or anywhere else to float it over the canvas; drag a floating panel's
+  title to move it, or onto a side to dock it again. The menu at the right of a panel's
+  title docks it on either side, floats it, opens it in a window of its own (to put it on
+  another screen; keyboard shortcuts work there too) or hides it. A click on a docked
+  panel's title folds it. Panels on the same side share its height: small ones get what
+  they need, the others share the rest and scroll. Drag the edge of a side to widen it,
+  or the line between two docked panels to give the one above more or less height
+  (double-click the line to give it the height it needs again). **View > Panels** shows hidden panels
+  again and resets the layout. The layout is kept between sessions.
 - **English (US and UK) and French (France)** interface. It follows the system language
   by default; choose another in **View > Language**.
 

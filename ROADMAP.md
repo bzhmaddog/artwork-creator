@@ -124,7 +124,14 @@ Planned:
 
 ### Interface
 
+Done:
+
+- **Panel positions**: each panel docked on the left or right of the window in any
+  order, floating over the canvas or in a window of its own, moved by dragging its title
+  or from its menu; docked panels resized by dragging the line between them; shown,
+  hidden and reset from View > Panels; kept between sessions.
+
+Planned:
+
 - **Customizable shortcuts**.
 - **More languages**.
-- **Panel positions**: panels dragged and placed where the user wants, floating or
-  docked to an edge of the window.

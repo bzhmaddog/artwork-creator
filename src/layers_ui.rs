@@ -98,6 +98,8 @@ pub struct LayersOutput {
     pub add_shape: Option<ShapeKind>,
     /// Cut, Copy or Paste was picked in a row's menu, that row now selected.
     pub edit: Option<Edit>,
+    /// The height the layer list and its toolbar would take without a limit.
+    pub natural_height: f32,
 }
 
 /// Clipboard commands, which the app carries out.
@@ -675,7 +677,7 @@ fn expander(ui: &mut Ui, expanded: &mut bool) {
         .add(Shape::convex_polygon(pts, c, Stroke::NONE));
 }
 
-/// Icons of the toolbar under the layer list.
+/// Icons of the toolbar above the layer list.
 #[derive(Clone, Copy)]
 pub enum Tool {
     Add,
@@ -1046,29 +1048,94 @@ fn rows(doc: &Document) -> Vec<Row> {
     out
 }
 
-/// `template_bounds` is the template's axis-aligned box on the page: (center, size).
+/// The Layers panel: the list of layers and groups, and its toolbar.
 pub fn show(
     ui: &mut Ui,
     doc: &mut Document,
     selected: &mut Option<u64>,
     state: &mut LayersPanel,
-    template_bounds: Option<(P2, P2)>,
-    fonts: &FontLibrary,
 ) -> LayersOutput {
     let mut out = LayersOutput::default();
-    ui.heading(tr!("LAYERS_SECTION"));
-
     let sel = selected.filter(|&id| doc.path_of(id).is_some());
     let has = sel.is_some();
     let is_group = sel.and_then(|id| doc.node(id)?.as_group()).is_some();
+
+    // Toolbar above the list, always in sight however long the list.
+    let top = ui.cursor().top();
+    ui.horizontal(|ui| {
+        ui.spacing_mut().item_spacing.x = 2.0;
+        let id = sel.unwrap_or(0);
+        // One button per kind of layer, so each says what it adds.
+        if tool_button(ui, Tool::AddImage, true, tr!("ADD_IMAGE_LAYERS")) {
+            out.add_images = true;
+        }
+        if tool_button(ui, Tool::AddText, true, tr!("ADD_TEXT_LAYER")) {
+            out.add_text = true;
+        }
+        let button = tool_icon(ui, Tool::AddShape, true, tr!("ADD_SHAPE_LAYER"));
+        egui::Popup::menu(&button).show(|ui| {
+            for kind in ShapeKind::ALL {
+                let mut b = Button::new(translate(kind.name_key()));
+                // The shortcut adds the kind added last.
+                if kind == state.shape_kind {
+                    b = b.shortcut_text("Ctrl+R");
+                }
+                if ui.add(b).clicked() {
+                    out.add_shape = Some(kind);
+                    ui.close();
+                }
+            }
+        });
+        ui.add_space(6.0);
+        if tool_button(ui, Tool::Group, true, tr!("GROUP_LAYERS")) {
+            out.changed |= group(doc, selected);
+        }
+        if tool_button(ui, Tool::Ungroup, is_group, tr!("UNGROUP_LAYERS")) {
+            out.changed |= ungroup(doc, selected);
+        }
+        if tool_button(ui, Tool::Duplicate, has, tr!("DUPLICATE_LAYER_HINT")) {
+            out.changed |= duplicate(doc, selected);
+        }
+        ui.add_space(6.0);
+        if tool_button(ui, Tool::Top, has, tr!("MOVE_LAYER_TO_TOP")) {
+            out.changed |= move_to_end(doc, id, true);
+        }
+        if tool_button(
+            ui,
+            Tool::Up,
+            has && can_step(doc, id, true),
+            tr!("MOVE_LAYER_UP"),
+        ) {
+            out.changed |= move_step(doc, id, true);
+        }
+        if tool_button(
+            ui,
+            Tool::Down,
+            has && can_step(doc, id, false),
+            tr!("MOVE_LAYER_DOWN"),
+        ) {
+            out.changed |= move_step(doc, id, false);
+        }
+        if tool_button(ui, Tool::Bottom, has, tr!("MOVE_LAYER_TO_BOTTOM")) {
+            out.changed |= move_to_end(doc, id, false);
+        }
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if tool_button(ui, Tool::Delete, has, tr!("DELETE_LAYER_HINT")) {
+                out.changed |= delete(doc, selected);
+            }
+        });
+    });
+    ui.separator();
+    let toolbar = ui.cursor().top() - top;
 
     // Layer list, top of the stack first.
     let mut pending_drop = None;
     let mut pending_duplicate = None;
     let mut pending_edit = None;
-    egui::ScrollArea::vertical()
+    // The list takes the rest of the panel's height.
+    let list = egui::ScrollArea::vertical()
         .id_salt("layer_list")
-        .max_height(ui.available_height() * 0.5)
+        .max_height(ui.available_height().max(TOOL))
         .show(ui, |ui| {
             if doc.layers.is_empty() {
                 crate::callout::callout(ui, crate::callout::Tone::Info, tr!("NO_LAYERS_YET"));
@@ -1269,6 +1336,7 @@ pub fn show(
                 }
             }
         });
+    out.natural_height = list.content_size.y + toolbar;
     if let Some((id, target)) = pending_drop {
         out.changed |= drop_node(doc, id, target);
     }
@@ -1281,78 +1349,22 @@ pub fn show(
         out.edit = Some(edit);
     }
 
-    // Toolbar under the list, as in most layer panels.
-    ui.add_space(2.0);
-    ui.horizontal(|ui| {
-        ui.spacing_mut().item_spacing.x = 2.0;
-        let id = sel.unwrap_or(0);
-        // One button per kind of layer, so each says what it adds.
-        if tool_button(ui, Tool::AddImage, true, tr!("ADD_IMAGE_LAYERS")) {
-            out.add_images = true;
-        }
-        if tool_button(ui, Tool::AddText, true, tr!("ADD_TEXT_LAYER")) {
-            out.add_text = true;
-        }
-        let button = tool_icon(ui, Tool::AddShape, true, tr!("ADD_SHAPE_LAYER"));
-        egui::Popup::menu(&button).show(|ui| {
-            for kind in ShapeKind::ALL {
-                let mut b = Button::new(translate(kind.name_key()));
-                // The shortcut adds the kind added last.
-                if kind == state.shape_kind {
-                    b = b.shortcut_text("Ctrl+R");
-                }
-                if ui.add(b).clicked() {
-                    out.add_shape = Some(kind);
-                    ui.close();
-                }
-            }
-        });
-        ui.add_space(6.0);
-        if tool_button(ui, Tool::Group, true, tr!("GROUP_LAYERS")) {
-            out.changed |= group(doc, selected);
-        }
-        if tool_button(ui, Tool::Ungroup, is_group, tr!("UNGROUP_LAYERS")) {
-            out.changed |= ungroup(doc, selected);
-        }
-        if tool_button(ui, Tool::Duplicate, has, tr!("DUPLICATE_LAYER_HINT")) {
-            out.changed |= duplicate(doc, selected);
-        }
-        ui.add_space(6.0);
-        if tool_button(ui, Tool::Top, has, tr!("MOVE_LAYER_TO_TOP")) {
-            out.changed |= move_to_end(doc, id, true);
-        }
-        if tool_button(
-            ui,
-            Tool::Up,
-            has && can_step(doc, id, true),
-            tr!("MOVE_LAYER_UP"),
-        ) {
-            out.changed |= move_step(doc, id, true);
-        }
-        if tool_button(
-            ui,
-            Tool::Down,
-            has && can_step(doc, id, false),
-            tr!("MOVE_LAYER_DOWN"),
-        ) {
-            out.changed |= move_step(doc, id, false);
-        }
-        if tool_button(ui, Tool::Bottom, has, tr!("MOVE_LAYER_TO_BOTTOM")) {
-            out.changed |= move_to_end(doc, id, false);
-        }
-        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-            if tool_button(ui, Tool::Delete, has, tr!("DELETE_LAYER_HINT")) {
-                out.changed |= delete(doc, selected);
-            }
-        });
-    });
+    out
+}
 
-    ui.separator();
-    egui::ScrollArea::vertical()
-        .id_salt("layer_props")
-        .show(ui, |ui| {
-            properties(ui, doc, sel, state, template_bounds, fonts, &mut out)
-        });
+/// The Properties panel: what can be set on the selected layer or group.
+/// `template_bounds` is the template's axis-aligned box on the page: (center, size).
+pub fn properties_panel(
+    ui: &mut Ui,
+    doc: &mut Document,
+    selected: Option<u64>,
+    state: &mut LayersPanel,
+    template_bounds: Option<(P2, P2)>,
+    fonts: &FontLibrary,
+) -> LayersOutput {
+    let mut out = LayersOutput::default();
+    let sel = selected.filter(|&id| doc.path_of(id).is_some());
+    properties(ui, doc, sel, state, template_bounds, fonts, &mut out);
     out
 }
 
@@ -2172,7 +2184,7 @@ fn properties(
             section(
                 ui,
                 "layer_props",
-                RichText::new(tr!("PROPERTIES_SECTION")).strong(),
+                RichText::new(tr!("LAYER_GENERAL_SECTION")).strong(),
                 |_| false,
                 |ui| {
                     prop_grid(ui, "group_props").show(ui, |ui| {
@@ -2210,7 +2222,7 @@ fn properties(
             section(
                 ui,
                 "layer_props",
-                RichText::new(tr!("PROPERTIES_SECTION")).strong(),
+                RichText::new(tr!("LAYER_GENERAL_SECTION")).strong(),
                 move |_| open,
                 |ui| {
                     prop_grid(ui, "layer_props").show(ui, |ui| {
@@ -2490,15 +2502,17 @@ mod tests {
             };
             let mut added = None;
             let mut out = self.ctx.run_ui(input, |ui| {
-                added = show(
+                // The Layers panel above the Properties panel, as docked by default.
+                added = show(ui, &mut self.doc, &mut self.selected, &mut self.state).add_shape;
+                ui.separator();
+                properties_panel(
                     ui,
                     &mut self.doc,
-                    &mut self.selected,
+                    self.selected,
                     &mut self.state,
                     None,
                     &FontLibrary::builtin_only(),
-                )
-                .add_shape;
+                );
             });
             self.added_shape = self.added_shape.or(added);
             out.textures_delta.clear();
@@ -2636,13 +2650,13 @@ mod tests {
         let shown = |h: &mut Harness, text: &str| h.frame(vec![]).iter().any(|(t, _)| t == text);
         assert!(shown(&mut h, "Opacity") && shown(&mut h, "Effects"));
 
-        let p = h.label("Properties");
+        let p = h.label("General");
         h.click(p);
         // Let the folding animation finish.
         for _ in 0..30 {
             h.frame(vec![]);
         }
-        assert!(!shown(&mut h, "Opacity"), "Properties folded");
+        assert!(!shown(&mut h, "Opacity"), "General folded");
         assert!(
             shown(
                 &mut h,
@@ -2672,12 +2686,12 @@ mod tests {
         assert!(shown(&mut h, "Effects (1)"));
         assert!(h.handle("Invert").x > 0.0, "Effects opened on adding");
 
-        let p = h.label("Properties");
+        let p = h.label("General");
         h.click(p);
         for _ in 0..30 {
             h.frame(vec![]);
         }
-        assert!(shown(&mut h, "Opacity"), "Properties open again");
+        assert!(shown(&mut h, "Opacity"), "General open again");
     }
 
     #[test]
@@ -2686,7 +2700,7 @@ mod tests {
         h.selected = Some(1);
         for (label, want) in [
             ("Opacity", egui::CursorIcon::Default),
-            ("Properties", egui::CursorIcon::Default),
+            ("General", egui::CursorIcon::Default),
         ] {
             let p = h.label(label);
             h.pointer(p, None);
@@ -2888,13 +2902,7 @@ mod tests {
         let mut h = Harness::new(doc);
         h.selected = Some(1);
         let labels = h.frame(vec![]);
-        for want in [
-            "Font",
-            "Font size",
-            "Letter spacing",
-            "Outline",
-            "Properties",
-        ] {
+        for want in ["Font", "Font size", "Letter spacing", "Outline", "General"] {
             assert!(labels.iter().any(|(t, _)| t == want), "no {want:?}");
         }
         assert!(
@@ -2907,7 +2915,7 @@ mod tests {
         assert!(labels.iter().any(|(t, _)| t == "24.0"), "{labels:?}");
         // The text settings are a part of Properties, below the common ones.
         let y = |want: &str| labels.iter().find(|(t, _)| t == want).unwrap().1.y;
-        assert!(y("Properties") < y("Opacity") && y("Opacity") < y("Text"));
+        assert!(y("General") < y("Opacity") && y("Opacity") < y("Text"));
         assert!(y("Text") < y("Font"));
     }
 
@@ -3075,17 +3083,18 @@ mod tests {
     #[test]
     fn shape_menu_and_properties() {
         let mut h = Harness::new(doc_with(vec![layer(1)]));
-        // The Shape button is the third in the toolbar, above the hint at the bottom.
+        // The Shape button is the third in the toolbar, at the top of the panel, above
+        // the layer list.
         let labels = h.frame(vec![]);
         assert!(!labels.iter().any(|(t, _)| t == "Star"), "menu closed");
-        let hint = labels
+        let first_layer = labels
             .iter()
-            .find(|(t, _)| t.starts_with("Select a layer"))
+            .find(|(t, _)| t == "l1")
             .map(|(_, p)| p.y)
-            .unwrap();
+            .expect("the layer is listed");
         let mut found = None;
-        for dy in (8..60).step_by(4) {
-            let p = Pos2::new(2.0 * (TOOL + 2.0) + TOOL / 2.0, hint - dy as f32);
+        for y in (2..first_layer as i32).step_by(4) {
+            let p = Pos2::new(2.0 * (TOOL + 2.0) + TOOL / 2.0, y as f32);
             h.click(p);
             if h.frame(vec![]).iter().any(|(t, _)| t == "Star") {
                 found = Some(p);
@@ -3205,7 +3214,6 @@ mod tests {
             ],
             ..Default::default()
         });
-        let fonts = FontLibrary::builtin_only();
         let state = std::cell::RefCell::new(LayersPanel::default());
         crate::preview::render(&path, vec2(260.0, 330.0), |ui| {
             let mut selected = None;
@@ -3214,8 +3222,6 @@ mod tests {
                 &mut doc.borrow_mut(),
                 &mut selected,
                 &mut state.borrow_mut(),
-                None,
-                &fonts,
             );
         });
     }

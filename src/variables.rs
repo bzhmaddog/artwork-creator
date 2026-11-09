@@ -1137,7 +1137,12 @@ pub fn broken_links(layer: &Layer, vars: &[Variable]) -> Vec<String> {
     };
     let colors = layer.color_links.values();
     let effects = layer.effects.iter().flat_map(|fx| fx.links.values());
-    for name in colors.chain(effects) {
+    let gradients = layer.gradients();
+    let stops = gradients
+        .iter()
+        .flat_map(|g| &g.stops)
+        .filter_map(|s| s.link.as_ref());
+    for name in colors.chain(effects).chain(stops) {
         if !is(name, Kind::Color) {
             add(name);
         }

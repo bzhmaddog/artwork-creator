@@ -1327,15 +1327,24 @@ impl ArtworkApp {
             self.canvas.fit_pending = true;
             self.dirty = true;
         }
+        // One color, or a gradient over the whole page; opaque, the page being so.
+        let doc = &mut self.doc;
+        let [r, g, b] = doc.background;
+        let mut color = [r, g, b, 255];
+        let mut fill = crate::gradient_ui::Fill {
+            color: &mut color,
+            link: &mut doc.background_link,
+            gradient: &mut doc.background_gradient,
+            alpha: false,
+        };
+        let mut changed = false;
         ui.horizontal(|ui| {
             ui.label(tr!("PAGE_BACKGROUND"));
-            let doc = &mut self.doc;
-            if crate::colors::button_rgb(ui, &mut doc.background, &mut doc.background_link)
-                .changed()
-            {
-                self.dirty = true;
-            }
+            changed |= crate::gradient_ui::inline(ui, "background", &mut fill);
         });
+        changed |= crate::gradient_ui::rows(ui, "background", &mut fill);
+        doc.background = [color[0], color[1], color[2]];
+        self.dirty |= changed;
     }
 
     /// A panel's contents; the Layers panel returns the height it would take.

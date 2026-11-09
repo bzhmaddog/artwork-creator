@@ -95,12 +95,17 @@ Done:
 - **Colors in use** section listing the project's colors with their code and opacity, a
   double click saving one as a color variable; color pickers show the colors in use, the
   color variables, and the color's hex code and opacity.
+- **Fade to transparent** effects, linear (toward the right, left, top or bottom) or radial (edges, or the
+  center), over the object's visible pixels, shaped by an easing curve (presets, or a
+  Bezier curve whose handles are dragged).
+- **Gradient fills**, linear or radial with any number of colors, for a shape's fill and
+  stroke, a text and the page background; kept as vector gradients in the PDF.
 
 Planned:
 
 - **Clipping masks**: clip a layer to the shape of the layer below it, or to a group.
 - **Blend modes** (multiply, screen, overlay...).
-- **Gradient and pattern fills** for shapes, text and a background layer.
+- **Pattern fills** for shapes, text and the background.
 - **Background color** layer filling the whole outline.
 - **Flip** layers horizontally and vertically.
 - **Rulers and guides** dragged from the rulers, with snapping.

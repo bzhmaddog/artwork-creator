@@ -17,11 +17,11 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use tiny_skia::{
-    FillRule, LineCap, LineJoin, Paint, Path, PathBuilder, Pixmap, Rect, Stroke, StrokeDash,
-    Transform,
+    FillRule, LineCap, LineJoin, Path, PathBuilder, Pixmap, Rect, Stroke, StrokeDash, Transform,
 };
 
 use crate::document::{Document, Layer, P2};
+use crate::gradient::Ink;
 use crate::i18n::{tr_noop, translate};
 use crate::render::Outlines;
 use crate::text;
@@ -227,11 +227,18 @@ pub struct Shape {
     pub fill: bool,
     /// Straight RGBA.
     pub fill_color: [u8; 4],
+    /// Fills it instead of `fill_color`, when set; `fill_color` is kept for going back to
+    /// one color.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill_gradient: Option<crate::gradient::Gradient>,
     /// Draw a line along the outline, centered on it.
     pub stroke: bool,
     pub stroke_width: f32,
     /// Straight RGBA.
     pub stroke_color: [u8; 4],
+    /// Paints the stroke instead of `stroke_color`, when set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stroke_gradient: Option<crate::gradient::Gradient>,
     pub dash: DashStyle,
     pub cap: Cap,
     pub join: Join,
@@ -267,9 +274,11 @@ impl Shape {
             inner_ratio: 0.5,
             fill: !open,
             fill_color: [70, 130, 180, 255],
+            fill_gradient: None,
             stroke: true,
             stroke_width: if open { 1.0 } else { 0.5 },
             stroke_color: [0, 0, 0, 255],
+            stroke_gradient: None,
             dash: DashStyle::Solid,
             cap: if open { Cap::Round } else { Cap::Butt },
             join: if open { Join::Round } else { Join::Miter },
@@ -461,12 +470,15 @@ impl Shape {
     }
 
     /// The filled shapes that draw it, in mm in its own frame, bottom first: the fill,
-    /// then the stroke turned into a shape. Each is filled with its straight RGBA color
-    /// under the non-zero rule.
-    pub fn coats(&self) -> Vec<(Path, [u8; 4])> {
+    /// then the stroke turned into a shape. Each is filled with its color or gradient
+    /// under the non-zero rule. Gradients span the shape's box, stroke included.
+    pub fn coats(&self) -> Vec<(Path, Ink)> {
         let Some(path) = self.path() else {
             return Vec::new();
         };
+        let frame = self
+            .bounds()
+            .and_then(|(lo, hi)| Rect::from_ltrb(lo[0], lo[1], hi[0], hi[1]));
         let mut out = Vec::new();
         if self.stroked() {
             let line = match self.dash {
@@ -474,11 +486,13 @@ impl Shape {
                 _ => self.dashed(&path),
             };
             if let Some(stroke) = line.and_then(|l| l.stroke(&self.stroke_style(), CURVE_RES)) {
-                out.push((stroke, self.stroke_color));
+                let ink = Ink::of(self.stroke_color, self.stroke_gradient.as_ref(), frame);
+                out.push((stroke, ink));
             }
         }
         if self.filled() {
-            out.insert(0, (path, self.fill_color));
+            let ink = Ink::of(self.fill_color, self.fill_gradient.as_ref(), frame);
+            out.insert(0, (path, ink));
         }
         out
     }
@@ -1143,11 +1157,8 @@ fn draw(layer: &Layer, px_per_unit: f32) -> Option<Pixmap> {
     // Exactly the layer's box, even where the pixel size was rounded.
     let ts = Transform::from_translate(-o[0], -o[1])
         .post_scale(UNITS_PER_MM * w / sw, UNITS_PER_MM * h / sh);
-    for (path, c) in shape.coats() {
-        let mut paint = Paint::default();
-        paint.set_color_rgba8(c[0], c[1], c[2], c[3]);
-        paint.anti_alias = true;
-        pixmap.fill_path(&path, &paint, FillRule::Winding, ts, None);
+    for (path, ink) in shape.coats() {
+        pixmap.fill_path(&path, &ink.paint(), FillRule::Winding, ts, None);
     }
     Some(pixmap)
 }
@@ -1157,10 +1168,20 @@ pub fn outlines(layer: &Layer) -> Option<Outlines> {
     let shape = layer.shape.as_ref()?;
     let o = layer.shape_state.origin?;
     let ts = Transform::from_translate(-o[0], -o[1]).post_scale(UNITS_PER_MM, UNITS_PER_MM);
+    // The paths, and the box a gradient spans, from the shape's mm to layer units.
     let fills = shape
         .coats()
         .into_iter()
-        .filter_map(|(path, c)| Some((path.transform(ts)?, c)))
+        .filter_map(|(path, ink)| {
+            let ink = match ink {
+                Ink::Gradient { gradient, frame } => Ink::Gradient {
+                    gradient,
+                    frame: frame.transform(ts)?,
+                },
+                solid => solid,
+            };
+            Some((path.transform(ts)?, ink))
+        })
         .collect();
     Some(Outlines {
         fills,

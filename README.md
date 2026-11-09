@@ -23,7 +23,9 @@ layers panel on the right](doc/capture.png)
 
 - **Layers and groups**: add images (PNG, JPEG, WebP, BMP, GIF) by button or drag and drop;
   reorder, group, duplicate, hide and lock them; group opacity is applied to the group as
-  a whole. Cut, copy and paste layers and groups, within a project, into another one, or
+  a whole. A locked layer does not move or change on the canvas, but a click selects it
+  when no unlocked layer is under the pointer (so the layer toolbar and Properties work
+  on it); a padlock in its middle shows it is locked. Cut, copy and paste layers and groups, within a project, into another one, or
   between two windows of the app. A paste goes above the selection. Copies land 5 mm
   from the original, each one a step further. The first paste of a cut, or of a copy
   from another window, lands in place. A copy whose name is taken is named "name copy",
@@ -51,11 +53,22 @@ layers panel on the right](doc/capture.png)
   width in mm, and one kind can be turned into another (a rectangle into a polygon of its
   corners, for instance). Shapes move, rotate, distort and take effects like
   images, and are drawn at the export resolution.
+- **Gradients**: a shape's fill and stroke, a text's letters and the page background can
+  each be one color or a linear or radial gradient (Solid / Linear gradient / Radial
+  gradient, next to its color). A linear gradient runs at an angle, from one corner of
+  the layer's box to the opposite one; a radial one grows from a center (its position and
+  radius can be set) in an ellipse the shape of the box. Its colors sit on a bar: click
+  the bar to add one, drag one along it, right-click it to remove it (two always stay).
+  Each color has its own opacity and can be linked to a color variable.
 - **Transform on the canvas**: move, scale, rotate, stretch width or height on its own, and
   drag single corners to fake perspective.
 - **Effects** on each image layer: brightness / contrast, hue / saturation, grayscale,
-  sepia, tint, invert, posterize, threshold, Gaussian blur, sharpen, drop shadow and
-  outline (solid, dashed, dotted or dash-dot). They are stacked, reordered and toggled in the layer's properties, applied to
+  sepia, tint, invert, posterize, threshold, Gaussian blur, sharpen, drop shadow,
+  outline (solid, dashed, dotted or dash-dot), and linear (horizontal or vertical) or radial
+  fade to transparent (a side of the object, or its edges or center, along its visible pixels, so margins
+  added by a shadow or outline do not count), shaped by an easing curve as in
+  animation tools: Linear, Ease in, Ease out, Ease in-out, or your own by dragging the two
+  handles of its graph. They are stacked, reordered and toggled in the layer's properties, applied to
   the export at full resolution, and never change the image file. More effects can be
   added with [plugins](#plugins).
 - **Variables**: named values kept with the project, in the **Variables** panel, each
@@ -125,8 +138,10 @@ layers panel on the right](doc/capture.png)
 - **Export** PNG and/or PDF at the resolution you choose (72 to 1200 DPI). Choose which
   template lines are printed, and whether the inside of buttons and of cutouts is left
   blank or printed over. In the PDF, template lines, text and shapes stay sharp vectors
-  (text as outlines, so no font is needed to print it); text and shape layers with
-  effects, or inside a semi-transparent group, are printed as images like the rest.
+  (text as outlines, so no font is needed to print it), gradients included; text and
+  shape layers with effects, inside a semi-transparent group, distorted with a gradient,
+  or with a gradient whose colors are not all opaque, are printed as images like the
+  rest.
 - **Page sizes**: A5, A4, A3, A2, Letter, Legal and Tabloid, in portrait or landscape, or
   a custom width and height.
 - **Print** straight from the app (**File > Print…**), at true size. The Print window

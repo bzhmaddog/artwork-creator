@@ -181,6 +181,8 @@ pub struct CanvasState {
     /// Shape menu.
     pub drawing: Option<Drawing>,
     group_previews: HashMap<u64, GroupPreview>,
+    /// The page background's gradient drawn small, with what it was drawn from.
+    background: Option<(u64, egui::TextureHandle)>,
 }
 
 impl Default for CanvasState {
@@ -216,6 +218,7 @@ impl Default for CanvasState {
             points: None,
             drawing: None,
             group_previews: HashMap::new(),
+            background: None,
         }
     }
 }
@@ -426,6 +429,19 @@ fn topmost_hit(doc: &Document, p: P2) -> Option<u64> {
         .map(|l| l.layer.id)
 }
 
+/// The layer a click at a page point selects: the topmost unlocked one, or else the
+/// topmost locked one. A locked layer can be selected (for the layer toolbar and
+/// Properties) but does not hide the layers under it from clicks.
+fn layer_to_select(doc: &Document, p: P2) -> Option<u64> {
+    topmost_hit(doc, p).or_else(|| {
+        doc.leaves()
+            .into_iter()
+            .rev()
+            .find(|l| l.visible && l.layer.contains(p))
+            .map(|l| l.layer.id)
+    })
+}
+
 /// Rotates a vector by `deg` degrees, clockwise on screen.
 fn rotate_vec(v: P2, deg: f32) -> P2 {
     let (s, c) = deg.to_radians().sin_cos();
@@ -624,8 +640,9 @@ pub fn show(
                         (Some(hit), Some(sel)) if hit != sel && doc.is_within(hit, sel) => {
                             (layers_ui::movable_layers(doc, sel), DragKind::Move)
                         }
+                        // A locked layer is selected but stays put: the drag pans.
                         (hit, _) => {
-                            *selected = hit;
+                            *selected = layer_to_select(doc, m);
                             (hit.into_iter().collect(), DragKind::Move)
                         }
                     },
@@ -660,7 +677,7 @@ pub fn show(
             && let Some(p) = response.interact_pointer_pos()
             && handle_at(doc, *selected, p).is_none()
         {
-            *selected = topmost_hit(doc, cam.to_mm(rect, p));
+            *selected = layer_to_select(doc, cam.to_mm(rect, p));
         }
         // A double click on a text layer starts typing in it, where it was clicked. Text
         // on a path is typed in Properties.
@@ -1338,6 +1355,14 @@ fn paint(
     );
     let [r, g, b] = doc.background;
     painter.rect_filled(page, 0.0, Color32::from_rgb(r, g, b));
+    match &doc.background_gradient {
+        Some(gradient) => {
+            let texture = background_texture(ui.ctx(), state, doc, gradient);
+            let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
+            painter.image(texture, page, uv, Color32::WHITE);
+        }
+        None => state.background = None,
+    }
 
     let mut painting = Painting {
         painter: painter.clone(),
@@ -1449,6 +1474,9 @@ fn paint(
                 b.left_top(),
             ];
             painter.extend(Shape::dashed_line(&line, Stroke::new(1.5, color), 6.0, 4.0));
+            if locked {
+                lock_badge(ui, &painter, b.center());
+            }
         }
     } else if let Some(layer) = doc.layer(sel)
         // Its points are being edited or drawn: they are shown instead.
@@ -1458,6 +1486,9 @@ fn paint(
         let (corners, top_mid, rot) = handles(&cam, rect, layer);
         let stroke = Stroke::new(1.5, color);
         painter.add(Shape::closed_line(corners.to_vec(), stroke));
+        if locked {
+            lock_badge(ui, &painter, cam.to_screen(rect, layer.transform.center));
+        }
         if !locked {
             painter.line_segment([top_mid, rot], stroke);
             for c in corners {
@@ -1499,6 +1530,96 @@ fn paint(
             painter.circle(rot, HANDLE_RADIUS, Color32::WHITE, stroke);
         }
     }
+}
+
+/// Longest side of the page background's gradient as drawn on screen, in pixels: a
+/// gradient is smooth, so a small texture stretched over the page shows it well.
+const BACKGROUND_SIDE: f32 = 512.0;
+
+/// The page background's gradient as a texture the page's shape, drawn again when the
+/// gradient, the color or the page changes.
+fn background_texture(
+    ctx: &egui::Context,
+    state: &mut CanvasState,
+    doc: &Document,
+    gradient: &crate::gradient::Gradient,
+) -> egui::TextureId {
+    let page = doc.page_mm();
+    let key = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        serde_json::to_string(gradient)
+            .unwrap_or_default()
+            .hash(&mut h);
+        doc.background.hash(&mut h);
+        page.map(f32::to_bits).hash(&mut h);
+        h.finish()
+    };
+    if let Some((k, t)) = &state.background
+        && *k == key
+    {
+        return t.id();
+    }
+    let k = BACKGROUND_SIDE / page[0].max(page[1]).max(1.0);
+    let (w, h) = (
+        (page[0] * k).round().max(1.0) as u32,
+        (page[1] * k).round().max(1.0) as u32,
+    );
+    let mut pixmap = tiny_skia::Pixmap::new(w, h).expect("a small pixmap");
+    crate::render::fill_background(&mut pixmap, doc.background, Some(gradient));
+    let image = egui::ColorImage::from_rgba_premultiplied([w as usize, h as usize], pixmap.data());
+    let texture = ctx.load_texture("page-background", image, egui::TextureOptions::LINEAR);
+    let id = texture.id();
+    state.background = Some((key, texture));
+    id
+}
+
+/// Radius of the badge showing that the selected layer is locked.
+const LOCK_BADGE: f32 = 18.0;
+
+/// A white padlock on a dark disc at `c` (the middle of the selection on screen), seen on
+/// any artwork, with a tooltip saying why the layer does not move.
+fn lock_badge(ui: &egui::Ui, painter: &egui::Painter, c: Pos2) {
+    // A soft shadow, then the disc and its white ring.
+    painter.circle_filled(
+        c + vec2(0.0, 1.5),
+        LOCK_BADGE + 1.5,
+        Color32::from_black_alpha(60),
+    );
+    painter.circle(
+        c,
+        LOCK_BADGE,
+        Color32::from_black_alpha(185),
+        Stroke::new(2.0, Color32::WHITE),
+    );
+    let ink = Color32::WHITE;
+    // Body in the lower half; the shackle, an arch, above it.
+    let body = Rect::from_min_max(c + vec2(-8.0, -1.0), c + vec2(8.0, 10.0));
+    painter.rect_filled(body, 2.5, ink);
+    // The keyhole.
+    let dark = Color32::from_black_alpha(185);
+    painter.circle_filled(c + vec2(0.0, 3.5), 1.8, dark);
+    painter.rect_filled(
+        Rect::from_center_size(c + vec2(0.0, 6.0), vec2(1.6, 3.5)),
+        0.5,
+        dark,
+    );
+    let r = 5.0;
+    let top = c + vec2(0.0, -6.0);
+    let mut shackle = vec![c + vec2(-r, -1.0)];
+    shackle.extend((0..=16).map(|i| {
+        let a = std::f32::consts::PI * (1.0 + i as f32 / 16.0);
+        top + vec2(r * a.cos(), r * a.sin())
+    }));
+    shackle.push(c + vec2(r, -1.0));
+    painter.add(Shape::line(shackle, Stroke::new(2.6, ink)));
+    let badge = Rect::from_center_size(c, Vec2::splat(LOCK_BADGE * 2.0));
+    ui.interact(
+        badge,
+        ui.scope_id().with("lock_badge"),
+        egui::Sense::hover(),
+    )
+    .on_hover_text(crate::i18n::tr!("LAYER_LOCKED_HINT"));
 }
 
 #[cfg(test)]
@@ -1633,6 +1754,108 @@ mod tests {
         assert!(close(c(2), [60.0, 55.0]), "{:?}", c(2));
         assert!(close(c(3), [110.0, 55.0]), "{:?}", c(3));
         assert!(close(c(4), [200.0, 50.0]), "outside the group stays put");
+    }
+
+    #[test]
+    fn locked_layers_are_selected_by_a_click_but_not_moved() {
+        let square = |id: u64, x: f32, size: u32, locked: bool| {
+            let mut l = Layer::new(id, format!("l{id}"), "x.png".into());
+            l.size_px = [size, size];
+            l.transform.center = [x, 50.0];
+            l.locked = locked;
+            Node::Layer(Box::new(l))
+        };
+        // A locked background under an unlocked square, and a locked square on top of it.
+        let mut doc = Document {
+            layers: vec![
+                square(1, 100.0, 150, true),
+                square(2, 60.0, 10, false),
+                square(3, 60.0, 4, true),
+            ],
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        let mut state = CanvasState::default();
+        let mut selected = None;
+        let mut time = 0.0;
+        let mut frame = |doc: &mut Document, sel: &mut Option<u64>, events: Vec<Event>| {
+            time += 0.5;
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 800.0))),
+                time: Some(time),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                show(ui, doc, &[], sel, &mut state);
+            });
+            out.textures_delta.clear();
+            (state.camera, state.rect)
+        };
+        let (cam, rect) = frame(&mut doc, &mut selected, vec![]);
+        let button = |pos, pressed| Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        let mut click = |doc: &mut Document, sel: &mut Option<u64>, at: P2| {
+            let p = cam.to_screen(rect, at);
+            frame(doc, sel, vec![Event::PointerMoved(p)]);
+            frame(doc, sel, vec![button(p, true)]);
+            frame(doc, sel, vec![button(p, false)]);
+        };
+        // Only the locked background there: selected.
+        click(&mut doc, &mut selected, [140.0, 50.0]);
+        assert_eq!(selected, Some(1));
+        // The locked square over the unlocked one lets the click through to it.
+        click(&mut doc, &mut selected, [60.0, 50.0]);
+        assert_eq!(selected, Some(2));
+
+        // Dragging the locked background selects it, and it stays put.
+        let (from, to) = (
+            cam.to_screen(rect, [140.0, 50.0]),
+            cam.to_screen(rect, [150.0, 60.0]),
+        );
+        frame(&mut doc, &mut selected, vec![Event::PointerMoved(from)]);
+        frame(&mut doc, &mut selected, vec![button(from, true)]);
+        for k in 1..=4 {
+            let p = from + (to - from) * (k as f32 / 4.0);
+            frame(&mut doc, &mut selected, vec![Event::PointerMoved(p)]);
+        }
+        frame(&mut doc, &mut selected, vec![button(to, false)]);
+        assert_eq!(selected, Some(1));
+        assert_eq!(doc.layer(1).unwrap().transform.center, [100.0, 50.0]);
+    }
+
+    /// A selected locked layer, with its padlock badge, to look at it:
+    /// `LOCK_PREVIEW=out.png cargo test lock_preview -- --ignored`.
+    #[test]
+    #[ignore]
+    fn lock_preview() {
+        let Ok(path) = std::env::var("LOCK_PREVIEW") else {
+            return;
+        };
+        let mut l = Layer::new(1, "l".into(), "x.png".into());
+        l.size_px = [80, 50];
+        l.transform.center = [100.0, 80.0];
+        l.transform.rotation_deg = 10.0;
+        l.locked = true;
+        let doc = std::cell::RefCell::new(Document {
+            layers: vec![Node::Layer(Box::new(l))],
+            ..Default::default()
+        });
+        let state = std::cell::RefCell::new(CanvasState::default());
+        crate::preview::render(&path, vec2(500.0, 360.0), |ui| {
+            let mut sel = Some(1);
+            show(
+                ui,
+                &mut doc.borrow_mut(),
+                &[],
+                &mut sel,
+                &mut state.borrow_mut(),
+            );
+        });
     }
 
     #[test]

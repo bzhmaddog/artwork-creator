@@ -84,6 +84,11 @@ pub enum ParamKind {
         options: Vec<(String, String)>,
         default: String,
     },
+    /// An easing curve from (0, 0) to (1, 1), as CSS's `cubic-bezier(x1, y1, x2, y2)`:
+    /// its two control points, saved as `[x1, y1, x2, y2]`. Built-in effects only.
+    Curve {
+        default: [f32; 4],
+    },
 }
 
 /// A parameter of an effect.
@@ -140,6 +145,10 @@ impl ParamSpec {
         Self::new(id, label, ParamKind::Color { default })
     }
 
+    pub fn curve(id: &str, label: &str, default: [f32; 4]) -> Self {
+        Self::new(id, label, ParamKind::Curve { default })
+    }
+
     pub fn choice(id: &str, label: &str, options: &[(&str, &str)], default: &str) -> Self {
         Self::new(
             id,
@@ -179,8 +188,60 @@ impl ParamSpec {
             ParamKind::Bool { default } => Value::from(*default),
             ParamKind::Color { default } => Value::from(color_to_hex(*default)),
             ParamKind::Choice { default, .. } => Value::from(default.clone()),
+            ParamKind::Curve { default } => curve_value(*default),
         }
     }
+}
+
+/// A curve's control points as saved.
+pub fn curve_value(c: [f32; 4]) -> Value {
+    Value::from(c.to_vec())
+}
+
+/// Easing curves to start from, as CSS names them: (id, label key, control points).
+pub const CURVE_PRESETS: [(&str, &str, [f32; 4]); 4] = [
+    (
+        "linear",
+        crate::i18n::tr_noop!("CURVE_LINEAR"),
+        [0.0, 0.0, 1.0, 1.0],
+    ),
+    (
+        "ease_in",
+        crate::i18n::tr_noop!("CURVE_EASE_IN"),
+        [0.42, 0.0, 1.0, 1.0],
+    ),
+    (
+        "ease_out",
+        crate::i18n::tr_noop!("CURVE_EASE_OUT"),
+        [0.0, 0.0, 0.58, 1.0],
+    ),
+    (
+        "ease_in_out",
+        crate::i18n::tr_noop!("CURVE_EASE_IN_OUT"),
+        [0.42, 0.0, 0.58, 1.0],
+    ),
+];
+
+/// The curve's height at `x` (0 to 1), as a CSS cubic-bezier timing function: the point
+/// of the curve whose horizontal position is `x`.
+pub fn ease(c: [f32; 4], x: f32) -> f32 {
+    let x = x.clamp(0.0, 1.0);
+    // One coordinate of the curve at parameter s, from (0, 0) through a, b to (1, 1).
+    let at = |a: f32, b: f32, s: f32| {
+        let r = 1.0 - s;
+        3.0 * r * r * s * a + 3.0 * r * s * s * b + s * s * s
+    };
+    // x(s) grows with s since x1 and x2 are in [0, 1]: bisection finds it.
+    let (mut lo, mut hi) = (0.0f32, 1.0f32);
+    for _ in 0..30 {
+        let mid = (lo + hi) / 2.0;
+        if at(c[0], c[2], mid) < x {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    at(c[1], c[3], (lo + hi) / 2.0)
 }
 
 /// Saved parameter values by id. Missing or invalid values fall back to the default, so
@@ -284,6 +345,26 @@ impl<'a> Params<'a> {
         }
     }
 
+    /// A curve's control points, x within 0 to 1 (so the curve goes forward), y too (an
+    /// opacity cannot go past either end).
+    pub fn curve(&self, id: &str) -> [f32; 4] {
+        let default = match self.spec(id) {
+            Some(ParamKind::Curve { default }) => *default,
+            _ => [0.0, 0.0, 1.0, 1.0],
+        };
+        let saved = self.values.get(id).and_then(Value::as_array).and_then(|a| {
+            let v: Vec<f32> = a
+                .iter()
+                .filter_map(|n| n.as_f64().map(|n| n as f32))
+                .collect();
+            <[f32; 4]>::try_from(v).ok()
+        });
+        saved
+            .filter(|c| c.iter().all(|n| n.is_finite()))
+            .unwrap_or(default)
+            .map(|n| n.clamp(0.0, 1.0))
+    }
+
     /// Every parameter's value as read by the getters above: in range, with colors as
     /// `#rrggbbaa`. This is what plugins receive.
     pub fn resolved(&self) -> Value {
@@ -296,6 +377,7 @@ impl<'a> Params<'a> {
                 ParamKind::Bool { .. } => Value::from(self.bool(id)),
                 ParamKind::Color { .. } => Value::from(color_to_hex(self.color(id))),
                 ParamKind::Choice { .. } => Value::from(self.choice(id)),
+                ParamKind::Curve { .. } => curve_value(self.curve(id)),
             };
             map.insert(spec.id.clone(), v);
         }
@@ -538,6 +620,47 @@ pub fn par_pixels(img: &mut RgbaImage, f: impl Fn(&mut [u8; 4]) + Sync) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ease_follows_css_cubic_bezier() {
+        let linear = CURVE_PRESETS[0].2;
+        for x in [0.0, 0.25, 0.5, 0.9, 1.0] {
+            assert!((ease(linear, x) - x).abs() < 1e-4);
+        }
+        let [_, ease_in, ease_out, in_out] = CURVE_PRESETS.map(|p| p.2);
+        // Ease in starts slow, ease out fast; in-out is symmetric.
+        assert!(ease(ease_in, 0.3) < 0.15);
+        assert!(ease(ease_out, 0.3) > 0.4);
+        // Ease out is ease in mirrored.
+        for x in [0.1, 0.3, 0.6] {
+            assert!((ease(ease_out, x) - (1.0 - ease(ease_in, 1.0 - x))).abs() < 1e-3);
+        }
+        assert!((ease(in_out, 0.5) - 0.5).abs() < 1e-3);
+        assert!((ease(in_out, 0.2) + ease(in_out, 0.8) - 1.0).abs() < 1e-3);
+        // CSS's value for ease-in at 0.5.
+        assert!((ease(ease_in, 0.5) - 0.3153).abs() < 2e-3);
+    }
+
+    #[test]
+    fn curve_values_fall_back_and_stay_in_range() {
+        let specs = [ParamSpec::curve("c", "C", [0.42, 0.0, 0.58, 1.0])];
+        let mut values = ParamValues::new();
+        assert_eq!(
+            Params::new(&specs, &values).curve("c"),
+            [0.42, 0.0, 0.58, 1.0]
+        );
+        values.insert("c".into(), serde_json::json!([0.2, -1.0, 3.0, 0.5]));
+        assert_eq!(
+            Params::new(&specs, &values).curve("c"),
+            [0.2, 0.0, 1.0, 0.5]
+        );
+        // Not four numbers: the default.
+        values.insert("c".into(), serde_json::json!([0.2, 0.3]));
+        assert_eq!(
+            Params::new(&specs, &values).curve("c"),
+            [0.42, 0.0, 0.58, 1.0]
+        );
+    }
 
     #[test]
     fn hex_colors_round_trip() {

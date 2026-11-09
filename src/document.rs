@@ -517,6 +517,25 @@ impl Layer {
         self.transform.to_affine(self.size_px)
     }
 
+    /// Its gradients: a text's letters', a shape's fill's and stroke's.
+    pub fn gradients(&self) -> Vec<&crate::gradient::Gradient> {
+        let text = self.text.as_deref().and_then(|t| t.gradient.as_ref());
+        let shape = self.shape.as_deref();
+        let fill = shape.and_then(|s| s.fill_gradient.as_ref());
+        let stroke = shape.and_then(|s| s.stroke_gradient.as_ref());
+        [text, fill, stroke].into_iter().flatten().collect()
+    }
+
+    /// [`Layer::gradients`], to change them.
+    pub fn gradients_mut(&mut self) -> Vec<&mut crate::gradient::Gradient> {
+        let text = self.text.as_deref_mut().and_then(|t| t.gradient.as_mut());
+        let (fill, stroke) = match self.shape.as_deref_mut() {
+            Some(s) => (s.fill_gradient.as_mut(), s.stroke_gradient.as_mut()),
+            None => (None, None),
+        };
+        [text, fill, stroke].into_iter().flatten().collect()
+    }
+
     /// Its pixels are drawn by the app, from a text or a shape, rather than read from
     /// an image file.
     pub fn is_drawn(&self) -> bool {
@@ -698,15 +717,7 @@ impl Node {
         }
     }
 
-    /// Image layers in this node and below, bottom of the stack first.
-    pub fn for_each_layer(&self, f: &mut dyn FnMut(&Layer)) {
-        match self {
-            Node::Layer(l) => f(l),
-            Node::Group(g) => g.children.iter().for_each(|c| c.for_each_layer(f)),
-        }
-    }
-
-    /// Mutable version of `for_each_layer`.
+    /// Image layers in this node and below, bottom of the stack first, to change them.
     pub fn for_each_layer_mut(&mut self, f: &mut dyn FnMut(&mut Layer)) {
         match self {
             Node::Layer(l) => f(l),
@@ -780,6 +791,10 @@ pub struct Document {
     /// Name of the color variable the background is linked to (see `colors`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background_link: Option<String>,
+    /// Fills the page instead of `background`, when set; its stops' opacity is left out,
+    /// the page being opaque.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_gradient: Option<crate::gradient::Gradient>,
     /// How far the artwork goes past the template's cut lines, in mm.
     pub bleed_mm: f32,
     /// Width of the margin inside the cut lines that important content should stay
@@ -809,6 +824,7 @@ impl Default for Document {
             template_placement: TemplatePlacement::default(),
             background: [255, 255, 255],
             background_link: None,
+            background_gradient: None,
             bleed_mm: 0.0,
             safe_margin_mm: 0.0,
             layers: Vec::new(),

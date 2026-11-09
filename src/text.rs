@@ -21,9 +21,10 @@ use skrifa::instance::{Location, Size};
 use skrifa::outline::{DrawSettings, OutlinePen};
 use skrifa::raw::TableProvider as _;
 use skrifa::{FontRef, GlyphId, MetadataProvider as _, Tag};
-use tiny_skia::{FillRule, LineCap, LineJoin, Paint, Path, PathBuilder, Pixmap, Stroke, Transform};
+use tiny_skia::{FillRule, LineCap, LineJoin, Path, PathBuilder, Pixmap, Stroke, Transform};
 
 use crate::document::{Document, Layer, P2};
+use crate::gradient::Ink;
 use crate::render::{self, Outlines};
 
 /// Text units per em: a text layer's `size_px` and its effects are measured in these.
@@ -164,6 +165,9 @@ pub struct Text {
     pub line_height: f32,
     /// Straight RGBA.
     pub color: [u8; 4],
+    /// Fills the letters instead of `color`, when set, over the text's box.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gradient: Option<crate::gradient::Gradient>,
     /// Draw a line around the letters.
     pub outline: bool,
     /// Thickness of the outline outside the letters, in ems.
@@ -262,6 +266,7 @@ impl Default for Text {
             letter_spacing: 0.0,
             line_height: 1.2,
             color: [0, 0, 0, 255],
+            gradient: None,
             outline: false,
             outline_width: 0.05,
             outline_color: [255, 255, 255, 255],
@@ -1437,7 +1442,7 @@ impl Route {
 /// One coat of paint on the letters: their outlines filled, or stroked this wide.
 struct Coat<'a> {
     path: &'a Path,
-    color: [u8; 4],
+    ink: Ink,
     stroke: Option<f32>,
 }
 
@@ -1451,20 +1456,23 @@ fn coats<'a>(laid: &'a Laid, text: &Text) -> Vec<Coat<'a>> {
     if text.outline && text.outline_width > 0.0 {
         out.push(Coat {
             path,
-            color: text.outline_color,
+            ink: Ink::Solid(text.outline_color),
             stroke: Some(2.0 * text.outline_width * EM + laid.embolden),
         });
     }
+    // The letters' gradient spans the laid out text's box.
+    let frame = tiny_skia::Rect::from_xywh(0.0, 0.0, laid.size[0] as f32, laid.size[1] as f32);
+    let ink = Ink::of(text.color, text.gradient.as_ref(), frame);
     if laid.embolden > 0.0 {
         out.push(Coat {
             path,
-            color: text.color,
+            ink: ink.clone(),
             stroke: Some(laid.embolden),
         });
     }
     out.push(Coat {
         path,
-        color: text.color,
+        ink,
         stroke: None,
     });
     out
@@ -1487,10 +1495,7 @@ pub fn paint(laid: &Laid, text: &Text, px_per_unit: f32) -> Option<Pixmap> {
     // Exactly the layer's frame, even where the pixel size was rounded.
     let ts = Transform::from_scale(w / laid.size[0] as f32, h / laid.size[1] as f32);
     for coat in coats(laid, text) {
-        let c = coat.color;
-        let mut paint = Paint::default();
-        paint.set_color_rgba8(c[0], c[1], c[2], c[3]);
-        paint.anti_alias = true;
+        let paint = coat.ink.paint();
         match coat.stroke {
             Some(width) => {
                 pixmap.stroke_path(coat.path, &paint, &round_stroke(width), ts, None);
@@ -1517,7 +1522,7 @@ pub fn outlines(layer: &Layer) -> Option<Outlines> {
                 Some(width) => coat.path.stroke(&round_stroke(width), STROKE_RES)?,
                 None => coat.path.clone(),
             };
-            Some((path, coat.color))
+            Some((path, coat.ink))
         })
         .collect();
     // The layer's box is the laid out text's, kept up to date by `sync`.

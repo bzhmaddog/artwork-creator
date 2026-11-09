@@ -4,9 +4,7 @@ use std::sync::Arc;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant, SystemTime};
 
-use egui::{
-    Color32, ColorImage, Key, KeyboardShortcut, Modifiers, RichText, TextureFilter, TextureOptions,
-};
+use egui::{Color32, ColorImage, Key, KeyboardShortcut, Modifiers, TextureFilter, TextureOptions};
 
 use crate::canvas_points;
 use crate::clipboard::Clipboard;
@@ -17,6 +15,7 @@ use crate::file_dialog::{self, FileBrowser, Filter, Purpose, Request};
 use crate::history::History;
 use crate::i18n::{self, tr, tr_n, tr_noop, translate};
 use crate::layers_ui::{self, Edit, LayersPanel};
+use crate::panels::{PanelId, Side};
 use crate::project;
 use crate::recent::{self, RecentFiles};
 use crate::render::{self, PlacedElement, Scene};
@@ -138,6 +137,8 @@ pub struct ArtworkApp {
     last_template_check: Instant,
     /// Interface language: the system's or a chosen one.
     language: i18n::Preference,
+    /// Where each panel is: docked on a side, floating or in its own window.
+    panels: crate::panels::Layout,
     /// The window was asked to close with unsaved changes: ask what to do.
     confirm_close: bool,
     /// Close once the project is saved (Save in the close question, with a file still to
@@ -318,6 +319,7 @@ impl ArtworkApp {
             template_stamp: Vec::new(),
             last_template_check: Instant::now(),
             language,
+            panels: crate::panels::Layout::load(cc.storage),
             confirm_close: false,
             close_after_save: false,
             closing: false,
@@ -1159,6 +1161,7 @@ impl ArtworkApp {
                 ui.checkbox(&mut self.canvas.snap_to_edges, tr!("SNAP_TO_EDGES"))
                     .on_hover_text(tr!("SNAP_TO_EDGES_HINT"));
                 ui.separator();
+                ui.menu_button(tr!("MENU_PANELS"), |ui| self.panels_menu(ui));
                 ui.menu_button(tr!("MENU_THEME"), crate::theme::menu);
                 ui.menu_button(tr!("MENU_LANGUAGE"), |ui| {
                     i18n::menu(ui, &mut self.language)
@@ -1190,9 +1193,8 @@ impl ArtworkApp {
         self.select_template(id, true);
     }
 
-    /// Left panel: template, page, background, template placement and elements.
-    fn settings_panel(&mut self, ui: &mut egui::Ui) {
-        ui.heading(tr!("CONTROLLER"));
+    /// The Controller panel: the template to work on.
+    fn controller_panel(&mut self, ui: &mut egui::Ui) {
         let current = self
             .current_entry()
             .map(|t| t.name.clone())
@@ -1210,9 +1212,10 @@ impl ArtworkApp {
         if choice != self.doc.template {
             self.select_template(choice, true);
         }
+    }
 
-        ui.separator();
-        ui.heading(tr!("PAGE_SECTION"));
+    /// The Page panel: size, orientation and background.
+    fn page_panel(&mut self, ui: &mut egui::Ui) {
         let before = (self.doc.page, self.doc.orientation);
         let custom = self.doc.custom_page_mm;
         egui::ComboBox::from_id_salt("page")
@@ -1287,30 +1290,77 @@ impl ArtworkApp {
                 self.dirty = true;
             }
         });
+    }
 
-        if self.template.is_some() {
-            crate::layers_ui::section(
-                ui,
-                "template",
-                RichText::new(tr!("TEMPLATE_SECTION")).heading(),
-                |_| false,
-                |ui| self.template_settings(ui),
-            );
+    /// A panel's contents; the Layers panel returns the height it would take.
+    fn panel_body(&mut self, ui: &mut egui::Ui, id: PanelId) -> Option<f32> {
+        match id {
+            PanelId::Controller => self.controller_panel(ui),
+            PanelId::Page => self.page_panel(ui),
+            PanelId::Template if self.template.is_some() => self.template_settings(ui),
+            PanelId::Template => {
+                crate::callout::callout(ui, crate::callout::Tone::Info, tr!("NO_TEMPLATE_CHOSEN"));
+            }
+            PanelId::Variables => self.dirty |= variables::variables_ui(ui, &mut self.doc),
+            PanelId::ColorsInUse => self.dirty |= crate::colors::in_use_ui(ui, &mut self.doc),
+            PanelId::Layers => {
+                self.layers_panel.can_paste = self.clipboard.has_content();
+                let out = layers_ui::show(
+                    ui,
+                    &mut self.doc,
+                    &mut self.selected,
+                    &mut self.layers_panel,
+                );
+                let natural = out.natural_height;
+                self.layers_output(ui.ctx(), out);
+                return Some(natural);
+            }
+            PanelId::Properties => {
+                let bounds = Self::outline_bounds(&self.elements());
+                let out = layers_ui::properties_panel(
+                    ui,
+                    &mut self.doc,
+                    self.selected,
+                    &mut self.layers_panel,
+                    bounds,
+                    &self.fonts,
+                );
+                self.layers_output(ui.ctx(), out);
+            }
         }
-        crate::layers_ui::section(
-            ui,
-            "variables",
-            RichText::new(tr!("VARIABLES_SECTION")).heading(),
-            |_| false,
-            |ui| self.dirty |= variables::variables_ui(ui, &mut self.doc),
-        );
-        crate::layers_ui::section(
-            ui,
-            "colors_in_use",
-            RichText::new(tr!("COLORS_IN_USE_SECTION")).heading(),
-            |_| false,
-            |ui| self.dirty |= crate::colors::in_use_ui(ui, &mut self.doc),
-        );
+        None
+    }
+
+    /// Carries out what was asked in the Layers or Properties panel.
+    fn layers_output(&mut self, ctx: &egui::Context, out: layers_ui::LayersOutput) {
+        self.dirty |= out.changed;
+        if out.add_images {
+            self.pick_images(ctx);
+        }
+        if out.add_text {
+            self.add_text(ctx);
+        }
+        if let Some(kind) = out.add_shape {
+            self.add_shape(ctx, kind);
+        }
+        if let Some(edit) = out.edit {
+            self.edit(ctx, edit);
+        }
+    }
+
+    /// View > Panels: each panel shown or hidden, and the default layout.
+    fn panels_menu(&mut self, ui: &mut egui::Ui) {
+        for id in PanelId::ALL {
+            let mut open = self.panels.is_open(id);
+            if ui.checkbox(&mut open, id.title()).changed() {
+                self.panels.set_open(id, open);
+            }
+        }
+        ui.separator();
+        if ui.button(tr!("RESET_PANEL_LAYOUT")).clicked() {
+            self.panels.reset();
+            ui.close();
+        }
     }
 
     /// Body of the Template section: placement, elements and default placement.
@@ -2390,11 +2440,28 @@ impl ArtworkApp {
     }
 }
 
+impl crate::panels::Contents for ArtworkApp {
+    fn contents(&mut self, ui: &mut egui::Ui, id: PanelId) -> Option<f32> {
+        self.panel_body(ui, id)
+    }
+
+    /// As before panels could move, the Template panel shows once there is a template.
+    fn skip_docked(&self, id: PanelId) -> bool {
+        id == PanelId::Template && self.template.is_none()
+    }
+
+    /// Shortcuts work while a panel's own window has the focus too.
+    fn window_frame(&mut self, ctx: &egui::Context) {
+        self.shortcuts(ctx);
+    }
+}
+
 impl eframe::App for ArtworkApp {
     /// Keeps app settings between sessions (eframe also stores the theme and window).
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         self.recent.save(storage);
         self.language.save(storage);
+        self.panels.save(storage);
     }
 
     /// One frame: input, panels, canvas and dialogs, then an undo step if the project
@@ -2432,43 +2499,15 @@ impl eframe::App for ArtworkApp {
 
         egui::Panel::top("menu_bar").show(ui, |ui| self.menu_bar(ui));
         egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui, &elements));
-        egui::Panel::left("settings")
-            .resizable(true)
-            .default_size(240.0)
-            .min_size(240.0)
-            .show(ui, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| self.settings_panel(ui));
-            });
-        // The layer panel's rows (toolbar, align, properties) need 310 points.
-        egui::Panel::right("layers")
-            .resizable(true)
-            .default_size(320.0)
-            .min_size(310.0)
-            .show(ui, |ui| {
-                let bounds = Self::outline_bounds(&elements);
-                self.layers_panel.can_paste = self.clipboard.has_content();
-                let out = layers_ui::show(
-                    ui,
-                    &mut self.doc,
-                    &mut self.selected,
-                    &mut self.layers_panel,
-                    bounds,
-                    &self.fonts,
-                );
-                self.dirty |= out.changed;
-                if out.add_images {
-                    self.pick_images(&ctx);
-                }
-                if out.add_text {
-                    self.add_text(&ctx);
-                }
-                if let Some(kind) = out.add_shape {
-                    self.add_shape(&ctx, kind);
-                }
-                if let Some(edit) = out.edit {
-                    self.edit(&ctx, edit);
-                }
-            });
+        // Taken out while drawn, as it draws the panels with the app's contents.
+        let mut panels = std::mem::take(&mut self.panels);
+        panels.begin_frame(ui.available_rect_before_wrap());
+        panels.show_dock(ui, Side::Left, self);
+        panels.show_dock(ui, Side::Right, self);
+        // Over the canvas, under the dialogs.
+        panels.show_floating(&ctx, self);
+        panels.show_windows(&ctx, self);
+        self.panels = panels;
 
         // Show effect changes made in the layer panel on this frame's canvas.
         self.sync_effects(&ctx);
@@ -2494,6 +2533,7 @@ impl eframe::App for ArtworkApp {
             );
         });
         self.layers_panel.edit_points = self.canvas.points.as_ref().map(|e| e.layer);
+        self.panels.drag_overlay(&ctx);
 
         // The preview both windows show, freed while neither is open.
         if self.export_open || self.print_open {

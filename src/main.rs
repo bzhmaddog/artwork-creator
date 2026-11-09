@@ -15,6 +15,7 @@ mod file_dialog;
 mod history;
 mod i18n;
 mod layers_ui;
+mod panels;
 #[cfg(test)]
 mod preview;
 mod print;

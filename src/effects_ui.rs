@@ -280,7 +280,7 @@ fn stack_ui(
 /// Controls for an effect's parameters. Returns true if one changed.
 fn params_ui(
     ui: &mut Ui,
-    salt: (u64, usize),
+    ui_key: (u64, usize),
     effect: &dyn Effect,
     inst: &mut EffectInstance,
     px_mm: Option<(f32, &str)>,
@@ -292,14 +292,15 @@ fn params_ui(
     let mut changed = false;
     // Built-in labels are translated; plugins' are shown as they give them.
     let builtin = effect.plugin().is_none();
-    egui::Grid::new(("effect_params", salt))
+    egui::Grid::new(("effect_params", ui_key))
         .num_columns(2)
         .spacing([8.0, 4.0])
         .show(ui, |ui| {
             for spec in specs {
                 ui.label(label_text(builtin, &spec.label));
                 let params = Params::new(specs, &inst.params);
-                if let Some(v) = param_ui(ui, salt, spec, builtin, &params, &mut inst.links, px_mm)
+                if let Some(v) =
+                    param_ui(ui, ui_key, spec, builtin, &params, &mut inst.links, px_mm)
                 {
                     inst.params.insert(spec.id.clone(), v);
                     changed = true;
@@ -319,7 +320,7 @@ fn label_text(builtin: bool, text: &str) -> &str {
 /// if it changed.
 fn param_ui(
     ui: &mut Ui,
-    salt: (u64, usize),
+    ui_key: (u64, usize),
     spec: &ParamSpec,
     builtin: bool,
     p: &Params,
@@ -394,7 +395,7 @@ fn param_ui(
                 .find(|(o, _)| *o == current)
                 .map_or(current.as_str(), |(_, l)| label_text(builtin, l));
             let mut picked = None;
-            ComboBox::from_id_salt(("effect_choice", salt, id))
+            ComboBox::from_id_salt(("effect_choice", ui_key, id))
                 .selected_text(label)
                 .show_ui(ui, |ui| {
                     for (o, l) in options {
@@ -409,7 +410,147 @@ fn param_ui(
                 });
             picked
         }
+        ParamKind::Curve { .. } => {
+            let mut c = p.curve(id);
+            curve_ui(ui, (ui_key, id), &mut c).then(|| crate::effects::curve_value(c))
+        }
     }
+}
+
+/// Size of the curve's graph, and the margin left around it for the handles.
+const CURVE_SIZE: egui::Vec2 = vec2(190.0, 120.0);
+const CURVE_MARGIN: f32 = 8.0;
+
+/// An easing curve, as in animation tools: buttons for the usual ones, then its graph,
+/// whose two handles are dragged to shape it. It is drawn as the opacity across the
+/// fade: opaque at the top left (where the fade starts), transparent at the bottom right.
+/// Returns whether it changed.
+fn curve_ui(
+    ui: &mut Ui,
+    ui_key: impl std::hash::Hash + std::fmt::Debug + Copy,
+    c: &mut [f32; 4],
+) -> bool {
+    let mut changed = false;
+    ui.vertical(|ui| {
+        // The usual curves, each a thumbnail of itself, named in its tooltip.
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 4.0;
+            for (_, key, preset) in crate::effects::CURVE_PRESETS {
+                let on = *c == preset;
+                let (rect, r) = ui.allocate_exact_size(vec2(36.0, 24.0), Sense::click());
+                let r = r.on_hover_text(translate(key));
+                if r.clicked() && !on {
+                    *c = preset;
+                    changed = true;
+                }
+                let visuals = ui.visuals();
+                let (fill, stroke) = if on {
+                    (visuals.selection.bg_fill, visuals.selection.stroke)
+                } else if r.hovered() {
+                    (
+                        visuals.widgets.hovered.weak_bg_fill,
+                        visuals.widgets.hovered.bg_stroke,
+                    )
+                } else {
+                    (
+                        visuals.widgets.inactive.weak_bg_fill,
+                        visuals.widgets.inactive.bg_stroke,
+                    )
+                };
+                let painter = ui.painter();
+                painter.rect(rect, 3.0, fill, stroke, egui::StrokeKind::Inside);
+                let ink = if on {
+                    visuals.selection.stroke.color
+                } else {
+                    visuals.text_color()
+                };
+                let b = rect.shrink2(vec2(7.0, 5.0));
+                let points: Vec<egui::Pos2> = (0..=16)
+                    .map(|i| {
+                        let x = i as f32 / 16.0;
+                        let y = crate::effects::ease(preset, x);
+                        b.left_top() + vec2(x * b.width(), y * b.height())
+                    })
+                    .collect();
+                painter.add(egui::Shape::line(points, Stroke::new(1.5, ink)));
+            }
+        });
+        let (rect, bg) = ui.allocate_exact_size(CURVE_SIZE, Sense::hover());
+        let inner = rect.shrink(CURVE_MARGIN);
+        let to_screen =
+            |x: f32, y: f32| inner.left_top() + vec2(x * inner.width(), y * inner.height());
+        // The handles first, so the drawing below shows where they are now.
+        let mut active = [false; 2];
+        for (k, (ix, iy)) in [(0, 1), (2, 3)].into_iter().enumerate() {
+            let at = to_screen(c[ix], c[iy]);
+            let r = ui.interact(
+                egui::Rect::from_center_size(at, egui::Vec2::splat(16.0)),
+                ui.make_persistent_id((ui_key, "curve_handle", k)),
+                Sense::drag(),
+            );
+            if r.dragged()
+                && let Some(p) = r.interact_pointer_pos()
+            {
+                c[ix] = ((p.x - inner.left()) / inner.width()).clamp(0.0, 1.0);
+                c[iy] = ((p.y - inner.top()) / inner.height()).clamp(0.0, 1.0);
+                changed = true;
+            }
+            active[k] = r.hovered() || r.dragged();
+            if active[k] {
+                ui.ctx().set_cursor_icon(if r.dragged() {
+                    CursorIcon::Grabbing
+                } else {
+                    CursorIcon::Grab
+                });
+            }
+        }
+        if !ui.is_rect_visible(rect) {
+            return;
+        }
+        let visuals = ui.visuals();
+        let painter = ui.painter();
+        painter.rect_filled(rect, 3.0, visuals.extreme_bg_color);
+        // Quarters, and the straight line a linear fade follows.
+        let faint = Stroke::new(1.0, visuals.widgets.noninteractive.bg_stroke.color);
+        for q in [0.25, 0.5, 0.75] {
+            painter.vline(to_screen(q, 0.0).x, inner.y_range(), faint);
+            painter.hline(inner.x_range(), to_screen(0.0, q).y, faint);
+        }
+        painter.rect_stroke(inner, 0.0, faint, egui::StrokeKind::Middle);
+        painter.line_segment([to_screen(0.0, 0.0), to_screen(1.0, 1.0)], faint);
+        // The curve, from its two ends through the handles' pull.
+        let (p0, p1, p2, p3) = (
+            to_screen(0.0, 0.0),
+            to_screen(c[0], c[1]),
+            to_screen(c[2], c[3]),
+            to_screen(1.0, 1.0),
+        );
+        let accent = visuals.selection.stroke.color;
+        let arm = Stroke::new(1.0, visuals.weak_text_color());
+        painter.line_segment([p0, p1], arm);
+        painter.line_segment([p3, p2], arm);
+        let curve: Vec<egui::Pos2> = (0..=48)
+            .map(|i| {
+                let s = i as f32 / 48.0;
+                let r = 1.0 - s;
+                let w = [r * r * r, 3.0 * r * r * s, 3.0 * r * s * s, s * s * s];
+                let x = w[0] * p0.x + w[1] * p1.x + w[2] * p2.x + w[3] * p3.x;
+                let y = w[0] * p0.y + w[1] * p1.y + w[2] * p2.y + w[3] * p3.y;
+                egui::pos2(x, y)
+            })
+            .collect();
+        painter.add(egui::Shape::line(curve, Stroke::new(2.0, accent)));
+        for (k, p) in [p1, p2].into_iter().enumerate() {
+            let fill = if active[k] {
+                accent
+            } else {
+                visuals.window_fill
+            };
+            painter.circle(p, 5.0, fill, Stroke::new(1.5, accent));
+        }
+        bg.on_hover_text(tr!("FADE_CURVE_HINT"));
+    });
+    changed
 }
 
 #[cfg(test)]
@@ -429,6 +570,89 @@ mod tests {
 
     fn ids(s: &[EffectInstance]) -> Vec<&str> {
         s.iter().map(|e| e.effect.as_str()).collect()
+    }
+
+    #[test]
+    fn dragging_a_curve_handle_and_picking_a_preset() {
+        let ctx = egui::Context::default();
+        let mut c = crate::effects::CURVE_PRESETS[3].2;
+        let mut time = 0.0;
+        // One frame; returns the handles' centers (the curve's small circles).
+        let mut frame = |c: &mut [f32; 4], events: Vec<egui::Event>| {
+            time += 0.1;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    vec2(400.0, 300.0),
+                )),
+                time: Some(time),
+                events,
+                ..Default::default()
+            };
+            let mut changed = false;
+            let mut out = ctx.run_ui(input, |ui| changed = curve_ui(ui, 1, c));
+            out.textures_delta.clear();
+            let handles: Vec<egui::Pos2> = out
+                .shapes
+                .iter()
+                .filter_map(|s| match &s.shape {
+                    egui::Shape::Circle(k) if k.radius == 5.0 => Some(k.center),
+                    _ => None,
+                })
+                .collect();
+            (handles, changed)
+        };
+        let (handles, _) = frame(&mut c, vec![]);
+        assert_eq!(handles.len(), 2);
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        // Drag the first handle down by 30 points: its y grows, x stays.
+        let (from, to) = (handles[0], handles[0] + vec2(0.0, 30.0));
+        frame(&mut c, vec![egui::Event::PointerMoved(from)]);
+        frame(&mut c, vec![button(from, true)]);
+        let mut any = false;
+        for k in 1..=3 {
+            let p = from + (to - from) * (k as f32 / 3.0);
+            any |= frame(&mut c, vec![egui::Event::PointerMoved(p)]).1;
+        }
+        frame(&mut c, vec![button(to, false)]);
+        assert!(any, "reported as changed");
+        assert!((c[0] - 0.42).abs() < 0.01, "{c:?}");
+        let h = CURVE_SIZE.y - 2.0 * CURVE_MARGIN;
+        assert!((c[1] - 30.0 / h).abs() < 0.02, "{c:?}");
+        assert_eq!([c[2], c[3]], [0.58, 1.0]);
+        // The first thumbnail sets the linear curve.
+        let thumb = egui::pos2(18.0, 12.0);
+        frame(&mut c, vec![egui::Event::PointerMoved(thumb)]);
+        frame(&mut c, vec![button(thumb, true)]);
+        frame(&mut c, vec![button(thumb, false)]);
+        assert_eq!(c, crate::effects::CURVE_PRESETS[0].2);
+    }
+
+    /// The linear fade's parameters with a custom curve, to look at the curve editor:
+    /// `CURVE_PREVIEW=out.png cargo test curve_preview -- --ignored`.
+    #[test]
+    #[ignore]
+    fn curve_preview() {
+        let Ok(path) = std::env::var("CURVE_PREVIEW") else {
+            return;
+        };
+        let effect = registry().get("builtin.fade_linear").unwrap();
+        let mut inst = EffectInstance::new(effect);
+        inst.params.insert(
+            "curve".into(),
+            crate::effects::curve_value([0.1, 0.6, 0.3, 1.0]),
+        );
+        let inst = std::cell::RefCell::new(inst);
+        crate::preview::render(&path, vec2(420.0, 300.0), |ui| {
+            egui::Frame::NONE.inner_margin(12.0).show(ui, |ui| {
+                params_ui(ui, (1, 0), effect, &mut inst.borrow_mut(), None);
+            });
+        });
     }
 
     #[test]

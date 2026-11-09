@@ -227,6 +227,42 @@ pub fn all() -> Vec<Box<dyn Effect>> {
             padding: outline_padding,
         }),
         effect(
+            "builtin.fade_linear",
+            tr_noop!("EFFECT_FADE_LINEAR"),
+            tr_noop!("EFFECT_FADE_LINEAR_HINT"),
+            vec![
+                ParamSpec::choice(
+                    "toward",
+                    tr_noop!("PARAM_FADE_TOWARD"),
+                    &[
+                        ("right", tr_noop!("FADE_TOWARD_RIGHT")),
+                        ("left", tr_noop!("FADE_TOWARD_LEFT")),
+                        ("top", tr_noop!("FADE_TOWARD_TOP")),
+                        ("bottom", tr_noop!("FADE_TOWARD_BOTTOM")),
+                    ],
+                    "right",
+                ),
+                percent("start", tr_noop!("PARAM_FADE_START"), 0.0, 100.0, 50.0),
+                percent("end", tr_noop!("PARAM_FADE_END"), 0.0, 100.0, 100.0),
+                ParamSpec::curve("curve", tr_noop!("PARAM_FADE_CURVE"), EASE_IN_OUT),
+            ],
+            fade_linear,
+        ),
+        effect(
+            "builtin.fade_radial",
+            tr_noop!("EFFECT_FADE_RADIAL"),
+            tr_noop!("EFFECT_FADE_RADIAL_HINT"),
+            vec![
+                percent("center_x", tr_noop!("PARAM_CENTER_X"), 0.0, 100.0, 50.0),
+                percent("center_y", tr_noop!("PARAM_CENTER_Y"), 0.0, 100.0, 50.0),
+                percent("start", tr_noop!("PARAM_FADE_START"), 0.0, 200.0, 50.0),
+                percent("end", tr_noop!("PARAM_FADE_END"), 0.0, 200.0, 100.0),
+                ParamSpec::curve("curve", tr_noop!("PARAM_FADE_CURVE"), EASE_IN_OUT),
+                ParamSpec::bool("inward", tr_noop!("PARAM_FADE_INWARD"), false),
+            ],
+            fade_radial,
+        ),
+        effect(
             "builtin.blur",
             tr_noop!("EFFECT_GAUSSIAN_BLUR"),
             tr_noop!("EFFECT_GAUSSIAN_BLUR_HINT"),
@@ -592,6 +628,101 @@ fn sharpen(img: &mut RgbaImage, p: &Params, scale: f32) -> Result<(), String> {
 /// How far the shadow is moved, in source pixels. The light comes from `angle`
 /// (counterclockwise from the right, as in most editors): at 135° it comes from the
 /// top left and the shadow falls to the bottom right.
+/// The box around the visible pixels (alpha above 0): x0, y0, x1, y1, in pixels. The
+/// image may have margins added for other effects; fades span the object, not those.
+fn visible_bounds(img: &RgbaImage) -> Option<[f32; 4]> {
+    let (w, h) = (img.width() as usize, img.height() as usize);
+    let raw = img.as_raw();
+    let mut b = [usize::MAX, usize::MAX, 0, 0];
+    for y in 0..h {
+        let row = &raw[y * w * 4..][..w * 4];
+        let Some(x0) = row.as_chunks::<4>().0.iter().position(|p| p[3] > 0) else {
+            continue;
+        };
+        let x1 = w
+            - 1
+            - row
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .rev()
+                .position(|p| p[3] > 0)
+                .unwrap_or(0);
+        b = [b[0].min(x0), b[1].min(y), b[2].max(x1 + 1), y + 1];
+    }
+    (b[0] != usize::MAX).then(|| b.map(|v| v as f32))
+}
+
+/// The fades' curve before it is changed: eased in and out.
+const EASE_IN_OUT: [f32; 4] = super::CURVE_PRESETS[3].2;
+
+/// How much of a pixel stays at `t` along a fade from `start` (still opaque) to `end`
+/// (transparent), following `curve`. With `end` before `start`, a hard edge at `start`.
+fn fade_factor(t: f32, start: f32, end: f32, curve: [f32; 4]) -> f32 {
+    if end <= start {
+        return if t < start { 1.0 } else { 0.0 };
+    }
+    1.0 - super::ease(curve, (t - start) / (end - start))
+}
+
+/// Multiplies each pixel's opacity by `keep(x, y)`, at the pixel's center.
+fn fade_alpha(img: &mut RgbaImage, keep: impl Fn(f32, f32) -> f32 + Sync) {
+    let row = img.width() as usize * 4;
+    par_rows(img, row, |y0, chunk| {
+        for (j, line) in chunk.chunks_exact_mut(row).enumerate() {
+            let y = (y0 + j) as f32 + 0.5;
+            for (x, px) in line.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                if px[3] > 0 {
+                    px[3] = clamp_u8(px[3] as f32 * keep(x as f32 + 0.5, y));
+                }
+            }
+        }
+    });
+}
+
+/// Fades the object to transparent toward one side, horizontally or vertically: across
+/// its visible pixels, from `start` % of the way to `end` %.
+fn fade_linear(img: &mut RgbaImage, p: &Params, _: f32) -> Result<(), String> {
+    let Some([x0, y0, x1, y1]) = visible_bounds(img) else {
+        return Ok(());
+    };
+    let (w, h) = ((x1 - x0).max(1.0), (y1 - y0).max(1.0));
+    // How far toward the fading side, from 0 on the opposite side to 1 on it.
+    let toward: fn(f32, f32, [f32; 4]) -> f32 = match p.choice("toward") {
+        "left" => |x, _, [x0, _, w, _]| 1.0 - (x - x0) / w,
+        "top" => |_, y, [_, y0, _, h]| 1.0 - (y - y0) / h,
+        "bottom" => |_, y, [_, y0, _, h]| (y - y0) / h,
+        _ => |x, _, [x0, _, w, _]| (x - x0) / w,
+    };
+    let (start, end) = (p.f32("start") / 100.0, p.f32("end") / 100.0);
+    let curve = p.curve("curve");
+    fade_alpha(img, |x, y| {
+        fade_factor(toward(x, y, [x0, y0, w, h]), start, end, curve)
+    });
+    Ok(())
+}
+
+/// Fades the object to transparent around a center: in an ellipse the shape of its
+/// visible pixels' box, 100% reaching the box's sides. `inward` fades the center instead.
+fn fade_radial(img: &mut RgbaImage, p: &Params, _: f32) -> Result<(), String> {
+    let Some([x0, y0, x1, y1]) = visible_bounds(img) else {
+        return Ok(());
+    };
+    let (w, h) = (x1 - x0, y1 - y0);
+    let cx = x0 + w * p.f32("center_x") / 100.0;
+    let cy = y0 + h * p.f32("center_y") / 100.0;
+    let (rx, ry) = ((w / 2.0).max(1.0), (h / 2.0).max(1.0));
+    let (start, end) = (p.f32("start") / 100.0, p.f32("end") / 100.0);
+    let inward = p.bool("inward");
+    let curve = p.curve("curve");
+    fade_alpha(img, |x, y| {
+        let r = (((x - cx) / rx).powi(2) + ((y - cy) / ry).powi(2)).sqrt();
+        let k = fade_factor(r, start, end, curve);
+        if inward { 1.0 - k } else { k }
+    });
+    Ok(())
+}
+
 fn shadow_offset(p: &Params) -> (f32, f32) {
     let (a, d) = (p.f32("angle").to_radians(), p.f32("distance"));
     (-a.cos() * d, a.sin() * d)
@@ -1215,6 +1346,174 @@ mod tests {
                 assert_eq!(img.get_pixel(0, 0).0[3], 0, "{}", e.id());
             }
         }
+    }
+
+    fn alpha(img: &RgbaImage, x: u32, y: u32) -> u8 {
+        img.get_pixel(x, y).0[3]
+    }
+
+    #[test]
+    fn linear_fade_goes_transparent_toward_its_side() {
+        let white = image::Rgba([255, 255, 255, 255]);
+        let mut img = RgbaImage::from_pixel(100, 10, white);
+        // Default: toward the right, from halfway.
+        run("builtin.fade_linear", &mut img, &[], 1.0);
+        assert_eq!(alpha(&img, 10, 5), 255);
+        assert_eq!(alpha(&img, 49, 5), 255);
+        let mid = alpha(&img, 75, 5);
+        assert!((100..156).contains(&mid), "half faded: {mid}");
+        assert_eq!(alpha(&img, 99, 5), 0);
+        // Colors are kept, only opacity changes.
+        assert_eq!(&img.get_pixel(75, 5).0[..3], &[255, 255, 255]);
+
+        // Vertical: the top fades, or the bottom.
+        let mut img = RgbaImage::from_pixel(10, 100, white);
+        run(
+            "builtin.fade_linear",
+            &mut img,
+            &[("toward", "top".into()), ("start", 0.into())],
+            1.0,
+        );
+        assert_eq!(alpha(&img, 5, 0), 0);
+        assert!(alpha(&img, 5, 99) > 250);
+        assert!(alpha(&img, 5, 30) < alpha(&img, 5, 70));
+        let mut img = RgbaImage::from_pixel(10, 100, white);
+        run(
+            "builtin.fade_linear",
+            &mut img,
+            &[("toward", "bottom".into())],
+            1.0,
+        );
+        assert_eq!(alpha(&img, 5, 99), 0);
+        assert_eq!(alpha(&img, 5, 10), 255);
+        // Horizontal, toward the left.
+        let mut img = RgbaImage::from_pixel(100, 10, white);
+        run(
+            "builtin.fade_linear",
+            &mut img,
+            &[("toward", "left".into())],
+            1.0,
+        );
+        assert_eq!(alpha(&img, 0, 5), 0);
+        assert_eq!(alpha(&img, 90, 5), 255);
+    }
+
+    #[test]
+    fn the_curve_shapes_the_fade() {
+        let white = image::Rgba([255, 255, 255, 255]);
+        let at_quarter = |curve: [f32; 4]| {
+            let mut img = RgbaImage::from_pixel(101, 4, white);
+            run(
+                "builtin.fade_linear",
+                &mut img,
+                &[
+                    ("start", 0.into()),
+                    ("curve", crate::effects::curve_value(curve)),
+                ],
+                1.0,
+            );
+            alpha(&img, 25, 2)
+        };
+        let [linear, ease_in, ease_out, _] = crate::effects::CURVE_PRESETS.map(|p| p.2);
+        // A quarter of the way: linear has lost a quarter, ease in less, ease out more.
+        let l = at_quarter(linear);
+        assert!((185..197).contains(&l), "{l}");
+        assert!(at_quarter(ease_in) > l + 20);
+        assert!(at_quarter(ease_out) < l - 20);
+    }
+
+    #[test]
+    fn fades_span_the_visible_pixels_not_the_margins() {
+        // A 20 px wide object in the middle of a transparent 100 px image, as when
+        // another effect added margins.
+        let mut img = RgbaImage::from_fn(100, 10, |x, _| {
+            let a = if (40..60).contains(&x) { 255 } else { 0 };
+            image::Rgba([255, 0, 0, a])
+        });
+        run("builtin.fade_linear", &mut img, &[], 1.0);
+        assert_eq!(alpha(&img, 45, 5), 255);
+        assert!(alpha(&img, 55, 5) < 200);
+        assert!(alpha(&img, 59, 5) < 20);
+        // Next to a drop shadow, which adds margins first: the object still fades.
+        let mut img = RgbaImage::from_pixel(40, 40, image::Rgba([0, 0, 255, 255]));
+        let reg = registry();
+        let mut fade = EffectInstance::new(reg.get("builtin.fade_linear").unwrap());
+        fade.params.insert("start".into(), 0.into());
+        let shadow = EffectInstance::new(reg.get("builtin.drop_shadow").unwrap());
+        let done = apply(&mut img, &[fade, shadow], 1.0);
+        let [l, t, ..] = done.pad;
+        assert!(alpha(&img, l + 1, t + 20) > 240, "the left side stays");
+        // The right edge is transparent, but the shadow falls there.
+        assert_eq!(&img.get_pixel(l + 39, t + 20).0[..3], &[0, 0, 0]);
+    }
+
+    #[test]
+    fn radial_fade_keeps_the_center_and_inward_reverses_it() {
+        let white = image::Rgba([255, 255, 255, 255]);
+        let mut img = RgbaImage::from_pixel(100, 50, white);
+        run("builtin.fade_radial", &mut img, &[], 1.0);
+        assert_eq!(alpha(&img, 50, 25), 255);
+        // The ellipse fits the box: the middle of each side is at 100%, the corners
+        // beyond.
+        assert!(alpha(&img, 1, 25) < 15);
+        assert!(alpha(&img, 50, 1) < 15);
+        assert_eq!(alpha(&img, 0, 0), 0);
+        // Halfway out (75%) is half faded, the same along both axes.
+        let (side, top) = (alpha(&img, 12, 25), alpha(&img, 50, 6));
+        assert!(side.abs_diff(top) < 12, "{side} {top}");
+
+        let mut img = RgbaImage::from_pixel(100, 50, white);
+        run(
+            "builtin.fade_radial",
+            &mut img,
+            &[("inward", true.into())],
+            1.0,
+        );
+        assert_eq!(alpha(&img, 50, 25), 0);
+        assert_eq!(alpha(&img, 0, 0), 255);
+    }
+
+    /// Both fades on a colored disc over a checkerboard, to look at them:
+    /// `FADE_PREVIEW=out.png cargo test fade_preview -- --ignored`.
+    #[test]
+    #[ignore]
+    fn fade_preview() {
+        let Ok(path) = std::env::var("FADE_PREVIEW") else {
+            return;
+        };
+        let disc = || {
+            RgbaImage::from_fn(200, 200, |x, y| {
+                let d = ((x as f32 - 100.0).powi(2) + (y as f32 - 100.0).powi(2)).sqrt();
+                let a = if d < 90.0 { 255 } else { 0 };
+                image::Rgba([(x + 40) as u8, 90, (y + 40) as u8, a])
+            })
+        };
+        let variants: [(&str, Vec<(&str, serde_json::Value)>); 4] = [
+            ("builtin.fade_linear", vec![]),
+            (
+                "builtin.fade_linear",
+                vec![("toward", "bottom".into()), ("start", 20.into())],
+            ),
+            ("builtin.fade_radial", vec![("start", 30.into())]),
+            ("builtin.fade_radial", vec![("inward", true.into())]),
+        ];
+        let mut out = RgbaImage::new(840, 220);
+        for (i, (id, set)) in variants.iter().enumerate() {
+            let mut img = disc();
+            run(id, &mut img, set, 1.0);
+            for (x, y, p) in img.enumerate_pixels() {
+                let (ox, oy) = (10 + i as u32 * 210 + x, 10 + y);
+                let check = if (ox / 10 + oy / 10) % 2 == 0 {
+                    200.0
+                } else {
+                    150.0
+                };
+                let a = p.0[3] as f32 / 255.0;
+                let c = |v: u8| (v as f32 * a + check * (1.0 - a)) as u8;
+                out.put_pixel(ox, oy, image::Rgba([c(p.0[0]), c(p.0[1]), c(p.0[2]), 255]));
+            }
+        }
+        out.save(path).unwrap();
     }
 
     #[test]

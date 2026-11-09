@@ -58,32 +58,47 @@ const PER_ROW: usize = 12;
 
 /// Every color the project uses, once each, in stack order: the page background, then
 /// for each layer from the bottom its text, outline, fill and stroke colors and those of
-/// its effects. Colors switched off (no fill, no outline) don't count.
+/// its effects. A gradient counts with the colors of its stops. Colors switched off (no
+/// fill, no outline) don't count.
 pub fn used(doc: &Document) -> Vec<[u8; 4]> {
-    let [r, g, b] = doc.background;
-    let mut colors = vec![[r, g, b, 255]];
+    let mut colors = Vec::new();
     let mut add = |c: [u8; 4]| {
         if !colors.contains(&c) {
             colors.push(c);
         }
     };
+    // One color, or a gradient's stops.
+    fn either(add: &mut dyn FnMut([u8; 4]), c: [u8; 4], g: Option<&crate::gradient::Gradient>) {
+        match g {
+            Some(g) => g.sorted().iter().for_each(|s| add(s.color)),
+            None => add(c),
+        }
+    }
+    let [r, g, b] = doc.background;
+    // The page is opaque, and so are its gradient's colors.
+    let bg = doc.background_gradient.as_ref().map(|g| {
+        let mut g = g.clone();
+        g.stops.iter_mut().for_each(|s| s.color[3] = 255);
+        g
+    });
+    either(&mut add, [r, g, b, 255], bg.as_ref());
     fn walk(nodes: &[Node], add: &mut dyn FnMut([u8; 4])) {
         for node in nodes {
             match node {
                 Node::Group(g) => walk(&g.children, add),
                 Node::Layer(l) => {
                     if let Some(t) = &l.text {
-                        add(t.color);
+                        either(add, t.color, t.gradient.as_ref());
                         if t.outline {
                             add(t.outline_color);
                         }
                     }
                     if let Some(s) = &l.shape {
                         if s.fill && s.kind.can_fill() {
-                            add(s.fill_color);
+                            either(add, s.fill_color, s.fill_gradient.as_ref());
                         }
                         if s.stroke {
-                            add(s.stroke_color);
+                            either(add, s.stroke_color, s.stroke_gradient.as_ref());
                         }
                     }
                     for fx in &l.effects {
@@ -249,6 +264,19 @@ pub fn apply(doc: &mut Document) -> bool {
         changed |= doc.background != [r, g, b];
         doc.background = [r, g, b];
     }
+    // A gradient's stops, each linked on its own.
+    let mut stops = |g: &mut crate::gradient::Gradient| {
+        for stop in &mut g.stops {
+            if let Some(c) = stop.link.as_deref().and_then(find) {
+                changed |= stop.color != c;
+                stop.color = c;
+            }
+        }
+    };
+    if let Some(g) = &mut doc.background_gradient {
+        stops(g);
+    }
+    doc.for_each_layer_mut(|layer| layer.gradients_mut().into_iter().for_each(&mut stops));
     doc.for_each_layer_mut(|layer| {
         let mut links = std::mem::take(&mut layer.color_links);
         links.retain(|&field, name| {
@@ -309,6 +337,15 @@ pub fn adopt_links(vars: &mut Vec<Variable>, node: &mut Node) {
         true
     };
     node.for_each_layer_mut(&mut |l| {
+        for g in l.gradients_mut() {
+            for stop in &mut g.stops {
+                if let Some(name) = &mut stop.link
+                    && !fit(name, stop.color)
+                {
+                    stop.link = None;
+                }
+            }
+        }
         let mut links = std::mem::take(&mut l.color_links);
         links.retain(|&field, name| match slot(l, field) {
             Some(c) => {
@@ -345,14 +382,30 @@ fn slot(layer: &mut crate::document::Layer, field: ColorField) -> Option<&mut [u
 }
 
 /// Every link to a color variable in the document: the page background's, the layers'
-/// and their effects'. A link `f` returns false for is removed.
+/// and their effects', and their gradients' stops'. A link `f` returns false for is
+/// removed.
 fn for_each_link(doc: &mut Document, mut f: impl FnMut(&mut String) -> bool) {
     if let Some(name) = &mut doc.background_link
         && !f(name)
     {
         doc.background_link = None;
     }
+    let stops = |g: &mut crate::gradient::Gradient, f: &mut dyn FnMut(&mut String) -> bool| {
+        for stop in &mut g.stops {
+            if let Some(name) = &mut stop.link
+                && !f(name)
+            {
+                stop.link = None;
+            }
+        }
+    };
+    if let Some(g) = &mut doc.background_gradient {
+        stops(g, &mut f);
+    }
     doc.for_each_layer_mut(|l| {
+        for g in l.gradients_mut() {
+            stops(g, &mut f);
+        }
         l.color_links.retain(|_, name| f(name));
         for fx in &mut l.effects {
             fx.links.retain(|_, name| f(name));
@@ -636,15 +689,6 @@ pub fn button(
     response
 }
 
-/// An opaque color button for an RGB color, as [`button`].
-pub fn button_rgb(ui: &mut Ui, color: &mut [u8; 3], link: &mut Option<String>) -> Response {
-    let [r, g, b] = *color;
-    let mut c = [r, g, b, 255];
-    let response = button(ui, &mut c, false, link);
-    *color = [c[0], c[1], c[2]];
-    response
-}
-
 /// A color variable's tooltip: its name and its hex code.
 fn tip(name: &str, c: [u8; 4]) -> String {
     format!("{name} ({})", describe(c))
@@ -790,6 +834,58 @@ mod tests {
             name: name.into(),
             value: Value::Color(c),
         }
+    }
+
+    #[test]
+    fn gradient_stops_are_colors_in_use_and_follow_their_variables() {
+        use crate::gradient::Gradient;
+        let mut doc = Document::default();
+        doc.variables.push(cv("brand", [200, 0, 0, 255]));
+        let mut layer = crate::shape::new_layer(1, crate::shape::ShapeKind::Rectangle, [0.0; 2]);
+        let mut g = Gradient::from_color([1, 2, 3, 255]);
+        g.stops[0].link = Some("brand".into());
+        layer.shape.as_mut().unwrap().fill_gradient = Some(g);
+        doc.layers.push(Node::Layer(Box::new(layer)));
+        let mut bg = Gradient::from_color([9, 9, 9, 255]);
+        bg.stops[1].link = Some("brand".into());
+        doc.background_gradient = Some(bg);
+
+        // Linked stops take their variable's color.
+        assert!(apply(&mut doc));
+        let stop = |doc: &Document| {
+            doc.layer(1)
+                .unwrap()
+                .shape
+                .as_ref()
+                .unwrap()
+                .fill_gradient
+                .as_ref()
+                .unwrap()
+                .stops[0]
+                .clone()
+        };
+        assert_eq!(stop(&doc).color, [200, 0, 0, 255]);
+        assert_eq!(
+            doc.background_gradient.as_ref().unwrap().stops[1].color,
+            [200, 0, 0, 255]
+        );
+        // The stops are colors in use, the shape's single fill color is not.
+        let used = used(&doc);
+        assert!(used.contains(&[200, 0, 0, 255]) && used.contains(&[9, 9, 9, 255]));
+        assert!(!used.contains(&[70, 130, 180, 255]), "{used:?}");
+        // Counted, renamed, and broken like other links.
+        assert_eq!(use_count(&mut doc, "brand"), 2);
+        rename_links(&mut doc, "brand", "red");
+        assert_eq!(stop(&doc).link.as_deref(), Some("red"));
+        assert_eq!(
+            crate::variables::broken_links(doc.layer(1).unwrap(), &doc.variables),
+            ["red"]
+        );
+        // Pasted into a project without the variable: saved as one there.
+        let mut vars = Vec::new();
+        let mut node = doc.layers[0].clone();
+        adopt_links(&mut vars, &mut node);
+        assert_eq!(vars, [cv("red", [200, 0, 0, 255])]);
     }
 
     #[test]

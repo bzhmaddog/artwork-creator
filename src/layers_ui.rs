@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use crate::colors::ColorField;
 use crate::document::{Document, Group, Layer, Node, P2};
 use crate::effects_ui;
-use crate::i18n::{tr, tr_n, tr_noop, translate};
+use crate::i18n::{tr, tr_noop, translate};
 use crate::shape::{self, Cap, DashStyle, Join, ShapeKind};
 use crate::shortcuts::Command;
 use crate::text::{self, FontLibrary, PathKind, TextAlign};
@@ -1602,15 +1602,25 @@ fn text_section(
                 ui.end_row();
 
                 ui.label(tr!("TEXT_COLOR"));
-                changed |= crate::colors::linked_button(
-                    ui,
-                    &mut layer.color_links,
-                    ColorField::Text,
-                    &mut t.color,
-                    true,
-                )
-                .changed();
+                let mut link = layer.color_links.remove(&ColorField::Text);
+                let mut fill = crate::gradient_ui::Fill {
+                    color: &mut t.color,
+                    link: &mut link,
+                    gradient: &mut t.gradient,
+                    alpha: true,
+                };
+                ui.horizontal(|ui| {
+                    changed |= crate::gradient_ui::inline(ui, ("text", layer.id), &mut fill);
+                });
                 ui.end_row();
+                if fill.gradient.is_some() {
+                    ui.label("");
+                    changed |= crate::gradient_ui::rows(ui, ("text", layer.id), &mut fill);
+                    ui.end_row();
+                }
+                if let Some(name) = link {
+                    layer.color_links.insert(ColorField::Text, name);
+                }
             });
             if font_changed {
                 text::font_changed(layer);
@@ -1993,21 +2003,30 @@ fn shape_section(
 
                 if s.kind.can_fill() {
                     ui.label(tr!("SHAPE_FILL"));
+                    let mut link = layer.color_links.remove(&ColorField::Fill);
+                    let mut fill = crate::gradient_ui::Fill {
+                        color: &mut s.fill_color,
+                        link: &mut link,
+                        gradient: &mut s.fill_gradient,
+                        alpha: true,
+                    };
                     ui.horizontal(|ui| {
                         changed |= ui.checkbox(&mut s.fill, "").changed();
                         ui.add_enabled_ui(s.fill, |ui| {
-                            changed |= crate::colors::linked_button(
-                                ui,
-                                &mut layer.color_links,
-                                ColorField::Fill,
-                                &mut s.fill_color,
-                                true,
-                            )
-                            .on_hover_text(tr!("SHAPE_COLOR_HINT"))
-                            .changed();
+                            changed |= crate::gradient_ui::inline(ui, ("fill", id), &mut fill);
                         });
                     });
                     ui.end_row();
+                    if fill.gradient.is_some() {
+                        ui.label("");
+                        ui.add_enabled_ui(s.fill, |ui| {
+                            changed |= crate::gradient_ui::rows(ui, ("fill", id), &mut fill);
+                        });
+                        ui.end_row();
+                    }
+                    if let Some(name) = link {
+                        layer.color_links.insert(ColorField::Fill, name);
+                    }
                 }
 
                 ui.label(tr!("SHAPE_STROKE"));
@@ -2024,18 +2043,34 @@ fn shape_section(
                         .on_hover_text(tr!("SHAPE_STROKE_WIDTH_HINT"))
                         .changed();
                         unit(ui, "mm");
-                        changed |= crate::colors::linked_button(
-                            ui,
-                            &mut layer.color_links,
-                            ColorField::Stroke,
-                            &mut s.stroke_color,
-                            true,
-                        )
-                        .on_hover_text(tr!("SHAPE_COLOR_HINT"))
-                        .changed();
                     });
                 });
                 ui.end_row();
+                // Its color or gradient on a row of its own, as for the fill.
+                ui.add_enabled_ui(s.stroke, |ui| ui.label(tr!("SHAPE_STROKE_COLOR")));
+                let mut link = layer.color_links.remove(&ColorField::Stroke);
+                let mut stroke = crate::gradient_ui::Fill {
+                    color: &mut s.stroke_color,
+                    link: &mut link,
+                    gradient: &mut s.stroke_gradient,
+                    alpha: true,
+                };
+                ui.add_enabled_ui(s.stroke, |ui| {
+                    ui.horizontal(|ui| {
+                        changed |= crate::gradient_ui::inline(ui, ("stroke", id), &mut stroke);
+                    });
+                });
+                ui.end_row();
+                if stroke.gradient.is_some() {
+                    ui.label("");
+                    ui.add_enabled_ui(s.stroke, |ui| {
+                        changed |= crate::gradient_ui::rows(ui, ("stroke", id), &mut stroke);
+                    });
+                    ui.end_row();
+                }
+                if let Some(name) = link {
+                    layer.color_links.insert(ColorField::Stroke, name);
+                }
 
                 ui.add_enabled_ui(s.stroke, |ui| ui.label(tr!("STROKE_DASHES")));
                 ui.add_enabled_ui(s.stroke, |ui| {
@@ -2226,16 +2261,9 @@ fn properties(
         .filter(|l| l.layer.shape.is_some())
         .map(|l| (l.layer.id, l.layer.name.clone()))
         .collect();
-    let layer_count = {
-        let mut n = 0;
-        if let Some(node) = doc.node(id) {
-            node.for_each_layer(&mut |_| n += 1);
-        }
-        n
-    };
     match doc.node_mut(id) {
         Some(Node::Group(g)) => {
-            // Common properties first, then what only groups have.
+            // A group has only the properties all layers have.
             section(
                 ui,
                 "layer_props",
@@ -2254,20 +2282,6 @@ fn properties(
                             .changed();
                         ui.end_row();
                     });
-                    section(
-                        ui,
-                        "group_props",
-                        RichText::new(tr!("GROUP_SECTION")),
-                        |_| false,
-                        |ui| {
-                            ui.weak(tr_n!("LAYER_COUNT", layer_count));
-                            crate::callout::callout(
-                                ui,
-                                crate::callout::Tone::Tip,
-                                tr!("MOVE_GROUP_HINT"),
-                            );
-                        },
-                    );
                 },
             );
         }

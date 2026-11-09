@@ -12,6 +12,8 @@ mod effects;
 mod effects_ui;
 mod export;
 mod file_dialog;
+mod gradient;
+mod gradient_ui;
 mod history;
 mod i18n;
 mod layers_ui;

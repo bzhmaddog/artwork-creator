@@ -10,7 +10,8 @@ use printpdf::{
 };
 use tiny_skia::PathSegment;
 
-use crate::document::{Homography, Orientation, P2, PageSize};
+use crate::document::{Affine, Homography, Orientation, P2, PageSize};
+use crate::gradient::{Geometry as GradientGeometry, Gradient, Ink};
 use crate::i18n::tr;
 use crate::print;
 use crate::render::{self, Cuts, OUTLINE_WIDTH_MM, Part, Scene};
@@ -354,6 +355,86 @@ fn mm_to_pt(mm: f32) -> f32 {
     mm * 72.0 / 25.4
 }
 
+/// A shape filled with a gradient: clipped to its outline (`rings`, in PDF points),
+/// then a PDF shading painted in the layer's own units through its map. Only for an
+/// opaque gradient on a layer that is not distorted (see `SceneLayer::vector`).
+fn gradient_ops(
+    doc: &mut PdfDocument,
+    rings: Vec<PolygonRing>,
+    gradient: &Gradient,
+    frame: tiny_skia::Rect,
+    map: Homography,
+    opacity: f32,
+    page_h: f32,
+) -> Vec<Op> {
+    let Some(a) = map.as_affine() else {
+        return Vec::new();
+    };
+    let mut ops = vec![Op::SaveGraphicsState];
+    if opacity < 1.0 {
+        let gs = ExtendedGraphicsState::default().with_current_fill_alpha(opacity.max(0.0));
+        ops.push(Op::LoadGraphicsState {
+            gs: doc.add_graphics_state(gs),
+        });
+    }
+    ops.push(Op::DrawPolygon {
+        polygon: Polygon {
+            rings,
+            mode: PaintMode::Clip,
+            winding_order: WindingOrder::NonZero,
+        },
+    });
+    // Layer units to page mm (the layer's map), then to PDF points with y up.
+    let k = mm_to_pt(1.0);
+    let to_pt = a.then(Affine {
+        a: k,
+        b: 0.0,
+        c: 0.0,
+        d: -k,
+        e: 0.0,
+        f: mm_to_pt(page_h),
+    });
+    let raw = |m: Affine| printpdf::CurTransMat::Raw([m.a, m.b, m.c, m.d, m.e, m.f]);
+    ops.push(Op::SetTransformationMatrix { matrix: raw(to_pt) });
+    let geometry = match gradient.geometry(frame) {
+        GradientGeometry::Linear { from, to } => printpdf::ShadingGeometry::Axial {
+            coords: [from[0], from[1], to[0], to[1]],
+        },
+        // A circle of radius 1 around the origin, stretched into the ellipse.
+        GradientGeometry::Radial { ellipse: e } => {
+            ops.push(Op::SetTransformationMatrix {
+                matrix: raw(Affine {
+                    a: e.sx,
+                    b: e.ky,
+                    c: e.kx,
+                    d: e.sy,
+                    e: e.tx,
+                    f: e.ty,
+                }),
+            });
+            printpdf::ShadingGeometry::Radial {
+                coords: [0.0, 0.0, 0.0, 0.0, 0.0, 1.0],
+            }
+        }
+    };
+    let stops = gradient
+        .sorted()
+        .iter()
+        .map(|s| printpdf::GradientStop {
+            offset: s.pos,
+            color: [0, 1, 2].map(|i| s.color[i] as f32 / 255.0),
+        })
+        .collect();
+    let id = doc.add_shading(printpdf::Shading {
+        geometry,
+        stops,
+        extend: (true, true),
+    });
+    ops.push(Op::PaintShading { id });
+    ops.push(Op::RestoreGraphicsState);
+    ops
+}
+
 /// Page mm to PDF points, y up from the bottom of a page `page_h` mm tall.
 fn to_pdf(page_h: f32, p: P2) -> Point {
     Point {
@@ -542,11 +623,26 @@ fn page_ops(doc: &mut PdfDocument, scene: &Scene, parts: &[Part], dpi: f32) -> V
             }
             Part::Vector(layer) => {
                 let Some(v) = layer.vector() else { continue };
-                for (path, c) in &v.fills {
+                for (path, ink) in &v.fills {
                     let rings = rings(path, v.map, page_h);
                     if rings.is_empty() {
                         continue;
                     }
+                    let c = match ink {
+                        Ink::Solid(c) => *c,
+                        Ink::Gradient { gradient, frame } => {
+                            ops.extend(gradient_ops(
+                                doc,
+                                rings,
+                                gradient,
+                                *frame,
+                                v.map,
+                                layer.opacity,
+                                page_h,
+                            ));
+                            continue;
+                        }
+                    };
                     let alpha = c[3] as f32 / 255.0 * layer.opacity.clamp(0.0, 1.0);
                     ops.push(Op::SaveGraphicsState);
                     if alpha < 1.0 {
@@ -823,6 +919,106 @@ mod tests {
                 .unwrap();
             }
         }
+    }
+
+    #[test]
+    fn pdf_gradients_are_shadings_when_opaque_and_images_when_not() {
+        use crate::document::Node;
+        use crate::gradient::{Gradient, GradientKind};
+        use crate::shape::{self, ShapeKind};
+        let mut doc = Document::default();
+        let c = doc.page_center();
+        let mut rect = shape::new_layer(1, ShapeKind::Rectangle, c);
+        rect.transform.rotation_deg = 30.0;
+        {
+            let s = rect.shape.as_mut().unwrap();
+            s.stroke = false;
+            let mut g = Gradient::from_color([255, 0, 0, 255]);
+            g.kind = GradientKind::Radial;
+            s.fill_gradient = Some(g);
+        }
+        // Fading to transparent: no PDF shading can do that.
+        let mut faded = shape::new_layer(2, ShapeKind::Ellipse, c);
+        {
+            let s = faded.shape.as_mut().unwrap();
+            let mut g = Gradient::from_color([0, 0, 255, 255]);
+            g.stops[1].color = [0, 0, 255, 0];
+            s.fill_gradient = Some(g);
+        }
+        doc.layers = vec![Node::Layer(Box::new(rect)), Node::Layer(Box::new(faded))];
+        shape::prepare_export(&mut doc, 100.0);
+        let scene = Scene::new(
+            &doc,
+            None,
+            [[255, 0, 255]; crate::template::KINDS],
+            [true; crate::template::KINDS],
+            Cuts::default(),
+        );
+        let parts = render::compose_parts(&scene, 100.0, true, &mut |_| true).unwrap();
+        let vectors = parts
+            .iter()
+            .filter(|p| matches!(p, Part::Vector(_)))
+            .count();
+        assert_eq!(
+            vectors, 1,
+            "the opaque gradient stays a vector, the faded one not"
+        );
+        let mut pdf = PdfDocument::new("test");
+        let ops = page_ops(&mut pdf, &scene, &parts, 100.0);
+        // Clipped to the rectangle, then the shading painted.
+        let clip = ops.iter().position(|op| {
+            matches!(op, Op::DrawPolygon { polygon } if polygon.mode == PaintMode::Clip
+                && polygon.rings.len() == 1 && polygon.rings[0].points.len() == 4)
+        });
+        let paint = ops
+            .iter()
+            .position(|op| matches!(op, Op::PaintShading { .. }));
+        assert!(
+            matches!((clip, paint), (Some(c), Some(p)) if c < p),
+            "{clip:?} {paint:?}"
+        );
+        assert_eq!(pdf.resources.shadings.map.len(), 1);
+        let shading = pdf.resources.shadings.map.values().next().unwrap();
+        assert!(matches!(
+            shading.geometry,
+            printpdf::ShadingGeometry::Radial { .. }
+        ));
+        // The shading's center lands on the rectangle's center on the page: the two
+        // matrices set after the clip, applied to (0, 0).
+        let raw: Vec<[f32; 6]> = ops[clip.unwrap()..paint.unwrap()]
+            .iter()
+            .filter_map(|op| match op {
+                Op::SetTransformationMatrix {
+                    matrix: printpdf::CurTransMat::Raw(m),
+                } => Some(*m),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(raw.len(), 2);
+        let apply = |m: [f32; 6], p: [f32; 2]| {
+            [
+                m[0] * p[0] + m[2] * p[1] + m[4],
+                m[1] * p[0] + m[3] * p[1] + m[5],
+            ]
+        };
+        let center = apply(raw[0], apply(raw[1], [0.0, 0.0]));
+        let want = to_pdf(scene.page_mm[1], c);
+        assert!(
+            (center[0] - want.x.0).abs() < 0.5 && (center[1] - want.y.0).abs() < 0.5,
+            "{center:?} vs {want:?}"
+        );
+        assert_eq!(shading.stops[0].color, [1.0, 0.0, 0.0]);
+        assert_eq!(shading.stops[1].color, [1.0, 1.0, 1.0]);
+        // The whole thing writes.
+        let page = PdfPage::new(Mm(297.0), Mm(210.0), ops);
+        let bytes = pdf
+            .with_pages(vec![page])
+            .save(&PdfSaveOptions::default(), &mut Vec::new());
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(
+            text.contains("/ShadingType 3"),
+            "a radial shading in the file"
+        );
     }
 
     #[test]
@@ -1151,6 +1347,7 @@ mod tests {
         let scene = Scene {
             page_mm: [100.0, 50.0],
             background: [255, 255, 255],
+            background_gradient: None,
             layers: Vec::new(),
             elements: Vec::new(),
             cuts: Cuts::default(),

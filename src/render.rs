@@ -40,9 +40,9 @@ pub struct SceneLayer {
 /// A text or shape layer as filled shapes, for vector output such as PDF.
 #[derive(Debug)]
 pub struct Outlines {
-    /// Shapes in the layer's frame (layer units, y down), each filled with its straight
-    /// RGBA color under the non-zero rule, bottom first.
-    pub fills: Vec<(tiny_skia::Path, [u8; 4])>,
+    /// Shapes in the layer's frame (layer units, y down), each filled with its color or
+    /// gradient under the non-zero rule, bottom first.
+    pub fills: Vec<(tiny_skia::Path, crate::gradient::Ink)>,
     /// Layer units to page mm, including any distortion.
     pub map: Homography,
 }
@@ -60,9 +60,17 @@ impl SceneLayer {
     /// Its shapes, if drawing them as vectors gives what its pixels show: they are drawn
     /// one by one, so with several (outline, fake bold, a shape's fill and stroke) the
     /// layer must be opaque.
+    /// A gradient goes in as vectors only when opaque (PDF gradients are RGB only) and
+    /// on a layer that is not distorted (they cannot follow a perspective).
     pub fn vector(&self) -> Option<&Outlines> {
         let v = self.vector.as_deref()?;
-        (self.opacity >= 1.0 || v.fills.len() <= 1).then_some(v)
+        let gradients_fit = v.fills.iter().all(|(_, ink)| match ink {
+            crate::gradient::Ink::Solid(_) => true,
+            crate::gradient::Ink::Gradient { gradient, .. } => {
+                gradient.is_opaque() && v.map.as_affine().is_some()
+            }
+        });
+        (gradients_fit && (self.opacity >= 1.0 || v.fills.len() <= 1)).then_some(v)
     }
 }
 
@@ -247,6 +255,8 @@ pub struct Scene {
     pub page_mm: P2,
     /// Page color (RGB).
     pub background: [u8; 3],
+    /// Fills the page instead of `background`, when set; opaque.
+    pub background_gradient: Option<crate::gradient::Gradient>,
     /// What to draw, bottom first.
     pub layers: Vec<SceneNode>,
     /// Template elements on the page.
@@ -307,6 +317,7 @@ impl Scene {
         Self {
             page_mm: doc.page_mm(),
             background: doc.background,
+            background_gradient: doc.background_gradient.clone(),
             layers: scene_nodes(&doc.layers, preview),
             elements,
             cuts,
@@ -859,8 +870,11 @@ pub fn compose_parts<'a>(
     let [w, h] = pixel_size(scene.page_mm, dpi);
     let new_pixmap = || Pixmap::new(w, h).ok_or_else(|| tr!("CANNOT_ALLOCATE_IMAGE", w = w, h = h));
     let mut page = new_pixmap()?;
-    let [r, g, b] = scene.background;
-    page.fill(tiny_skia::Color::from_rgba8(r, g, b, 255));
+    fill_background(
+        &mut page,
+        scene.background,
+        scene.background_gradient.as_ref(),
+    );
 
     let mm_to_px = Affine::scale(dpi / 25.4, dpi / 25.4);
     let mut parts = Vec::new();
@@ -1050,6 +1064,34 @@ pub fn stroke_polylines<'a>(
     }
 }
 
+/// Fills a page-sized pixmap with the background: its color, or its gradient over the
+/// whole pixmap, kept opaque.
+pub fn fill_background(
+    page: &mut Pixmap,
+    color: [u8; 3],
+    gradient: Option<&crate::gradient::Gradient>,
+) {
+    let [r, g, b] = color;
+    page.fill(tiny_skia::Color::from_rgba8(r, g, b, 255));
+    let Some(gradient) = gradient else {
+        return;
+    };
+    let mut opaque = gradient.clone();
+    for s in &mut opaque.stops {
+        s.color[3] = 255;
+    }
+    let Some(frame) =
+        tiny_skia::Rect::from_xywh(0.0, 0.0, page.width() as f32, page.height() as f32)
+    else {
+        return;
+    };
+    let ink = crate::gradient::Ink::Gradient {
+        gradient: opaque,
+        frame,
+    };
+    page.fill_rect(frame, &ink.paint(), tiny_skia::Transform::identity(), None);
+}
+
 /// Opaque RGB bytes from a pixmap with an opaque background.
 pub fn to_rgb(pixmap: &Pixmap) -> Vec<u8> {
     pixmap
@@ -1064,6 +1106,69 @@ pub fn to_rgb(pixmap: &Pixmap) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A page with a gradient background, a shape filled and stroked with gradients and
+    /// a text in a gradient, rendered as an export does, to look at it:
+    /// `GRADIENT_PAGE_PREVIEW=out.png cargo test gradient_page_preview -- --ignored`.
+    #[test]
+    #[ignore]
+    fn gradient_page_preview() {
+        use crate::document::{Document, Node};
+        use crate::gradient::{Gradient, GradientKind, Stop};
+        let Ok(path) = std::env::var("GRADIENT_PAGE_PREVIEW") else {
+            return;
+        };
+        let mut doc = Document::default();
+        let mut bg = Gradient::from_color([30, 40, 90, 255]);
+        bg.angle = 90.0;
+        bg.stops[1].color = [180, 210, 255, 255];
+        doc.background_gradient = Some(bg);
+        let mut star = crate::shape::new_layer(1, crate::shape::ShapeKind::Star, [100.0, 105.0]);
+        star.transform.rotation_deg = 15.0;
+        {
+            let s = star.shape.as_mut().unwrap();
+            s.size = [120.0, 120.0];
+            let mut fill = Gradient::from_color([255, 220, 60, 255]);
+            fill.kind = GradientKind::Radial;
+            fill.stops[1].color = [230, 60, 30, 255];
+            s.fill_gradient = Some(fill);
+            s.stroke_width = 3.0;
+            let mut stroke = Gradient::from_color([255, 255, 255, 255]);
+            stroke.stops[1].color = [20, 20, 20, 255];
+            stroke.angle = -45.0;
+            s.stroke_gradient = Some(stroke);
+        }
+        let mut text = crate::text::new_layer(
+            2,
+            "Gradient",
+            crate::text::BUILTIN_FAMILY.into(),
+            [215.0, 105.0],
+        );
+        {
+            let t = text.text.as_mut().unwrap();
+            let mut g = Gradient::from_color([60, 230, 120, 255]);
+            g.stops.push(Stop::new(0.5, [40, 120, 255, 255]));
+            g.stops[1].color = [200, 60, 220, 255];
+            t.gradient = Some(g);
+        }
+        let font = skrifa::FontRef::new(epaint_default_fonts::UBUNTU_LIGHT).unwrap();
+        text.size_px = crate::text::layout(text.text.as_ref().unwrap(), &font).size;
+        text.transform.scale = text.transform.scale.map(|s| s * 5.0);
+        doc.layers = vec![Node::Layer(Box::new(star)), Node::Layer(Box::new(text))];
+        crate::shape::prepare_export(&mut doc, 60.0);
+        crate::text::prepare_export(&mut doc, 60.0);
+        let scene = Scene::new(
+            &doc,
+            None,
+            [[255, 0, 255]; crate::template::KINDS],
+            [true; crate::template::KINDS],
+            Cuts::default(),
+        );
+        compose(&scene, 60.0, false)
+            .unwrap()
+            .save_png(path)
+            .unwrap();
+    }
     use crate::document::{Group, Layer, Orientation, PageSize};
 
     /// A 10 x 10 mm square layer of `rgb`, centered at `center`, at 1 px per mm.
@@ -1357,6 +1462,7 @@ mod tests {
         let mut scene = Scene {
             page_mm: [100.0, 50.0],
             background: [255, 255, 255],
+            background_gradient: None,
             layers: Vec::new(),
             elements: vec![SceneElement {
                 placed,
@@ -1400,6 +1506,7 @@ mod tests {
         let mut scene = Scene {
             page_mm: [100.0, 50.0],
             background: [255, 0, 0],
+            background_gradient: None,
             layers: scene_nodes(&[Node::Layer(Box::new(l))], false),
             elements: vec![
                 element(
@@ -1542,6 +1649,7 @@ mod tests {
         let scene = Scene {
             page_mm: [10.0, 10.0],
             background: [255, 255, 255],
+            background_gradient: None,
             layers: scene_nodes(&[Node::Layer(Box::new(l))], false),
             elements: Vec::new(),
             cuts: Cuts::default(),
@@ -1561,6 +1669,7 @@ mod tests {
         let scene = Scene {
             page_mm: [100.0, 50.0],
             background: [255, 255, 255],
+            background_gradient: None,
             // A 10 mm blue square centered at (25, 25).
             layers: vec![SceneNode::Image(SceneLayer {
                 pixmap: Arc::new(premultiplied_pixmap(&img).unwrap()),

@@ -17,7 +17,10 @@ use crate::print;
 use crate::render::{self, Cuts, OUTLINE_WIDTH_MM, Part, Scene};
 use crate::template::{ElementKind, KINDS, Polyline};
 
-/// Options of the Export window, saved with the project.
+/// How the artwork is exported and printed. Two parts: what to export (the formats and
+/// the template lines printed), chosen in the Export and Print windows and saved with the
+/// project; and the print settings (the rest), set in the Print panel and the same for
+/// every project, saved with the app's preferences.
 #[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 pub struct ExportSettings {
@@ -29,8 +32,10 @@ pub struct ExportSettings {
     pub dpi: u32,
     /// Print the lines of each element kind (`ElementKind::index`).
     pub print_lines: [bool; KINDS],
-    /// Clip to the outline and leave holes blank. Its bleed comes from the project.
+    /// Clip to the outline and leave holes blank. Its bleed is `bleed_mm`.
     pub cuts: Cuts,
+    /// How far the artwork goes past the template's cut lines, in mm.
+    pub bleed_mm: f32,
     /// Print crop marks at the corners of the outline's box, outside the bleed.
     pub crop_marks: bool,
     /// Print registration targets at the middle of each side of the outline's box.
@@ -55,6 +60,29 @@ pub struct ExportSettings {
 }
 
 impl ExportSettings {
+    /// These print settings with the choices of what to export of `choices`.
+    pub fn with_choices_of(&self, choices: &ExportSettings) -> Self {
+        Self {
+            png: choices.png,
+            pdf: choices.pdf,
+            print_lines: choices.print_lines,
+            ..self.clone()
+        }
+    }
+
+    /// Both choose to export the same: the part saved with a project.
+    pub fn same_choices(&self, other: &ExportSettings) -> bool {
+        (self.png, self.pdf, self.print_lines) == (other.png, other.pdf, other.print_lines)
+    }
+
+    /// The cuts, their bleed included.
+    pub fn cuts(&self) -> Cuts {
+        Cuts {
+            bleed_mm: self.bleed_mm,
+            ..self.cuts
+        }
+    }
+
     /// How the page is split over sheets, if it is.
     pub fn tiling(&self) -> Option<print::Tiling> {
         let [w, h] = self.sheet.portrait_mm()?;
@@ -102,6 +130,7 @@ impl Default for ExportSettings {
             // Anchors are construction marks: printed only when asked for.
             print_lines: ElementKind::ALL.map(|k| k != ElementKind::Anchors),
             cuts: Cuts::default(),
+            bleed_mm: 0.0,
             crop_marks: false,
             registration_marks: false,
             tile: false,
@@ -623,7 +652,27 @@ fn page_ops(doc: &mut PdfDocument, scene: &Scene, parts: &[Part], dpi: f32) -> V
             }
             Part::Vector(layer) => {
                 let Some(v) = layer.vector() else { continue };
-                for (path, ink) in &v.fills {
+                // The strokes painted inside a shape are cut off at its outline.
+                let clip = v
+                    .clip
+                    .as_ref()
+                    .map(|(c, range)| (rings(c, v.map, page_h), range.clone()));
+                for (i, (path, ink)) in v.fills.iter().enumerate() {
+                    if let Some((rings, range)) = &clip {
+                        if i == range.start {
+                            ops.push(Op::SaveGraphicsState);
+                            ops.push(Op::DrawPolygon {
+                                polygon: Polygon {
+                                    rings: rings.clone(),
+                                    mode: PaintMode::Clip,
+                                    winding_order: WindingOrder::NonZero,
+                                },
+                            });
+                        }
+                        if i == range.end {
+                            ops.push(Op::RestoreGraphicsState);
+                        }
+                    }
                     let rings = rings(path, v.map, page_h);
                     if rings.is_empty() {
                         continue;
@@ -661,6 +710,9 @@ fn page_ops(doc: &mut PdfDocument, scene: &Scene, parts: &[Part], dpi: f32) -> V
                             winding_order: WindingOrder::NonZero,
                         },
                     });
+                    ops.push(Op::RestoreGraphicsState);
+                }
+                if clip.is_some_and(|(_, r)| r.end >= v.fills.len()) {
                     ops.push(Op::RestoreGraphicsState);
                 }
             }
@@ -1110,6 +1162,53 @@ mod tests {
 
     /// With ARTWORK_PDF_SAMPLE set, writes text on paths there to look at: around a
     /// circle, under it on the other side, on an arc, and along a curved polyline.
+    #[test]
+    fn pdf_cuts_paint_off_at_its_shape_under_the_stroke() {
+        use crate::document::Node;
+        use crate::shape::{self, ShapeKind};
+        let mut doc = Document::default();
+        let c = doc.page_center();
+        let mut l = shape::new_layer(1, ShapeKind::Ellipse, c);
+        let line = [[c[0] - 30.0, c[1], 1.0], [c[0] + 30.0, c[1], 1.0]];
+        let pencil = crate::paint::Tool::Pencil;
+        assert!(shape::add_stroke(
+            &mut l,
+            &line,
+            &crate::paint::Pen::new(pencil, 2.0, [255, 0, 0, 255])
+        ));
+        doc.layers = vec![Node::Layer(Box::new(l))];
+        shape::prepare_export(&mut doc, 100.0);
+        let scene = Scene::new(
+            &doc,
+            None,
+            [[255, 0, 255]; crate::template::KINDS],
+            [true; crate::template::KINDS],
+            Cuts::default(),
+        );
+        let parts = render::compose_parts(&scene, 100.0, true, &mut |_| true).unwrap();
+        let mut pdf = PdfDocument::new("test");
+        let ops = page_ops(&mut pdf, &scene, &parts, 100.0);
+        // Fill, then the clip with the paint inside, then the stroke once it is undone.
+        let modes: Vec<String> = ops
+            .iter()
+            .filter_map(|op| match op {
+                Op::DrawPolygon { polygon } => Some(format!("{:?}", polygon.mode)),
+                Op::SaveGraphicsState => Some("save".into()),
+                Op::RestoreGraphicsState => Some("restore".into()),
+                _ => None,
+            })
+            .collect();
+        let shape_ops = &modes[modes.len() - 13..];
+        assert_eq!(
+            shape_ops,
+            [
+                "save", "Fill", "restore", "save", "Clip", "save", "Fill", "restore", "restore",
+                "save", "Fill", "restore", "restore"
+            ],
+            "{modes:?}"
+        );
+    }
+
     #[test]
     fn text_on_path_sample() {
         use crate::document::Node;

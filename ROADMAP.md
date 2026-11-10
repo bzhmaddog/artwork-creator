@@ -98,6 +98,11 @@ Done:
 - **Fade to transparent** effects, linear (toward the right, left, top or bottom) or radial (edges, or the
   center), over the object's visible pixels, shaped by an easing curve (presets, or a
   Bezier curve whose handles are dragged).
+- **Painting** inside any closed shape (its fill the background, its stroke the border),
+  with the pencil and the brush (round and tapered, calligraphy, marker, spray or
+  bristle, following a pen's pressure on Windows): vector strokes cut off at its
+  outline; the eraser cuts them where it passes. The Canvas button adds an empty
+  closed shape to paint in.
 - **Gradient fills**, linear or radial with any number of colors, for a shape's fill and
   stroke, a text and the page background; kept as vector gradients in the PDF.
 

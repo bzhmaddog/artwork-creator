@@ -17,6 +17,7 @@ mod gradient_ui;
 mod history;
 mod i18n;
 mod layers_ui;
+mod paint;
 mod panels;
 #[cfg(test)]
 mod preview;

@@ -1528,6 +1528,7 @@ pub fn outlines(layer: &Layer) -> Option<Outlines> {
     // The layer's box is the laid out text's, kept up to date by `sync`.
     Some(Outlines {
         fills,
+        clip: None,
         map: layer.homography(),
     })
 }

@@ -47,15 +47,24 @@ pub enum Command {
     AddImages,
     AddText,
     AddShape,
+    AddCanvas,
     Group,
     Ungroup,
     FitPage,
     RealSize,
     ShowTemplate,
     PreviewCuts,
+    PreviewBleed,
+    PreviewSafeArea,
     SnapToAnchors,
     SnapToEdges,
     KeyboardShortcuts,
+    SelectTool,
+    PencilTool,
+    BrushTool,
+    EraserTool,
+    ClearPaint,
+    About,
 }
 
 /// The menu (or panel) a command is listed under in the window.
@@ -65,10 +74,19 @@ enum Group {
     Edit,
     Layers,
     View,
+    Tools,
+    Help,
 }
 
 impl Group {
-    const ALL: [Group; 4] = [Group::File, Group::Edit, Group::Layers, Group::View];
+    const ALL: [Group; 6] = [
+        Group::File,
+        Group::Edit,
+        Group::Layers,
+        Group::View,
+        Group::Tools,
+        Group::Help,
+    ];
 
     fn title(self) -> &'static str {
         translate(match self {
@@ -76,6 +94,8 @@ impl Group {
             Group::Edit => tr_noop!("MENU_EDIT"),
             Group::Layers => tr_noop!("LAYERS_SECTION"),
             Group::View => tr_noop!("MENU_VIEW"),
+            Group::Tools => tr_noop!("MENU_TOOLS"),
+            Group::Help => tr_noop!("MENU_HELP"),
         })
     }
 }
@@ -90,7 +110,7 @@ const NONE: Modifiers = Modifiers::NONE;
 
 impl Command {
     /// In the order of the window.
-    pub const ALL: [Command; 27] = [
+    pub const ALL: [Command; 36] = [
         Command::NewProject,
         Command::OpenProject,
         Command::Save,
@@ -109,15 +129,24 @@ impl Command {
         Command::AddImages,
         Command::AddText,
         Command::AddShape,
+        Command::AddCanvas,
         Command::Group,
         Command::Ungroup,
         Command::FitPage,
         Command::RealSize,
         Command::ShowTemplate,
         Command::PreviewCuts,
+        Command::PreviewBleed,
+        Command::PreviewSafeArea,
         Command::SnapToAnchors,
         Command::SnapToEdges,
         Command::KeyboardShortcuts,
+        Command::SelectTool,
+        Command::PencilTool,
+        Command::BrushTool,
+        Command::EraserTool,
+        Command::ClearPaint,
+        Command::About,
     ];
 
     /// Its name in the window.
@@ -141,15 +170,24 @@ impl Command {
             Command::AddImages => tr_noop!("COMMAND_ADD_IMAGES"),
             Command::AddText => tr_noop!("ADD_TEXT_LAYER"),
             Command::AddShape => tr_noop!("COMMAND_ADD_SHAPE"),
+            Command::AddCanvas => tr_noop!("COMMAND_ADD_CANVAS"),
             Command::Group => tr_noop!("COMMAND_GROUP"),
             Command::Ungroup => tr_noop!("UNGROUP_LAYERS"),
             Command::FitPage => tr_noop!("FIT_PAGE_IN_VIEW"),
             Command::RealSize => tr_noop!("ZOOM_REAL_SIZE"),
             Command::ShowTemplate => tr_noop!("SHOW_TEMPLATE_LINES"),
             Command::PreviewCuts => tr_noop!("PREVIEW_CUTS"),
+            Command::PreviewBleed => tr_noop!("PREVIEW_BLEED"),
+            Command::PreviewSafeArea => tr_noop!("PREVIEW_SAFE_AREA"),
             Command::SnapToAnchors => tr_noop!("SNAP_TO_ANCHORS"),
             Command::SnapToEdges => tr_noop!("SNAP_TO_EDGES"),
             Command::KeyboardShortcuts => tr_noop!("MENU_KEYBOARD_SHORTCUTS"),
+            Command::SelectTool => tr_noop!("TOOL_SELECT"),
+            Command::PencilTool => tr_noop!("TOOL_PENCIL"),
+            Command::BrushTool => tr_noop!("TOOL_BRUSH"),
+            Command::EraserTool => tr_noop!("TOOL_ERASER"),
+            Command::ClearPaint => tr_noop!("CLEAR_PAINT"),
+            Command::About => tr_noop!("MENU_ABOUT"),
         })
     }
 
@@ -173,15 +211,24 @@ impl Command {
             Command::AddImages
             | Command::AddText
             | Command::AddShape
+            | Command::AddCanvas
             | Command::Group
             | Command::Ungroup => Group::Layers,
             Command::FitPage
             | Command::RealSize
             | Command::ShowTemplate
             | Command::PreviewCuts
+            | Command::PreviewBleed
+            | Command::PreviewSafeArea
             | Command::SnapToAnchors
             | Command::SnapToEdges
             | Command::KeyboardShortcuts => Group::View,
+            Command::SelectTool
+            | Command::PencilTool
+            | Command::BrushTool
+            | Command::EraserTool
+            | Command::ClearPaint => Group::Tools,
+            Command::About => Group::Help,
         }
     }
 
@@ -200,9 +247,15 @@ impl Command {
             Command::AddImages => vec![sc(CMD, Key::I)],
             Command::AddText => vec![sc(CMD, Key::T)],
             Command::AddShape => vec![sc(CMD, Key::R)],
+            Command::AddCanvas => vec![sc(CMD, Key::K)],
             Command::Group => vec![sc(CMD, Key::G)],
             Command::Ungroup => vec![sc(CMD_SHIFT, Key::G)],
             Command::FitPage => vec![sc(NONE, Key::F)],
+            Command::SelectTool => vec![sc(NONE, Key::V)],
+            Command::PencilTool => vec![sc(NONE, Key::P)],
+            Command::BrushTool => vec![sc(NONE, Key::B)],
+            Command::EraserTool => vec![sc(NONE, Key::E)],
+            Command::ClearPaint => vec![sc(CMD_SHIFT, Key::Delete)],
             _ => fixed(self),
         }
     }
@@ -241,15 +294,24 @@ impl Command {
             Command::AddImages => "add_images",
             Command::AddText => "add_text",
             Command::AddShape => "add_shape",
+            Command::AddCanvas => "add_canvas",
             Command::Group => "group",
             Command::Ungroup => "ungroup",
             Command::FitPage => "fit_page",
             Command::RealSize => "real_size",
             Command::ShowTemplate => "show_template",
             Command::PreviewCuts => "preview_cuts",
+            Command::PreviewBleed => "preview_bleed",
+            Command::PreviewSafeArea => "preview_safe_area",
             Command::SnapToAnchors => "snap_to_anchors",
             Command::SnapToEdges => "snap_to_edges",
             Command::KeyboardShortcuts => "keyboard_shortcuts",
+            Command::SelectTool => "select_tool",
+            Command::PencilTool => "pencil_tool",
+            Command::BrushTool => "brush_tool",
+            Command::EraserTool => "eraser_tool",
+            Command::ClearPaint => "clear_paint",
+            Command::About => "about",
         }
     }
 

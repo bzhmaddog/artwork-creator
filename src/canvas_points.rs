@@ -73,6 +73,8 @@ impl PointEdit {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Drawing {
     pub kind: ShapeKind,
+    /// A canvas to paint in: without fill or stroke, named so.
+    pub canvas: bool,
     /// The layer, once the first point is placed.
     pub layer: Option<u64>,
     /// The point placed by the press being held: dragging pulls out its handles.
@@ -88,6 +90,7 @@ impl Drawing {
     pub fn new(kind: ShapeKind) -> Self {
         Self {
             kind,
+            canvas: false,
             layer: None,
             pulling: None,
             last_press: None,
@@ -384,7 +387,10 @@ pub fn draw_input(
             None => {
                 let id = doc.alloc_id();
                 let at_path = layers_ui::insertion_path(doc, *selected);
-                let l = shape::new_drawn_layer(id, d.kind, at);
+                let mut l = shape::new_drawn_layer(id, d.kind, at);
+                if d.canvas {
+                    shape::make_canvas(&mut l);
+                }
                 doc.insert(&at_path, Node::Layer(Box::new(l)));
                 *selected = Some(id);
                 d.layer = Some(id);

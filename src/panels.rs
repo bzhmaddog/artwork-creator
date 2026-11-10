@@ -35,6 +35,7 @@ pub enum PanelId {
     Controller,
     Page,
     Template,
+    Print,
     Variables,
     ColorsInUse,
     Layers,
@@ -43,10 +44,11 @@ pub enum PanelId {
 
 impl PanelId {
     /// In the order of the default layout and of View > Panels.
-    pub const ALL: [PanelId; 7] = [
+    pub const ALL: [PanelId; 8] = [
         PanelId::Controller,
         PanelId::Page,
         PanelId::Template,
+        PanelId::Print,
         PanelId::Variables,
         PanelId::ColorsInUse,
         PanelId::Layers,
@@ -58,6 +60,7 @@ impl PanelId {
             PanelId::Controller => tr_noop!("CONTROLLER"),
             PanelId::Page => tr_noop!("PAGE_SECTION"),
             PanelId::Template => tr_noop!("TEMPLATE_SECTION"),
+            PanelId::Print => tr_noop!("PRINT_SECTION"),
             PanelId::Variables => tr_noop!("VARIABLES_SECTION"),
             PanelId::ColorsInUse => tr_noop!("COLORS_IN_USE_SECTION"),
             PanelId::Layers => tr_noop!("LAYERS_SECTION"),
@@ -211,7 +214,7 @@ pub struct Layout {
 }
 
 impl Default for Layout {
-    /// Controller, Page, Template, Variables and Colors in use on the left; Layers and
+    /// Controller, Page, Template, Print, Variables and Colors in use on the left; Layers and
     /// Properties on the right.
     fn default() -> Self {
         Self {
@@ -1067,6 +1070,7 @@ mod tests {
                 PanelId::Controller,
                 PanelId::Page,
                 PanelId::Template,
+                PanelId::Print,
                 PanelId::Variables,
                 PanelId::ColorsInUse
             ]
@@ -1115,10 +1119,20 @@ mod tests {
         );
         assert_eq!(
             l.docked(Side::Left),
-            [PanelId::Page, PanelId::Template, PanelId::ColorsInUse]
+            [
+                PanelId::Page,
+                PanelId::Template,
+                PanelId::Print,
+                PanelId::ColorsInUse
+            ]
         );
         // The left side can be emptied, and docked onto again.
-        for id in [PanelId::Page, PanelId::Template, PanelId::ColorsInUse] {
+        for id in [
+            PanelId::Page,
+            PanelId::Template,
+            PanelId::Print,
+            PanelId::ColorsInUse,
+        ] {
             l.move_to(id, Target::Window);
         }
         assert!(l.docked(Side::Left).is_empty());

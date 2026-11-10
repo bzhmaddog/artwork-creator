@@ -73,9 +73,13 @@ pub struct ArtworkApp {
     applied: variables::Applied,
     /// Recently opened or saved projects, for File > Open Recent.
     recent: RecentFiles,
+    /// What to export, chosen in the Export and Print windows and saved with the
+    /// project, and the print settings, set in the Print panel and kept with the app's
+    /// preferences (see `ExportSettings`).
     export_settings: ExportSettings,
-    /// The export settings as last saved or opened with the project: they count as an
-    /// unsaved change when they differ, without being undo steps.
+    /// The export settings as last saved or opened with the project: their choices of
+    /// what to export count as an unsaved change when they differ, without being undo
+    /// steps.
     saved_export: ExportSettings,
     export_open: bool,
     export_job: Option<ExportJob>,
@@ -121,13 +125,69 @@ pub struct ArtworkApp {
     shortcuts: Shortcuts,
     /// The Keyboard shortcuts window, while open.
     shortcuts_editor: Option<crate::shortcuts::Editor>,
-    /// The window was asked to close with unsaved changes: ask what to do.
-    confirm_close: bool,
-    /// Close once the project is saved (Save in the close question, with a file still to
-    /// choose).
-    close_after_save: bool,
+    /// The project is about to be closed or replaced with unsaved changes: ask whether
+    /// to save them first.
+    confirm_leave: Option<Leave>,
+    /// Help > About is open.
+    about: bool,
+    /// What to do once the project is saved (Save in the unsaved changes question, with
+    /// a file still to choose).
+    leave_after_save: Option<Leave>,
     /// Closing is agreed: let the next close request through.
     closing: bool,
+}
+
+/// Labels of the rows of the Page, Template and Print panels: the first column of
+/// their grids is as wide as the widest, so that the fields line up within a panel and
+/// from one to the next.
+const PANEL_LABELS: [&str; 13] = [
+    tr_noop!("PAGE_BACKGROUND"),
+    tr_noop!("TEMPLATE_ROTATION"),
+    tr_noop!("TEMPLATE_FLIP"),
+    tr_noop!("TEMPLATE_OFFSET"),
+    tr_noop!("EXPORT_RESOLUTION"),
+    tr_noop!("EXPORT_MIN_IMAGE_DPI"),
+    tr_noop!("EXPORT_BLANK_INSIDE"),
+    tr_noop!("BLEED"),
+    tr_noop!("EXPORT_MARKS"),
+    tr_noop!("EXPORT_SHEET"),
+    tr_noop!("EXPORT_SHEET_MARGIN"),
+    tr_noop!("EXPORT_TILE_OVERLAP"),
+    tr_noop!("EXPORT_TILE_POSITION"),
+];
+
+/// A two-column grid of labels and fields in the Page, Template or Print panel, its
+/// labels' column as wide as the widest of `PANEL_LABELS`.
+fn panel_grid(ui: &egui::Ui, id: &str) -> egui::Grid {
+    let width = PANEL_LABELS
+        .iter()
+        .map(|k| {
+            egui::WidgetText::from(translate(k))
+                .into_galley(ui, None, f32::INFINITY, egui::TextStyle::Body)
+                .size()
+                .x
+        })
+        .fold(0.0, f32::max);
+    egui::Grid::new(id)
+        .num_columns(2)
+        .spacing([8.0, 4.0])
+        .min_col_width(width.ceil())
+}
+
+/// Where the print settings are kept with the app's preferences.
+const PRINT_SETTINGS_KEY: &str = "print_settings";
+
+/// What ends the project in hand, once its unsaved changes are saved or let go.
+#[derive(Clone, Debug, PartialEq)]
+enum Leave {
+    /// Closing the window.
+    Close,
+    /// File > New.
+    New,
+    /// File > Open: the dialog to choose a project.
+    Open,
+    /// Opening this project, from Open Recent.
+    OpenPath(PathBuf),
 }
 
 /// A save or export held until the user agrees to replace existing files.
@@ -275,6 +335,9 @@ fn padded<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
         .inner
 }
 
+/// A new canvas' width and height, as a fraction of the page's.
+const CANVAS_PAGE_FRACTION: f32 = 0.5;
+
 impl ArtworkApp {
     /// `project` is an optional project file to open, e.g. from the command line.
     pub fn new(cc: &eframe::CreationContext<'_>, project: Option<PathBuf>) -> Self {
@@ -296,7 +359,7 @@ impl ArtworkApp {
             templates,
             templates_dir,
             template: None,
-            canvas: CanvasState::default(),
+            canvas: CanvasState::load(cc.storage),
             layers_panel: LayersPanel::default(),
             selected: None,
             project_path: None,
@@ -305,7 +368,11 @@ impl ArtworkApp {
             clipboard: Clipboard::default(),
             applied: variables::Applied::new(),
             recent: RecentFiles::load(cc.storage),
-            export_settings: ExportSettings::default(),
+            export_settings: cc
+                .storage
+                .and_then(|s| eframe::get_value::<ExportSettings>(s, PRINT_SETTINGS_KEY))
+                .unwrap_or_default()
+                .with_choices_of(&ExportSettings::default()),
             saved_export: ExportSettings::default(),
             export_open: false,
             export_job: None,
@@ -333,8 +400,9 @@ impl ArtworkApp {
             panels: crate::panels::Layout::load(cc.storage),
             shortcuts: Shortcuts::load(cc.storage),
             shortcuts_editor: None,
-            confirm_close: false,
-            close_after_save: false,
+            confirm_leave: None,
+            about: false,
+            leave_after_save: None,
             closing: false,
         };
         log::info!("native file dialogs: {}", app.native_dialogs);
@@ -397,7 +465,7 @@ impl ArtworkApp {
 
     /// The project differs from the saved file: its document or its export settings.
     fn is_modified(&self) -> bool {
-        self.history.is_modified() || self.export_settings != self.saved_export
+        self.history.is_modified() || !self.export_settings.same_choices(&self.saved_export)
     }
 
     // ---- Templates ----
@@ -588,6 +656,41 @@ impl ArtworkApp {
         shape::sync(ctx, &mut self.doc, true);
     }
 
+    /// Adds a closed shape of `kind` to paint in, without fill or stroke, above the
+    /// selection, half the page's size (an ellipse: a circle half its shorter side
+    /// across) and centered like a new text (see `new_layer_center`), with the Select
+    /// tool in hand. A polygon is drawn point by point on the canvas instead, as from
+    /// the Shape menu.
+    fn add_canvas(&mut self, ctx: &egui::Context, kind: ShapeKind) {
+        self.layers_panel.canvas_kind = kind;
+        self.canvas.brushes.tool = None;
+        if kind.has_points() {
+            let mut drawing = view::Drawing::new(kind);
+            drawing.canvas = true;
+            self.canvas.drawing = Some(drawing);
+            self.canvas.points = None;
+            self.layers_panel.edit_points = None;
+            return;
+        }
+        let id = self.doc.alloc_id();
+        let c = self.new_layer_center();
+        let [mut w, mut h] = self.doc.page_mm().map(|v| v * CANVAS_PAGE_FRACTION / 2.0);
+        if kind == ShapeKind::Ellipse {
+            // A circle, as from the Shape menu: its handles stretch it into an ellipse.
+            (w, h) = (w.min(h), w.min(h));
+        }
+        let layer = shape::new_canvas_layer(id, kind, [c[0] - w, c[1] - h], [c[0] + w, c[1] + h]);
+        let at = layers_ui::insertion_path(&mut self.doc, self.selected);
+        self.doc.insert(&at, Node::Layer(Box::new(layer)));
+        self.selected = Some(id);
+        self.canvas.drawing = None;
+        self.canvas.points = None;
+        self.layers_panel.edit_points = None;
+        // Selecting and moving first: it is placed before it is painted in.
+        self.canvas.brushes.tool = None;
+        shape::sync(ctx, &mut self.doc, true);
+    }
+
     /// Adds one layer per image file, fitted to the page, above the selection.
     fn add_images(&mut self, ctx: &egui::Context, paths: Vec<PathBuf>) {
         for path in paths {
@@ -754,7 +857,38 @@ impl ArtworkApp {
         );
     }
 
+    /// Stores the app's own settings that are not the project's: the Print panel's and
+    /// the Page panel's display settings.
+    fn save_settings(&self, storage: &mut dyn eframe::Storage) {
+        // Without the project's choices of what to export, which aren't the app's.
+        let print = self
+            .export_settings
+            .with_choices_of(&ExportSettings::default());
+        eframe::set_value(storage, PRINT_SETTINGS_KEY, &print);
+        self.canvas.save(storage);
+    }
+
     // ---- Project files ----
+
+    /// Closes the window or replaces the project, first asking whether to save it when
+    /// it has unsaved changes.
+    fn leave(&mut self, ctx: &egui::Context, leave: Leave) {
+        if self.dirty {
+            self.confirm_leave = Some(leave);
+        } else {
+            self.leave_now(ctx, leave);
+        }
+    }
+
+    /// Closes the window or replaces the project, unsaved changes or not.
+    fn leave_now(&mut self, ctx: &egui::Context, leave: Leave) {
+        match leave {
+            Leave::Close => self.closing = true,
+            Leave::New => self.new_project(),
+            Leave::Open => self.open_project(ctx),
+            Leave::OpenPath(path) => self.open_project_path(ctx, path),
+        }
+    }
 
     /// Starts an empty project, keeping the current template.
     fn new_project(&mut self) {
@@ -764,7 +898,10 @@ impl ArtworkApp {
         self.project_path = None;
         self.select_template(template, true);
         self.canvas.fit_pending = true;
-        self.export_settings = ExportSettings::default();
+        // The print settings stay: they are the app's.
+        self.export_settings = self
+            .export_settings
+            .with_choices_of(&ExportSettings::default());
         self.saved_export = self.export_settings.clone();
         self.dirty = false;
         self.applied.clear();
@@ -791,8 +928,9 @@ impl ArtworkApp {
         match project::load(&path) {
             Ok((doc, export)) => {
                 self.doc = doc;
-                self.saved_export = export.clone();
-                self.export_settings = export;
+                // Its choices of what to export, with the app's print settings.
+                self.export_settings = self.export_settings.with_choices_of(&export);
+                self.saved_export = self.export_settings.clone();
                 let mut missing = Vec::new();
                 self.doc.for_each_layer_mut(|layer| {
                     if layer.is_drawn() {
@@ -893,9 +1031,6 @@ impl ArtworkApp {
                 self.history.mark_saved(&self.doc);
                 self.saved_export = self.export_settings.clone();
                 self.dirty = false;
-                if std::mem::take(&mut self.close_after_save) {
-                    self.closing = true;
-                }
             }
             Err(e) => self.messages.push(e),
         }
@@ -918,12 +1053,9 @@ impl ArtworkApp {
 
     // ---- Export ----
 
-    /// What the export cuts: the Export window's choices, with the project's bleed.
+    /// What the export cuts, with its bleed: the print settings'.
     fn cuts(&self) -> render::Cuts {
-        render::Cuts {
-            bleed_mm: self.doc.bleed_mm,
-            ..self.export_settings.cuts
-        }
+        self.export_settings.cuts()
     }
 
     /// What gets exported or printed, with text and shapes drawn for `dpi`.
@@ -1062,7 +1194,7 @@ impl ArtworkApp {
         }
         if let Some(path) = open {
             let ctx = ui.ctx().clone();
-            self.open_project_path(&ctx, path);
+            self.leave(&ctx, Leave::OpenPath(path));
         }
     }
 
@@ -1076,10 +1208,10 @@ impl ArtworkApp {
                     ui.add(menu_entry(label, keys.get(&c))).clicked()
                 };
                 if item(ui, tr!("NEW_PROJECT"), Command::NewProject) {
-                    self.new_project();
+                    self.leave(&ctx, Leave::New);
                 }
                 if item(ui, tr!("OPEN_PROJECT"), Command::OpenProject) {
-                    self.open_project(&ctx);
+                    self.leave(&ctx, Leave::Open);
                 }
                 ui.add_enabled_ui(!self.recent.paths().is_empty(), |ui| {
                     ui.menu_button(tr!("MENU_OPEN_RECENT"), |ui| self.recent_menu(ui));
@@ -1181,6 +1313,23 @@ impl ArtworkApp {
                     tr!("PREVIEW_CUTS"),
                     keys.get(&Command::PreviewCuts),
                 );
+                let cuts = self.canvas.preview_cuts;
+                menu_checkbox(
+                    ui,
+                    cuts,
+                    &mut self.canvas.preview_bleed,
+                    tr!("PREVIEW_BLEED"),
+                    keys.get(&Command::PreviewBleed),
+                )
+                .on_hover_text(tr!("PREVIEW_BLEED_HINT"));
+                menu_checkbox(
+                    ui,
+                    true,
+                    &mut self.canvas.preview_safe_area,
+                    tr!("PREVIEW_SAFE_AREA"),
+                    keys.get(&Command::PreviewSafeArea),
+                )
+                .on_hover_text(tr!("PREVIEW_SAFE_AREA_HINT"));
                 let has_anchors = self.has_anchors();
                 menu_checkbox(
                     ui,
@@ -1214,6 +1363,43 @@ impl ArtworkApp {
                 }
             });
             ui.menu_button(tr!("MENU_TOOLS"), |ui| {
+                // The canvas' tools, as on its tool bar.
+                let keys = self.shortcuts.texts(ui.ctx());
+                let ctx = ui.ctx().clone();
+                // Painting needs a closed shape selected.
+                let paint = view::can_paint(&self.doc, self.selected);
+                for (c, tool) in crate::view::TOOLS {
+                    let on =
+                        view::active_tool(&self.doc, self.selected, &self.canvas.brushes) == tool;
+                    let entry = menu_entry(c.label(), keys.get(&c)).selected(on);
+                    if ui.add_enabled(paint || tool.is_none(), entry).clicked() {
+                        self.run_command(&ctx, c);
+                    }
+                }
+                // The brush's kinds, as on the tool bar: picking one takes the brush.
+                ui.add_enabled_ui(paint, |ui| {
+                    ui.menu_button(tr!("MENU_BRUSH_KIND"), |ui| {
+                        for kind in crate::paint::BrushKind::ALL {
+                            let on = self.canvas.brushes.brush == kind;
+                            let entry = egui::Button::new(crate::i18n::translate(kind.name_key()))
+                                .selected(on);
+                            if ui.add(entry).clicked() {
+                                self.canvas.brushes.brush = kind;
+                                self.run_command(&ctx, Command::BrushTool);
+                                ui.close();
+                            }
+                        }
+                    });
+                });
+                let c = Command::ClearPaint;
+                let clear = view::has_paint(&self.doc, self.selected);
+                if ui
+                    .add_enabled(clear, menu_entry(c.label(), keys.get(&c)))
+                    .clicked()
+                {
+                    self.run_command(&ctx, c);
+                }
+                ui.separator();
                 ui.menu_button(tr!("MENU_TEMPLATES"), |ui| {
                     if ui
                         .button(tr!("RESCAN_TEMPLATES"))
@@ -1224,6 +1410,13 @@ impl ArtworkApp {
                         ui.close();
                     }
                 });
+            });
+            ui.menu_button(tr!("MENU_HELP"), |ui| {
+                let keys = self.shortcuts.texts(ui.ctx());
+                let entry = menu_entry(tr!("MENU_ABOUT"), keys.get(&Command::About));
+                if ui.add(entry).clicked() {
+                    self.about = true;
+                }
             });
         });
     }
@@ -1338,13 +1531,48 @@ impl ArtworkApp {
             alpha: false,
         };
         let mut changed = false;
-        ui.horizontal(|ui| {
+        panel_grid(ui, "page-background").show(ui, |ui| {
             ui.label(tr!("PAGE_BACKGROUND"));
-            changed |= crate::gradient_ui::inline(ui, "background", &mut fill);
+            ui.horizontal(|ui| {
+                changed |= crate::gradient_ui::inline(ui, "background", &mut fill);
+            });
+            ui.end_row();
         });
         changed |= crate::gradient_ui::rows(ui, "background", &mut fill);
         doc.background = [color[0], color[1], color[2]];
         self.dirty |= changed;
+        // How the canvas shows what is cut out of the panel: neither the template nor the
+        // export changes with it. The slider sets how much it covers.
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.canvas.preview_cuts, tr!("PREVIEW_CUTS"))
+                .on_hover_text(tr!("PREVIEW_CUTS_HINT"));
+            ui.add_enabled(
+                self.canvas.preview_cuts,
+                egui::Slider::new(&mut self.canvas.cut_opacity, 0.0..=1.0).fixed_decimals(2),
+            )
+            .on_hover_text(tr!("CUT_PREVIEW_OPACITY_HINT"));
+        });
+        ui.add_enabled(
+            self.canvas.preview_cuts,
+            egui::Checkbox::new(&mut self.canvas.preview_bleed, tr!("PREVIEW_BLEED")),
+        )
+        .on_hover_text(tr!("PREVIEW_BLEED_HINT"));
+        // A guide inside the cut lines, never printed, and how far inside: kept with the
+        // app's preferences, like the previews above.
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.canvas.preview_safe_area, tr!("PREVIEW_SAFE_AREA"))
+                .on_hover_text(tr!("PREVIEW_SAFE_AREA_HINT"));
+            ui.add_enabled(
+                self.canvas.preview_safe_area,
+                egui::DragValue::new(&mut self.canvas.safe_margin_mm)
+                    .range(0.0..=crate::print::MAX_MARGIN_MM)
+                    .speed(0.1)
+                    .fixed_decimals(1),
+            )
+            .on_hover_text(tr!("SAFE_MARGIN_HINT"));
+            crate::layers_ui::unit(ui, "mm");
+        });
     }
 
     /// A panel's contents; the Layers panel returns the height it would take.
@@ -1352,6 +1580,7 @@ impl ArtworkApp {
         match id {
             PanelId::Controller => self.controller_panel(ui),
             PanelId::Page => self.page_panel(ui),
+            PanelId::Print => self.print_panel(ui),
             PanelId::Template if self.template.is_some() => self.template_settings(ui),
             PanelId::Template => {
                 crate::callout::callout(ui, crate::callout::Tone::Info, tr!("NO_TEMPLATE_CHOSEN"));
@@ -1395,6 +1624,9 @@ impl ArtworkApp {
         if out.add_text {
             self.add_text(ctx);
         }
+        if let Some(kind) = out.add_canvas {
+            self.add_canvas(ctx, kind);
+        }
         if let Some(kind) = out.add_shape {
             self.add_shape(ctx, kind);
         }
@@ -1428,70 +1660,49 @@ impl ArtworkApp {
         ui.weak(format!("{:.1} x {:.1} mm", size[0], size[1]));
         let before = self.doc.template_placement;
         let p = &mut self.doc.template_placement;
-        ui.horizontal(|ui| {
+        panel_grid(ui, "template-placement").show(ui, |ui| {
             ui.label(tr!("TEMPLATE_ROTATION"));
-            for deg in [0, 90, 180, 270] {
-                if ui
-                    .selectable_label(p.rotation == deg, format!("{deg}°"))
-                    .clicked()
-                {
-                    p.rotation = deg;
+            ui.horizontal(|ui| {
+                for deg in [0, 90, 180, 270] {
+                    if ui
+                        .selectable_label(p.rotation == deg, format!("{deg}°"))
+                        .clicked()
+                    {
+                        p.rotation = deg;
+                    }
                 }
-            }
-        });
-        ui.horizontal(|ui| {
+            });
+            ui.end_row();
             ui.label(tr!("TEMPLATE_FLIP"));
-            ui.checkbox(&mut p.flip_x, tr!("TEMPLATE_FLIP_HORIZONTAL"));
-            ui.checkbox(&mut p.flip_y, tr!("TEMPLATE_FLIP_VERTICAL"));
-        });
-        ui.horizontal(|ui| {
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut p.flip_x, tr!("TEMPLATE_FLIP_HORIZONTAL"));
+                ui.checkbox(&mut p.flip_y, tr!("TEMPLATE_FLIP_VERTICAL"));
+            });
+            ui.end_row();
             ui.label(tr!("TEMPLATE_OFFSET"));
-            ui.add(
-                egui::DragValue::new(&mut p.offset_mm[0])
-                    .speed(0.2)
-                    .fixed_decimals(1)
-                    .prefix("x "),
-            );
-            ui.add(
-                egui::DragValue::new(&mut p.offset_mm[1])
-                    .speed(0.2)
-                    .fixed_decimals(1)
-                    .prefix("y "),
-            );
-            crate::layers_ui::unit(ui, "mm");
-        });
-        if ui.small_button(tr!("CENTER_TEMPLATE_ON_PAGE")).clicked() {
-            p.offset_mm = [0.0, 0.0];
-        }
-
-        ui.add_space(4.0);
-        let margins = (self.doc.bleed_mm, self.doc.safe_margin_mm);
-        egui::Grid::new("print-margins").show(ui, |ui| {
-            fn mm(v: &mut f32) -> egui::DragValue<'_> {
-                egui::DragValue::new(v)
-                    .range(0.0..=crate::print::MAX_MARGIN_MM)
-                    .speed(0.1)
-                    .fixed_decimals(1)
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::DragValue::new(&mut p.offset_mm[0])
+                        .speed(0.2)
+                        .fixed_decimals(1)
+                        .prefix("x "),
+                );
+                ui.add(
+                    egui::DragValue::new(&mut p.offset_mm[1])
+                        .speed(0.2)
+                        .fixed_decimals(1)
+                        .prefix("y "),
+                );
+                crate::layers_ui::unit(ui, "mm");
+            });
+            ui.end_row();
+            // Under the offset it resets.
+            ui.label("");
+            if ui.small_button(tr!("CENTER_TEMPLATE_ON_PAGE")).clicked() {
+                p.offset_mm = [0.0, 0.0];
             }
-            ui.label(tr!("BLEED")).on_hover_text(tr!("BLEED_HINT"));
-            ui.horizontal(|ui| {
-                ui.add(mm(&mut self.doc.bleed_mm))
-                    .on_hover_text(tr!("BLEED_HINT"));
-                crate::layers_ui::unit(ui, "mm");
-            });
-            ui.end_row();
-            ui.label(tr!("SAFE_MARGIN"))
-                .on_hover_text(tr!("SAFE_MARGIN_HINT"));
-            ui.horizontal(|ui| {
-                ui.add(mm(&mut self.doc.safe_margin_mm))
-                    .on_hover_text(tr!("SAFE_MARGIN_HINT"));
-                crate::layers_ui::unit(ui, "mm");
-            });
             ui.end_row();
         });
-        if margins != (self.doc.bleed_mm, self.doc.safe_margin_mm) {
-            self.dirty = true;
-        }
 
         ui.add_space(4.0);
         ui.strong(tr!("TEMPLATE_ELEMENTS"));
@@ -1512,17 +1723,6 @@ impl ArtworkApp {
                 });
             });
         }
-        ui.checkbox(&mut self.canvas.preview_cuts, tr!("PREVIEW_CUTS"))
-            .on_hover_text(tr!("PREVIEW_CUTS_HINT"));
-        ui.add_enabled_ui(self.canvas.preview_cuts, |ui| {
-            ui.horizontal(|ui| {
-                ui.label(tr!("CUT_PREVIEW_OPACITY"));
-                ui.add(
-                    egui::Slider::new(&mut self.canvas.cut_opacity, 0.0..=1.0).fixed_decimals(2),
-                )
-                .on_hover_text(tr!("CUT_PREVIEW_OPACITY_HINT"));
-            });
-        });
 
         ui.add_space(4.0);
         let page = self.doc.page_mm();
@@ -1815,10 +2015,9 @@ impl ArtworkApp {
         ui.add_space(8.0);
     }
 
-    /// The export settings, shared by the Export and Print windows; `printing` leaves
-    /// out what only applies to files.
+    /// What to export, in the Export and Print windows: the formats (`printing` leaves
+    /// them out) and the template lines printed. The rest is in the Print panel.
     fn output_settings(&mut self, ui: &mut egui::Ui, printing: bool) {
-        let page_mm = self.doc.page_mm();
         let s = &mut self.export_settings;
         if !printing {
             ui.horizontal(|ui| {
@@ -1827,21 +2026,25 @@ impl ArtworkApp {
                 ui.checkbox(&mut s.pdf, "PDF");
             });
         }
-        // A printer on Windows takes its own resolution.
-        if !printing || cfg!(not(windows)) {
+        let template = self.template.as_ref();
+        let has = |k: ElementKind| template.is_some_and(|t| t.has(k));
+        if template.is_some() {
             ui.horizontal(|ui| {
-                ui.label(tr!("EXPORT_RESOLUTION"));
-                ui.add(egui::DragValue::new(&mut s.dpi).range(72..=1200));
-                crate::layers_ui::unit(ui, "DPI");
+                ui.label(tr!("EXPORT_PRINT_LINES"));
+                for k in ElementKind::ALL.into_iter().filter(|&k| has(k)) {
+                    ui.checkbox(&mut s.print_lines[k.index()], translate(k.label()));
+                }
             });
         }
-        ui.horizontal(|ui| {
-            ui.label(tr!("EXPORT_MIN_IMAGE_DPI"))
-                .on_hover_text(tr!("EXPORT_MIN_IMAGE_DPI_HINT"));
-            ui.add(egui::DragValue::new(&mut s.min_image_dpi).range(0..=1200))
-                .on_hover_text(tr!("EXPORT_MIN_IMAGE_DPI_HINT"));
-            crate::layers_ui::unit(ui, "DPI");
-        });
+        self.print_warnings(ui);
+        ui.weak(tr!("PRINT_SETTINGS_ELSEWHERE"));
+    }
+
+    /// What the print settings may leave wrong: images printed at too low a
+    /// resolution, marks falling off the page or the sheets.
+    fn print_warnings(&self, ui: &mut egui::Ui) {
+        let s = &self.export_settings;
+        let page_mm = self.doc.page_mm();
         let low = self.doc.low_resolution(s.min_image_dpi as f32);
         if !low.is_empty() {
             let names: Vec<String> = low
@@ -1855,108 +2058,122 @@ impl ArtworkApp {
             )
             .on_hover_text(names.join("\n"));
         }
-        ui.checkbox(&mut s.mirror, tr!("EXPORT_MIRROR"))
-            .on_hover_text(tr!("EXPORT_MIRROR_HINT"));
+        let Some(template) = self.template.as_ref() else {
+            return;
+        };
+        if !template.has(ElementKind::Outline) || !(s.crop_marks || s.registration_marks) {
+            return;
+        }
+        let elements = render::placed_elements(&self.doc, template);
+        let marks = render::trim_box(elements.iter()).map(|trim| {
+            let mut marks =
+                crate::print::marks(trim, s.bleed_mm, s.crop_marks, s.registration_marks);
+            // Where they print: the sheets lie over the mirrored page.
+            if s.mirror {
+                for p in marks.iter_mut().flat_map(|m| &mut m.points) {
+                    p[0] = page_mm[0] - p[0];
+                }
+            }
+            marks
+        });
+        // What gets printed: the page, or when split, the sheets' artwork, which may
+        // reach past the page.
+        let (lo, hi) = match s.tiling() {
+            Some(t) => t.covered(page_mm),
+            None => ([0.0, 0.0], page_mm),
+        };
+        let off = marks
+            .as_ref()
+            .and_then(crate::print::bounds)
+            .is_some_and(|(mn, mx)| {
+                mn[0] < lo[0] || mn[1] < lo[1] || mx[0] > hi[0] || mx[1] > hi[1]
+            });
+        if off {
+            crate::callout::callout(
+                ui,
+                crate::callout::Tone::Warning,
+                if s.tile {
+                    tr!("EXPORT_MARKS_OFF_SHEETS")
+                } else {
+                    tr!("EXPORT_MARKS_OFF_PAGE")
+                },
+            );
+        }
+    }
+
+    /// The Print panel: how every project is exported and printed (resolution, bleed,
+    /// blank areas, marks, mirroring, sheets), kept with the app's preferences.
+    fn print_panel(&mut self, ui: &mut egui::Ui) {
         let template = self.template.as_ref();
         let has = |k: ElementKind| template.is_some_and(|t| t.has(k));
-        if let Some(template) = template {
-            ui.add_space(4.0);
-            ui.strong(tr!("EXPORT_TEMPLATE_SECTION"));
+        let s = &mut self.export_settings;
+        panel_grid(ui, "print-resolution").show(ui, |ui| {
+            ui.label(tr!("EXPORT_RESOLUTION"))
+                .on_hover_text(tr!("EXPORT_RESOLUTION_HINT"));
             ui.horizontal(|ui| {
-                ui.label(tr!("EXPORT_PRINT_LINES"));
-                for k in ElementKind::ALL.into_iter().filter(|&k| has(k)) {
-                    ui.checkbox(&mut s.print_lines[k.index()], translate(k.label()));
-                }
+                ui.add(egui::DragValue::new(&mut s.dpi).range(72..=1200))
+                    .on_hover_text(tr!("EXPORT_RESOLUTION_HINT"));
+                crate::layers_ui::unit(ui, "DPI");
             });
-            ui.add_enabled(
-                has(ElementKind::Outline),
-                egui::Checkbox::new(
-                    &mut s.cuts.clip_to_outline,
-                    tr!("EXPORT_BLANK_OUTSIDE_OUTLINE"),
-                ),
-            );
-            if has(ElementKind::Buttons) || has(ElementKind::Cutouts) {
-                ui.horizontal(|ui| {
-                    ui.label(tr!("EXPORT_BLANK_INSIDE"));
-                    if has(ElementKind::Buttons) {
-                        ui.checkbox(
-                            &mut s.cuts.blank_buttons,
-                            tr!("EXPORT_BLANK_INSIDE_BUTTONS"),
-                        );
-                    }
-                    if has(ElementKind::Cutouts) {
-                        ui.checkbox(
-                            &mut s.cuts.blank_cutouts,
-                            tr!("EXPORT_BLANK_INSIDE_CUTOUTS"),
-                        );
-                    }
-                });
-            }
-            if self.doc.bleed_mm > 0.0 {
-                ui.weak(tr!(
-                    "EXPORT_BLEED",
-                    mm = format!("{:.1}", self.doc.bleed_mm)
-                ));
-            }
-            let outline = has(ElementKind::Outline);
-            ui.add_enabled_ui(outline, |ui| {
-                ui.horizontal(|ui| {
-                    ui.label(tr!("EXPORT_MARKS"));
-                    ui.checkbox(&mut s.crop_marks, tr!("EXPORT_CROP_MARKS"))
-                        .on_hover_text(tr!("EXPORT_CROP_MARKS_HINT"));
-                    ui.checkbox(&mut s.registration_marks, tr!("EXPORT_REGISTRATION_MARKS"))
-                        .on_hover_text(tr!("EXPORT_REGISTRATION_MARKS_HINT"));
-                });
+            ui.end_row();
+            ui.label(tr!("EXPORT_MIN_IMAGE_DPI"))
+                .on_hover_text(tr!("EXPORT_MIN_IMAGE_DPI_HINT"));
+            ui.horizontal(|ui| {
+                ui.add(egui::DragValue::new(&mut s.min_image_dpi).range(0..=1200))
+                    .on_hover_text(tr!("EXPORT_MIN_IMAGE_DPI_HINT"));
+                crate::layers_ui::unit(ui, "DPI");
             });
-            if outline && (s.crop_marks || s.registration_marks) {
-                let elements = render::placed_elements(&self.doc, template);
-                let marks = render::trim_box(elements.iter()).map(|trim| {
-                    let mut marks = crate::print::marks(
-                        trim,
-                        self.doc.bleed_mm,
-                        s.crop_marks,
-                        s.registration_marks,
-                    );
-                    // Where they print: the sheets lie over the
-                    // mirrored page.
-                    if s.mirror {
-                        for p in marks.iter_mut().flat_map(|m| &mut m.points) {
-                            p[0] = page_mm[0] - p[0];
-                        }
-                    }
-                    marks
-                });
-                // What gets printed: the page, or when split, the
-                // sheets' artwork, which may reach past the page.
-                let (lo, hi) = match s.tiling() {
-                    Some(t) => t.covered(page_mm),
-                    None => ([0.0, 0.0], page_mm),
-                };
-                let off = marks
-                    .as_ref()
-                    .and_then(crate::print::bounds)
-                    .is_some_and(|(mn, mx)| {
-                        mn[0] < lo[0] || mn[1] < lo[1] || mx[0] > hi[0] || mx[1] > hi[1]
-                    });
-                if off {
-                    crate::callout::callout(
-                        ui,
-                        crate::callout::Tone::Warning,
-                        if s.tile {
-                            tr!("EXPORT_MARKS_OFF_SHEETS")
-                        } else {
-                            tr!("EXPORT_MARKS_OFF_PAGE")
-                        },
-                    );
-                }
-            }
-            ui.add_space(4.0);
-        }
+            ui.end_row();
+        });
+        ui.checkbox(&mut s.mirror, tr!("EXPORT_MIRROR"))
+            .on_hover_text(tr!("EXPORT_MIRROR_HINT"));
+        ui.add_space(4.0);
+        ui.add_enabled(
+            has(ElementKind::Outline) || template.is_none(),
+            egui::Checkbox::new(
+                &mut s.cuts.clip_to_outline,
+                tr!("EXPORT_BLANK_OUTSIDE_OUTLINE"),
+            ),
+        );
+        panel_grid(ui, "print-cuts").show(ui, |ui| {
+            ui.label(tr!("EXPORT_BLANK_INSIDE"));
+            ui.horizontal(|ui| {
+                ui.checkbox(
+                    &mut s.cuts.blank_buttons,
+                    tr!("EXPORT_BLANK_INSIDE_BUTTONS"),
+                );
+                ui.checkbox(
+                    &mut s.cuts.blank_cutouts,
+                    tr!("EXPORT_BLANK_INSIDE_CUTOUTS"),
+                );
+            });
+            ui.end_row();
+            ui.label(tr!("BLEED")).on_hover_text(tr!("BLEED_HINT"));
+            ui.horizontal(|ui| {
+                ui.add(
+                    egui::DragValue::new(&mut s.bleed_mm)
+                        .range(0.0..=crate::print::MAX_MARGIN_MM)
+                        .speed(0.1)
+                        .fixed_decimals(1),
+                )
+                .on_hover_text(tr!("BLEED_HINT"));
+                crate::layers_ui::unit(ui, "mm");
+            });
+            ui.end_row();
+            ui.label(tr!("EXPORT_MARKS"));
+            ui.horizontal(|ui| {
+                ui.checkbox(&mut s.crop_marks, tr!("EXPORT_CROP_MARKS"))
+                    .on_hover_text(tr!("EXPORT_CROP_MARKS_HINT"));
+                ui.checkbox(&mut s.registration_marks, tr!("EXPORT_REGISTRATION_MARKS"))
+                    .on_hover_text(tr!("EXPORT_REGISTRATION_MARKS_HINT"));
+            });
+            ui.end_row();
+        });
         ui.add_space(4.0);
         ui.checkbox(&mut s.tile, tr!("EXPORT_TILE"))
             .on_hover_text(tr!("EXPORT_TILE_HINT"));
         if s.tile {
-            egui::Grid::new("tiling").show(ui, |ui| {
+            panel_grid(ui, "tiling").show(ui, |ui| {
                 ui.label(tr!("EXPORT_SHEET"));
                 ui.horizontal(|ui| {
                     egui::ComboBox::from_id_salt("sheet")
@@ -2031,6 +2248,7 @@ impl ArtworkApp {
             ui.checkbox(&mut s.tile_marks, tr!("EXPORT_TILE_MARKS"))
                 .on_hover_text(tr!("EXPORT_TILE_MARKS_HINT"));
         }
+        self.print_warnings(ui);
     }
 
     /// Export options; the Export button opens the save dialog.
@@ -2252,6 +2470,25 @@ impl ArtworkApp {
         }
     }
 
+    /// Help > About: the name, version and build date.
+    fn about_modal(&mut self, ctx: &egui::Context) {
+        if !self.about {
+            return;
+        }
+        let response = dialog(ctx, "about").show(ctx, |ui| {
+            ui.set_min_width(260.0);
+            ui.heading("Artwork Creator");
+            ui.add_space(4.0);
+            ui.label(tr!("ABOUT_VERSION", version = env!("CARGO_PKG_VERSION")));
+            ui.label(tr!("ABOUT_BUILD_DATE", date = env!("BUILD_DATE")));
+            ui.add_space(8.0);
+            dialog_button_row(ui, |ui| ui.button(tr!("OK")).clicked())
+        });
+        if response.inner || response.should_close() {
+            self.about = false;
+        }
+    }
+
     /// Shows queued messages (errors, a canceled export) one at a time.
     fn message_modal(&mut self, ctx: &egui::Context) {
         let Some(msg) = self.messages.first().cloned() else {
@@ -2395,8 +2632,8 @@ impl ArtworkApp {
     /// Does what a shortcut's command does.
     fn run_command(&mut self, ctx: &egui::Context, command: Command) {
         match command {
-            Command::NewProject => self.new_project(),
-            Command::OpenProject => self.open_project(ctx),
+            Command::NewProject => self.leave(ctx, Leave::New),
+            Command::OpenProject => self.leave(ctx, Leave::Open),
             Command::Save => self.save_project(ctx, false),
             Command::SaveAs => self.save_project(ctx, true),
             Command::Export => self.open_export(),
@@ -2420,6 +2657,7 @@ impl ArtworkApp {
             Command::AddImages => self.pick_images(ctx),
             Command::AddText => self.add_text(ctx),
             Command::AddShape => self.add_shape(ctx, self.layers_panel.shape_kind),
+            Command::AddCanvas => self.add_canvas(ctx, self.layers_panel.canvas_kind),
             Command::Group => self.dirty |= layers_ui::group(&mut self.doc, &mut self.selected),
             Command::Ungroup => {
                 self.dirty |= layers_ui::ungroup(&mut self.doc, &mut self.selected);
@@ -2428,6 +2666,8 @@ impl ArtworkApp {
             Command::RealSize => self.canvas.set_zoom(REAL_SIZE_ZOOM),
             Command::ShowTemplate => self.canvas.show_template ^= true,
             Command::PreviewCuts => self.canvas.preview_cuts ^= true,
+            Command::PreviewBleed => self.canvas.preview_bleed ^= true,
+            Command::PreviewSafeArea => self.canvas.preview_safe_area ^= true,
             Command::SnapToAnchors => {
                 if self.has_anchors() {
                     self.canvas.snap_to_anchors ^= true;
@@ -2435,6 +2675,18 @@ impl ArtworkApp {
             }
             Command::SnapToEdges => self.canvas.snap_to_edges ^= true,
             Command::KeyboardShortcuts => self.open_shortcuts(),
+            Command::About => self.about = true,
+            Command::SelectTool => self.canvas.brushes.tool = None,
+            Command::ClearPaint => self.dirty |= view::clear_paint(&mut self.doc, self.selected),
+            // Only while a closed shape is selected, to paint in.
+            Command::PencilTool | Command::BrushTool | Command::EraserTool => {
+                if view::can_paint(&self.doc, self.selected) {
+                    self.canvas.brushes.tool = view::TOOLS
+                        .iter()
+                        .find(|(c, _)| *c == command)
+                        .and_then(|(_, t)| *t);
+                }
+            }
             // Handled as clipboard events and arrow keys.
             Command::Cut | Command::Copy | Command::Paste | Command::Nudge => {}
         }
@@ -2464,20 +2716,24 @@ impl ArtworkApp {
     fn guard_close(&mut self, ctx: &egui::Context) {
         if ctx.input(|i| i.viewport().close_requested()) && self.dirty && !self.closing {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
-            self.confirm_close = true;
+            self.confirm_leave = Some(Leave::Close);
         }
     }
 
-    /// The question asked before closing with unsaved changes: save, don't save or cancel.
+    /// The question asked before closing or replacing the project with unsaved changes:
+    /// save, don't save or cancel.
     fn close_modal(&mut self, ctx: &egui::Context) {
-        if self.confirm_close {
+        if let Some(leave) = self.confirm_leave.clone() {
+            let closing = leave == Leave::Close;
             let (mut save, mut discard, mut cancel) = (false, false, false);
-            let response = dialog(ctx, "confirm_close").show(ctx, |ui| {
+            let response = dialog(ctx, "confirm_leave").show(ctx, |ui| {
                 ui.set_max_width(420.0);
-                ui.strong(tr!(
-                    "CONFIRM_SAVE_BEFORE_CLOSING",
-                    name = self.project_name()
-                ));
+                let name = self.project_name();
+                ui.strong(if closing {
+                    tr!("CONFIRM_SAVE_BEFORE_CLOSING", name = name)
+                } else {
+                    tr!("CONFIRM_SAVE_BEFORE_REPLACING", name = name)
+                });
                 ui.add_space(4.0);
                 crate::callout::callout(
                     ui,
@@ -2485,31 +2741,41 @@ impl ArtworkApp {
                     tr!("UNSAVED_CHANGES_WARNING"),
                 );
                 ui.add_space(8.0);
-                // Both buttons that close the app say so. Save and close at the right edge,
-                // Cancel (back to the project) on its left, Close without saving (the one
-                // that loses work) apart at the left.
+                // Save (and close) at the right edge, Cancel (back to the project) on its
+                // left, the one that loses work apart at the left. Closing, both buttons
+                // that close the app say so.
+                let (save_label, discard_label) = if closing {
+                    (tr!("SAVE_AND_CLOSE"), tr!("CLOSE_WITHOUT_SAVING"))
+                } else {
+                    (tr!("SAVE"), tr!("DONT_SAVE"))
+                };
                 dialog_button_row(ui, |ui| {
-                    save |= ui.button(tr!("SAVE_AND_CLOSE")).clicked();
+                    save |= ui.button(save_label).clicked();
                     cancel |= ui.button(tr!("CANCEL")).clicked();
                     at_left_edge(ui, |ui| {
-                        discard |= ui.button(tr!("CLOSE_WITHOUT_SAVING")).clicked();
+                        discard |= ui.button(discard_label).clicked();
                     });
                 });
             });
             cancel |= response.should_close();
             if save || discard || cancel {
-                self.confirm_close = false;
+                self.confirm_leave = None;
             }
             if discard {
-                self.closing = true;
+                self.leave_now(ctx, leave);
             } else if save {
-                self.close_after_save = true;
+                self.leave_after_save = Some(leave);
                 self.save_project(ctx, false);
             }
         }
-        // The save was given up: no file chosen, or the overwrite question canceled.
-        if self.close_after_save && !self.browser.is_open() && self.overwrite.is_none() {
-            self.close_after_save = false;
+        // Once the save is done: saved, go on; given up (no file chosen, the overwrite
+        // question canceled) or failed, stay.
+        let waiting = self.browser.is_open() || self.overwrite.is_some();
+        if !waiting
+            && let Some(leave) = self.leave_after_save.take()
+            && !self.dirty
+        {
+            self.leave_now(ctx, leave);
         }
         if self.closing {
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
@@ -2553,6 +2819,7 @@ impl eframe::App for ArtworkApp {
         self.language.save(storage);
         self.panels.save(storage);
         self.shortcuts.save(storage);
+        self.save_settings(storage);
     }
 
     /// One frame: input, panels, canvas and dialogs, then an undo step if the project
@@ -2562,9 +2829,16 @@ impl eframe::App for ArtworkApp {
         if std::mem::take(&mut self.print_pending) {
             self.choose_printer(frame);
         }
-        #[cfg(not(windows))]
-        let _ = frame;
         let ctx = ui.ctx().clone();
+        // The Page and Print panels' settings are saved as soon as they change, once
+        // the button is let go (not at each step of a slider's drag): written only
+        // when one differs from what is stored.
+        if !ctx.input(|i| i.pointer.any_down())
+            && let Some(storage) = frame.storage_mut()
+        {
+            self.save_settings(storage);
+            storage.flush();
+        }
 
         let dropped: Vec<PathBuf> = ctx.input(|i| {
             i.raw
@@ -2582,6 +2856,7 @@ impl eframe::App for ArtworkApp {
         variables::publish(&ctx, &self.doc);
         self.shortcuts(&ctx);
         self.layers_panel.keys = self.shortcuts.texts(&ctx);
+        self.canvas.keys = self.layers_panel.keys.clone();
         self.poll_export(&ctx);
         self.watch_template(&ctx);
         // Undo, redo or a reload may have changed effects or images.
@@ -2608,8 +2883,14 @@ impl eframe::App for ArtworkApp {
         let elements = self.elements();
         self.canvas.distort_mode = self.layers_panel.distort;
         self.layers_panel.min_dpi = self.export_settings.min_image_dpi as f32;
-        self.canvas.cuts = self.cuts();
-        self.canvas.safe_margin_mm = self.doc.safe_margin_mm;
+        // The panel is cut along the outline and through every hole, whatever the export
+        // prints there.
+        self.canvas.cuts = render::Cuts {
+            clip_to_outline: true,
+            blank_buttons: true,
+            blank_cutouts: true,
+            ..self.cuts()
+        };
         // Edit points is turned on and off in Properties as well as on the canvas.
         let panel_points = self.layers_panel.edit_points;
         if panel_points != self.canvas.points.as_ref().map(|e| e.layer) {
@@ -2645,6 +2926,7 @@ impl eframe::App for ArtworkApp {
         }
         self.overwrite_modal(&ctx);
         self.message_modal(&ctx);
+        self.about_modal(&ctx);
         self.close_modal(&ctx);
         self.shortcuts_window(&ctx);
 

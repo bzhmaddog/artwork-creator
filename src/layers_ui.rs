@@ -37,6 +37,9 @@ pub struct LayersPanel {
     pub font_filter: String,
     /// Kind of shape added last, added again by the shortcut.
     pub shape_kind: ShapeKind,
+    /// Kind of canvas (a closed shape to paint in) added last, added again by the
+    /// shortcut.
+    pub canvas_kind: ShapeKind,
     /// The shape layer whose points are being edited on the canvas.
     pub edit_points: Option<u64>,
     /// Image layers printed below this resolution (DPI) are flagged; set by the app from
@@ -108,6 +111,8 @@ pub struct LayersOutput {
     pub add_text: bool,
     /// A kind was picked from the Shape button's menu: add a shape layer.
     pub add_shape: Option<ShapeKind>,
+    /// A kind was picked from the Canvas button's menu: add a closed shape to paint in.
+    pub add_canvas: Option<ShapeKind>,
     /// Cut, Copy or Paste was picked in a row's menu, that row now selected.
     pub edit: Option<Edit>,
     /// The height the layer list and its toolbar would take without a limit.
@@ -696,6 +701,7 @@ pub enum Tool {
     AddImage,
     AddText,
     AddShape,
+    AddCanvas,
     Group,
     Ungroup,
     Duplicate,
@@ -706,6 +712,17 @@ pub enum Tool {
     Bottom,
     /// Back to the defaults: a circular arrow, turning left.
     Reset,
+    /// Selecting and moving layers: an arrow pointer.
+    Select,
+    /// Painting even lines: a pencil.
+    Pencil,
+    /// The brush of a kind: a round brush, a calligraphy nib, a marker, a spray can, a
+    /// flat bristle brush.
+    Brush(crate::paint::BrushKind),
+    /// Cutting painted strokes: an eraser.
+    Eraser,
+    /// Emptying a shape of its paint: a frame with a stroke in it, crossed out.
+    ClearPaint,
     Align(Align),
 }
 
@@ -744,6 +761,71 @@ pub fn tool_icon(ui: &mut Ui, tool: Tool, enabled: bool, tip: &str) -> Response 
             .color
             .gamma_multiply(0.4)
     };
+    draw_tool(p, rect, tool, c, ui.visuals().panel_fill);
+    r
+}
+
+/// A menu entry with `tool`'s icon before `label`; `selected` stands out. Returns its
+/// response, clicked when picked.
+/// It is as wide as the widest of `labels`, the entries of its menu, so they line up.
+pub fn icon_entry(
+    ui: &mut Ui,
+    tool: Tool,
+    label: &str,
+    labels: &[&str],
+    selected: bool,
+) -> Response {
+    let font = egui::TextStyle::Button.resolve(ui.style());
+    let layout = |t: &str| {
+        ui.painter()
+            .layout_no_wrap(t.to_owned(), font.clone(), Color32::PLACEHOLDER)
+    };
+    let text = layout(label);
+    let widest = labels
+        .iter()
+        .map(|l| layout(l).size().x)
+        .fold(text.size().x, f32::max);
+    let width = TOOL + 6.0 + widest + 10.0;
+    let (rect, r) = ui.allocate_exact_size(vec2(width, TOOL), Sense::click());
+    if !ui.is_rect_visible(rect) {
+        return r;
+    }
+    let visuals = ui.visuals();
+    let p = ui.painter();
+    let fg = if selected {
+        p.rect_filled(rect, 3.0, visuals.selection.bg_fill);
+        visuals.selection.stroke.color
+    } else {
+        if r.hovered() {
+            p.rect_filled(rect, 3.0, visuals.widgets.hovered.weak_bg_fill);
+        }
+        visuals.text_color()
+    };
+    let back = if selected {
+        visuals.selection.bg_fill
+    } else {
+        visuals.panel_fill
+    };
+    draw_tool(
+        p,
+        Rect::from_min_size(rect.min, vec2(TOOL, TOOL)),
+        tool,
+        fg,
+        back,
+    );
+    p.galley(
+        egui::pos2(
+            rect.min.x + TOOL + 6.0,
+            rect.center().y - text.size().y / 2.0,
+        ),
+        text,
+        fg,
+    );
+    r
+}
+
+/// Draws `tool`'s icon in `rect`, in color `c`; parts cut out of it show `back`.
+pub fn draw_tool(p: &egui::Painter, rect: Rect, tool: Tool, c: Color32, back: Color32) {
     let s = Stroke::new(1.4, c);
     let k = rect.center();
     let at = |x: f32, y: f32| k + vec2(x, y);
@@ -802,8 +884,26 @@ pub fn tool_icon(ui: &mut Ui, tool: Tool, enabled: bool, tip: &str) -> Response 
                 s,
                 StrokeKind::Inside,
             );
-            p.circle_filled(at(2.5, 2.5), 5.5, ui.visuals().panel_fill);
+            p.circle_filled(at(2.5, 2.5), 5.5, back);
             p.circle_stroke(at(2.5, 2.5), 5.0, s);
+        }
+        Tool::AddCanvas => {
+            // A frame with a painted wave across it.
+            p.rect_stroke(
+                Rect::from_center_size(k, vec2(16.0, 13.0)),
+                1.0,
+                s,
+                StrokeKind::Inside,
+            );
+            p.add(Shape::line(
+                (0..=12)
+                    .map(|i| {
+                        let x = -5.0 + i as f32 * 10.0 / 12.0;
+                        at(x, -1.5 * (x * 0.6).sin() + 0.5)
+                    })
+                    .collect(),
+                Stroke::new(2.0, c),
+            ));
         }
         Tool::Group => {
             folder(-2.0);
@@ -815,7 +915,7 @@ pub fn tool_icon(ui: &mut Ui, tool: Tool, enabled: bool, tip: &str) -> Response 
             p.rect_filled(
                 Rect::from_center_size(at(7.0, 4.5), vec2(8.0, 4.0)),
                 0.0,
-                ui.visuals().panel_fill,
+                back,
             );
             p.line_segment([at(4.0, 4.5), at(10.0, 4.5)], s);
         }
@@ -827,7 +927,7 @@ pub fn tool_icon(ui: &mut Ui, tool: Tool, enabled: bool, tip: &str) -> Response 
                 StrokeKind::Inside,
             );
             let front = Rect::from_center_size(at(2.5, 2.5), vec2(10.0, 10.0));
-            p.rect_filled(front, 1.5, ui.visuals().panel_fill);
+            p.rect_filled(front, 1.5, back);
             p.rect_stroke(front, 1.5, s, StrokeKind::Inside);
         }
         Tool::Delete => {
@@ -865,6 +965,164 @@ pub fn tool_icon(ui: &mut Ui, tool: Tool, enabled: bool, tip: &str) -> Response 
                 vec![tip, back + side * 3.0, back - side * 3.0],
                 c,
                 Stroke::NONE,
+            ));
+        }
+        Tool::Select => {
+            p.add(Shape::convex_polygon(
+                vec![at(-4.5, -7.0), at(5.0, 2.5), at(0.5, 2.5), at(-4.5, 7.0)],
+                c,
+                Stroke::NONE,
+            ));
+            p.line_segment([at(0.5, 2.0), at(3.0, 7.0)], Stroke::new(2.0, c));
+        }
+        Tool::Pencil => {
+            // Along the diagonal: the body, then the sharpened tip at the bottom left.
+            let d = vec2(1.0, -1.0).normalized();
+            let n = d.rot90();
+            let tip = at(-7.0, 7.0);
+            let wood = tip + d * 4.0;
+            let end = tip + d * 18.0;
+            p.add(Shape::closed_line(
+                vec![wood + n * 2.5, end + n * 2.5, end - n * 2.5, wood - n * 2.5],
+                s,
+            ));
+            p.add(Shape::convex_polygon(
+                vec![tip, wood + n * 2.5, wood - n * 2.5],
+                c,
+                Stroke::NONE,
+            ));
+            p.line_segment([end - d * 3.0 + n * 2.5, end - d * 3.0 - n * 2.5], s);
+        }
+        Tool::Brush(crate::paint::BrushKind::Calligraphy) => {
+            // A pen nib pointing to the bottom left, its slit and breather hole, then the
+            // holder.
+            let d = vec2(1.0, -1.0).normalized();
+            let n = d.rot90();
+            let tip = at(-7.5, 7.5);
+            let shoulder = tip + d * 8.0;
+            let back_end = tip + d * 11.5;
+            p.add(Shape::convex_polygon(
+                vec![tip, shoulder + n * 3.8, back_end, shoulder - n * 3.8],
+                c,
+                Stroke::NONE,
+            ));
+            p.line_segment([tip, tip + d * 5.5], Stroke::new(1.0, back));
+            p.circle_filled(tip + d * 6.3, 1.1, back);
+            p.line_segment([back_end - d * 0.5, at(7.5, -7.5)], Stroke::new(2.6, c));
+        }
+        Tool::Brush(crate::paint::BrushKind::Marker) => {
+            // A marker on the diagonal, its chisel tip filled at the bottom left.
+            let d = vec2(1.0, -1.0).normalized();
+            let n = d.rot90();
+            let tip = at(-7.0, 7.0);
+            let neck = tip + d * 4.5;
+            let end = tip + d * 19.0;
+            p.add(Shape::convex_polygon(
+                vec![
+                    tip + n * 2.0,
+                    neck + n * 2.0,
+                    neck - n * 2.0,
+                    tip - n * 0.5 + d * 2.0,
+                ],
+                c,
+                Stroke::NONE,
+            ));
+            p.add(Shape::closed_line(
+                vec![neck + n * 3.2, end + n * 3.2, end - n * 3.2, neck - n * 3.2],
+                s,
+            ));
+            p.line_segment([neck + d * 6.0 + n * 3.2, neck + d * 6.0 - n * 3.2], s);
+        }
+        Tool::Brush(crate::paint::BrushKind::Spray) => {
+            // A spray can, its nozzle at the top, dots spraying to the top right.
+            p.rect_stroke(
+                Rect::from_min_max(at(-7.0, -1.5), at(1.0, 8.0)),
+                1.5,
+                s,
+                StrokeKind::Inside,
+            );
+            p.rect_filled(Rect::from_min_max(at(-5.0, -4.5), at(-1.0, -1.5)), 0.5, c);
+            for (x, y) in [
+                (2.5, -6.0),
+                (5.0, -7.5),
+                (7.5, -5.5),
+                (4.5, -3.5),
+                (7.0, -2.0),
+                (3.5, -9.0),
+                (8.0, -9.0),
+            ] {
+                p.circle_filled(at(x, y), 0.95, c);
+            }
+        }
+        Tool::Brush(crate::paint::BrushKind::Bristle) => {
+            // A handle and a flat ferrule, then bristles spreading apart at the bottom
+            // left.
+            let d = vec2(1.0, -1.0).normalized();
+            let n = d.rot90();
+            let base = at(-2.0, 2.0);
+            p.line_segment([base + d * 4.0, at(7.5, -7.5)], Stroke::new(2.2, c));
+            p.add(Shape::convex_polygon(
+                vec![
+                    base + n * 3.2,
+                    base + d * 4.0 + n * 2.2,
+                    base + d * 4.0 - n * 2.2,
+                    base - n * 3.2,
+                ],
+                c,
+                Stroke::NONE,
+            ));
+            for k in [-2.6f32, -0.9, 0.9, 2.6] {
+                let from = base + n * k;
+                let to = base - d * 7.5 + n * (k * 1.45);
+                p.line_segment([from, to], Stroke::new(1.1, c));
+            }
+        }
+        Tool::Brush(crate::paint::BrushKind::Round) => {
+            // A handle, then the bristles at the bottom left in a soft drop.
+            let d = vec2(1.0, -1.0).normalized();
+            let n = d.rot90();
+            let base = at(-3.0, 3.0);
+            p.line_segment([base + d * 2.0, at(7.5, -7.5)], Stroke::new(2.2, c));
+            p.add(Shape::convex_polygon(
+                vec![
+                    base + n * 2.6,
+                    base + d * 2.0 + n * 2.0,
+                    base + d * 2.0 - n * 2.0,
+                    base - n * 2.6,
+                    at(-7.5, 7.5),
+                ],
+                c,
+                Stroke::NONE,
+            ));
+        }
+        Tool::ClearPaint => {
+            // A frame with a painted wave in it, a cross over its bottom right corner.
+            let frame = Rect::from_min_max(at(-7.5, -6.5), at(5.0, 4.5));
+            p.rect_stroke(frame, 1.5, s, StrokeKind::Inside);
+            p.add(Shape::line(
+                vec![at(-5.0, 1.0), at(-3.0, -2.5), at(-0.5, 0.5), at(2.0, -3.0)],
+                Stroke::new(1.8, c),
+            ));
+            p.circle_filled(at(4.5, 4.5), 4.6, back);
+            let x = Stroke::new(1.6, c);
+            p.line_segment([at(2.0, 2.0), at(7.0, 7.0)], x);
+            p.line_segment([at(7.0, 2.0), at(2.0, 7.0)], x);
+        }
+        Tool::Eraser => {
+            // A block on the diagonal, its lower part filled.
+            let d = vec2(1.0, -1.0).normalized();
+            let n = d.rot90();
+            let a = at(-6.0, 6.0);
+            let m = a + d * 7.0;
+            let b = a + d * 15.0;
+            p.add(Shape::convex_polygon(
+                vec![a + n * 3.5, m + n * 3.5, m - n * 3.5, a - n * 3.5],
+                c,
+                Stroke::NONE,
+            ));
+            p.add(Shape::closed_line(
+                vec![a + n * 3.5, b + n * 3.5, b - n * 3.5, a - n * 3.5],
+                s,
             ));
         }
         Tool::Up => chevron(0.0, true),
@@ -906,7 +1164,6 @@ pub fn tool_icon(ui: &mut Ui, tool: Tool, enabled: bool, tip: &str) -> Response 
             }
         }
     }
-    r
 }
 
 // ---- Property grids ----
@@ -1126,6 +1383,26 @@ pub fn show(
                 }
                 if ui.add(b).clicked() {
                     out.add_shape = Some(kind);
+                    ui.close();
+                }
+            }
+        });
+        let hint = match state.keys.get(&Command::AddCanvas) {
+            Some(s) => tr!("ADD_CANVAS_LAYER_WITH_SHORTCUT", shortcut = s),
+            None => tr!("ADD_CANVAS_LAYER").to_owned(),
+        };
+        let button = tool_icon(ui, Tool::AddCanvas, true, &hint);
+        egui::Popup::menu(&button).show(|ui| {
+            // Only a closed shape has an inside to paint in.
+            for kind in ShapeKind::ALL.into_iter().filter(|k| k.closed()) {
+                let mut b = Button::new(translate(kind.name_key()));
+                if kind == state.canvas_kind
+                    && let Some(s) = state.keys.get(&Command::AddCanvas)
+                {
+                    b = b.shortcut_text(s.as_str());
+                }
+                if ui.add(b).clicked() {
+                    out.add_canvas = Some(kind);
                     ui.close();
                 }
             }
@@ -2027,6 +2304,14 @@ fn shape_section(
                     if let Some(name) = link {
                         layer.color_links.insert(ColorField::Fill, name);
                     }
+
+                    // What is painted in it, when it is resized.
+                    ui.label(tr!("SHAPE_STRETCH_PAINT"));
+                    changed |= ui
+                        .checkbox(&mut s.stretch_paint, "")
+                        .on_hover_text(tr!("SHAPE_STRETCH_PAINT_HINT"))
+                        .changed();
+                    ui.end_row();
                 }
 
                 ui.label(tr!("SHAPE_STROKE"));
@@ -3299,6 +3584,31 @@ mod tests {
                 &mut selected,
                 &mut state.borrow_mut(),
             );
+        });
+    }
+
+    /// The brush kinds' menu, as below the canvas tool bar's brush button, the
+    /// calligraphy brush picked, to look at their icons:
+    /// `BRUSH_MENU_PREVIEW=out.png cargo test brush_menu_preview -- --ignored`.
+    #[test]
+    #[ignore]
+    fn brush_menu_preview() {
+        let Ok(path) = std::env::var("BRUSH_MENU_PREVIEW") else {
+            return;
+        };
+        crate::preview::render(&path, egui::vec2(220.0, 170.0), |ui| {
+            ui.spacing_mut().item_spacing.y = 2.0;
+            for kind in crate::paint::BrushKind::ALL {
+                let on = kind == crate::paint::BrushKind::Calligraphy;
+                let labels = crate::paint::BrushKind::ALL.map(|k| translate(k.name_key()));
+                icon_entry(
+                    ui,
+                    Tool::Brush(kind),
+                    translate(kind.name_key()),
+                    &labels,
+                    on,
+                );
+            }
         });
     }
 }

@@ -486,6 +486,40 @@ fn anchor_points(paths: &[RawPath], points: &[[f64; 2]]) -> Vec<[f64; 2]> {
 /// Endpoints closer than this (mm) are treated as the same point.
 const JOIN_TOLERANCE_MM: f64 = 0.01;
 
+/// Leaves out the paths drawn twice in a file: the same points, or for a closed path
+/// the same ring started elsewhere or run the other way. A shape copied onto itself in
+/// CAD would otherwise be printed twice, and cut twice by a plotter following the PDF.
+fn drop_duplicates(paths: Vec<RawPath>) -> Vec<RawPath> {
+    // The points as a closed ring is compared: from its least point, in the direction
+    // that comes first.
+    let key = |(pts, closed): &RawPath| -> (Vec<[u64; 2]>, bool) {
+        let bits = |p: &[f64; 2]| p.map(f64::to_bits);
+        let mut pts: Vec<[f64; 2]> = pts.clone();
+        if *closed && pts.len() > 1 {
+            // A ring repeating its first point at the end: once is enough.
+            if pts.first() == pts.last() {
+                pts.pop();
+            }
+            let least = (0..pts.len())
+                .min_by(|&a, &b| {
+                    pts[a]
+                        .partial_cmp(&pts[b])
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+                .unwrap_or(0);
+            pts.rotate_left(least);
+            let mut back = pts.clone();
+            back[1..].reverse();
+            let order = |v: &[[f64; 2]]| v.iter().map(bits).collect::<Vec<_>>();
+            let (a, b) = (order(&pts), order(&back));
+            return (a.min(b), true);
+        }
+        (pts.iter().map(bits).collect(), *closed)
+    };
+    let mut seen = std::collections::HashSet::new();
+    paths.into_iter().filter(|p| seen.insert(key(p))).collect()
+}
+
 /// Joins open paths whose ends meet into longer paths, and closes those that come back
 /// to their start. CAD outlines are often drawn as separate lines and arcs.
 fn join_paths(paths: Vec<RawPath>) -> Vec<RawPath> {
@@ -548,7 +582,7 @@ pub fn load(entry: &TemplateEntry) -> Result<Template, String> {
     let mut elements = Vec::new();
     for src in &entry.sources {
         let (paths, points) = read_dxf(&src.path, units)?;
-        let paths = join_paths(paths);
+        let paths = drop_duplicates(join_paths(paths));
         if src.kind.has_lines() {
             elements.push((src, paths, Vec::new()));
         } else {
@@ -603,6 +637,29 @@ pub fn load(entry: &TemplateEntry) -> Result<Template, String> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn shapes_drawn_twice_are_kept_once() {
+        let square = vec![[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [0.0, 10.0]];
+        // Started at another corner, and run the other way.
+        let shifted = vec![[10.0, 10.0], [0.0, 10.0], [0.0, 0.0], [10.0, 0.0]];
+        let reversed = vec![[0.0, 0.0], [0.0, 10.0], [10.0, 10.0], [10.0, 0.0]];
+        let other = vec![[20.0, 0.0], [30.0, 0.0], [30.0, 10.0], [20.0, 10.0]];
+        let paths = vec![
+            (square.clone(), true),
+            (square.clone(), true),
+            (shifted, true),
+            (reversed, true),
+            (other.clone(), true),
+            // The same points left open are another shape: a line, not a hole.
+            (square.clone(), false),
+        ];
+        let kept = drop_duplicates(paths);
+        assert_eq!(
+            kept,
+            vec![(square.clone(), true), (other, true), (square, false)]
+        );
+    }
 
     /// Folder of the templates used by the tests, independent of the shipped ones.
     pub(crate) fn fixtures_dir() -> PathBuf {

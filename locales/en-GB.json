@@ -29,6 +29,7 @@
   "GRADIENT_STOP_POSITION_HINT": "Where this colour is along the gradient",
   "NEW_VARIABLE_NAME_COLOR": "colour",
   "OUTLINE_POSITION_CENTER": "Centre",
+  "PAINT_COLOR_HINT": "Colour of the strokes painted next",
   "PARAM_CENTER_X": "Centre x",
   "PARAM_CENTER_Y": "Centre y",
   "PARAM_COLOR": "Colour",

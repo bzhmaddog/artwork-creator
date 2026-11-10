@@ -1,0 +1,100 @@
+# Release builds for Linux and Windows, packaged like `make dist`: the executable with
+# its templates folder next to it.
+#
+# - Pushing a version tag (vX.Y.Z, as `make release` makes) builds both and attaches them
+#   to a draft GitHub Release for that tag, to look over and publish by hand.
+# - Run by hand (Actions > Release > Run workflow), it only builds them: the packages are
+#   the run's artifacts, kept for a few days.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  APP: artwork-creator
+
+jobs:
+  build:
+    name: Build (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux
+            os: ubuntu-latest
+            exe: artwork-creator
+          - name: windows
+            os: windows-latest
+            exe: artwork-creator.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: release
+      - name: Build
+        run: cargo build --release --locked -p ${{ env.APP }}
+      - name: Package (Linux)
+        if: matrix.name == 'linux'
+        run: |
+          dir="$APP-linux"
+          mkdir -p "dist/$dir"
+          cp "target/release/${{ matrix.exe }}" "dist/$dir/"
+          cp -r templates "dist/$dir/"
+          tar -czf "dist/$dir.tar.gz" -C dist "$dir"
+      - name: Package (Windows)
+        if: matrix.name == 'windows'
+        shell: pwsh
+        run: |
+          $dir = "$env:APP-windows"
+          New-Item -ItemType Directory -Force "dist/$dir" | Out-Null
+          Copy-Item "target/release/${{ matrix.exe }}" "dist/$dir/"
+          Copy-Item -Recurse templates "dist/$dir/"
+          Compress-Archive -Path "dist/$dir" -DestinationPath "dist/$dir.zip"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP }}-${{ matrix.name }}
+          path: |
+            dist/*.tar.gz
+            dist/*.zip
+          if-no-files-found: error
+          retention-days: 7
+
+  release:
+    name: Draft release
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      # The tag must be the version in Cargo.toml, as `make release` sets them.
+      - name: Check the version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME but Cargo.toml says $version"
+            exit 1
+          fi
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Create the draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" dist/* --clobber
+          else
+            gh release create "$GITHUB_REF_NAME" dist/* --draft --verify-tag \
+              --title "$GITHUB_REF_NAME" --generate-notes
+          fi

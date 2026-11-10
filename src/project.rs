@@ -76,8 +76,10 @@ pub fn load(path: &Path) -> Result<(Document, ExportSettings), String> {
     Ok((doc, export))
 }
 
-/// The export settings saved in a project's JSON: the defaults when there are none
-/// (projects saved before they were) or they can't be read.
+/// The choices of what to export saved in a project's JSON, in the defaults (only the
+/// choices count, see `ExportSettings::with_choices_of`): the defaults when there are
+/// none (projects saved before they were) or they can't be read. Older projects also
+/// saved print settings: those are left out.
 fn export_of(json: &str) -> ExportSettings {
     #[derive(serde::Deserialize)]
     struct Saved {
@@ -88,13 +90,25 @@ fn export_of(json: &str) -> ExportSettings {
         .unwrap_or_default()
 }
 
-/// A project's JSON with its export settings added, beside the document's fields.
+/// A project's JSON with its choices of what to export added, beside the document's
+/// fields. The print settings are the app's, not the project's.
 fn with_export(json: &str, export: &ExportSettings) -> Result<String, String> {
+    #[derive(serde::Serialize)]
+    struct Choices<'a> {
+        png: bool,
+        pdf: bool,
+        print_lines: &'a [bool],
+    }
+    let choices = Choices {
+        png: export.png,
+        pdf: export.pdf,
+        print_lines: &export.print_lines,
+    };
     let mut value: serde_json::Value = serde_json::from_str(json).map_err(|e| e.to_string())?;
     if let Some(map) = value.as_object_mut() {
         map.insert(
             "export".into(),
-            serde_json::to_value(export).map_err(|e| e.to_string())?,
+            serde_json::to_value(choices).map_err(|e| e.to_string())?,
         );
     }
     serde_json::to_string_pretty(&value).map_err(|e| e.to_string())
@@ -532,20 +546,26 @@ mod tests {
     }
 
     #[test]
-    fn export_settings_are_saved_with_the_project() {
-        use crate::document::{Orientation, PageSize};
+    fn what_to_export_is_saved_with_the_project_not_the_print_settings() {
+        use crate::document::PageSize;
         let dir = std::env::temp_dir().join(format!("artwork-export-set-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let export = ExportSettings {
+        let mut print_lines = ExportSettings::default().print_lines;
+        print_lines[0] = false;
+        let choices = ExportSettings {
             png: false,
+            print_lines,
+            ..Default::default()
+        };
+        // The print settings are the app's: not saved, the defaults once read back.
+        let export = ExportSettings {
             dpi: 600,
             crop_marks: true,
+            bleed_mm: 3.0,
             tile: true,
             sheet: PageSize::Letter,
-            sheet_orientation: Orientation::Landscape,
-            tile_overlap_mm: 15.0,
             tile_offset_mm: [12.5, -4.0],
-            ..Default::default()
+            ..choices.clone()
         };
         let doc = Document::default();
         for path in [dir.join("e.artwork"), dir.join("e.json")] {
@@ -555,7 +575,7 @@ mod tests {
                 save(&doc, &export, &path).unwrap();
             }
             let (_, back) = load(&path).unwrap();
-            assert_eq!(back, export, "{}", path.display());
+            assert_eq!(back, choices, "{}", path.display());
         }
         // Projects saved before export settings were get the defaults.
         let old = dir.join("old.json");

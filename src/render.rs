@@ -43,6 +43,9 @@ pub struct Outlines {
     /// Shapes in the layer's frame (layer units, y down), each filled with its color or
     /// gradient under the non-zero rule, bottom first.
     pub fills: Vec<(tiny_skia::Path, crate::gradient::Ink)>,
+    /// An outline in the same frame, and the fills cut off at it (the strokes painted
+    /// inside a shape), if any.
+    pub clip: Option<(tiny_skia::Path, std::ops::Range<usize>)>,
     /// Layer units to page mm, including any distortion.
     pub map: Homography,
 }
@@ -368,6 +371,7 @@ fn mirror_nodes(nodes: &mut [SceneNode], m: Affine) {
                 if let Some(v) = &l.vector {
                     l.vector = Some(Arc::new(Outlines {
                         fills: v.fills.clone(),
+                        clip: v.clip.clone(),
                         map: v.map.then_affine(m),
                     }));
                 }

@@ -53,6 +53,35 @@ layers panel on the right](doc/capture.png)
   width in mm, and one kind can be turned into another (a rectangle into a polygon of its
   corners, for instance). Shapes move, rotate, distort and take effects like
   images, and are drawn at the export resolution.
+- **Painting**: any closed shape (rectangle, ellipse, polygon, star, closed path) can be
+  painted in. While one is selected, a tool bar at the canvas' top left (also in the
+  **Tools** menu) has Select, Pencil, Brush and Eraser; the tool picked last comes back
+  whenever such a shape is selected. The pencil paints an even line; each tool has its
+  color and width (in mm) on the tool bar. The brush comes in several kinds, picked in
+  the menu its tool bar button opens (its icon shows the kind in use) or in **Tools >
+  Brush kind**: **round** (thinning out at both ends),
+  **calligraphy** (a flat nib at an angle set by turning the wheel on the tool bar:
+  broad across it, thin along it), **marker** (square ends, at half the color's
+  opacity, like a highlighter), **spray** (dots scattered around the line, denser in the middle, as
+  thick as the density set on the tool bar) and **bristle** (thin lines side by side,
+  swelling and running dry here and there, like a dry brush). Strokes
+  are vectors, sharp at any size and in the PDF, cut off at the shape's outline, over
+  its fill (the background) and under its stroke (the border): painting never changes
+  the shape. Resizing the shape (by its handles or its Size) stretches its strokes, or,
+  with **Stretch paint** off in its Properties, leaves them where they are on the page,
+  the shape showing more or less of them, as when its points are moved. Ctrl+Alt on a
+  handle does the other way for that drag. Turned into a line or polyline, it hides them
+  until it is closed again. The **Canvas** button, next to Image, Text and Shape, opens
+  a menu of the closed kinds (rectangle, ellipse, polygon, regular polygon, star) and
+  adds one to paint in, without fill or stroke (its outline shows dashed on screen, not
+  printed), with Select in hand: half the page's size (an ellipse starts as a circle,
+  its handles stretch it), or, for a polygon, drawn point by point as from the Shape
+  menu. Its shortcut adds the kind added last. The eraser cuts the selected shape's
+  strokes where it passes; a stroke crossed in the middle becomes two, a spray loses
+  the dots it passes over. **Clear the paint**, next to the tools on the tool bar (also
+  in the **Tools** menu), empties the selected shape of all its strokes at once (Undo
+  brings them back). With a pen on Windows, the width follows its pressure. Esc
+  goes back to selecting.
 - **Gradients**: a shape's fill and stroke, a text's letters and the page background can
   each be one color or a linear or radial gradient (Solid / Linear gradient / Radial
   gradient, next to its color). A linear gradient runs at an angle, from one corner of
@@ -135,9 +164,11 @@ layers panel on the right](doc/capture.png)
 - **Undo / redo** for every change to the project.
 - **Templates** made of several elements, each in its own DXF file, with its own color and
   visibility.
-- **Export** PNG and/or PDF at the resolution you choose (72 to 1200 DPI). Choose which
-  template lines are printed, and whether the inside of buttons and of cutouts is left
-  blank or printed over. In the PDF, template lines, text and shapes stay sharp vectors
+- **Export** PNG and/or PDF. The Export window only asks what to export: the formats
+  and which template lines are printed, saved with the project. How it is printed is
+  set once for all projects in the **Print** panel: the resolution (72 to 1200 DPI),
+  whether the outside of the outline and the inside of buttons and of cutouts are left
+  blank or printed over, the bleed, the marks, mirroring and sheets. In the PDF, template lines, text and shapes stay sharp vectors
   (text as outlines, so no font is needed to print it), gradients included; text and
   shape layers with effects, inside a semi-transparent group, distorted with a gradient,
   or with a gradient whose colors are not all opaque, are printed as images like the
@@ -145,42 +176,51 @@ layers panel on the right](doc/capture.png)
 - **Page sizes**: A5, A4, A3, A2, Letter, Legal and Tabloid, in portrait or landscape, or
   a custom width and height.
 - **Print** straight from the app (**File > Print…**), at true size. The Print window
-  shows the same preview and settings as the Export window (lines, marks, sheets,
-  mirroring), shared between the two. On Windows, the printer, copies
+  shows the same preview and choice of lines as the Export window, shared between the
+  two, and prints with the Print panel's settings. On Windows, the printer, copies
   and paper are chosen in the system print dialog, its paper preset to the page's or the
   sheets'; keep its scale at 100%. On Linux, printing goes through CUPS (`lp`): pick
   the printer and copies in the Print window.
 - **Tiled printing**: a page larger than your paper is split over several sheets (A5 to
-  Tabloid, portrait or landscape) in the Export window: one PDF page and one PNG file
+  Tabloid, portrait or landscape) in the Print panel: one PDF page and one PNG file
   (`name-r1c2.png`) per sheet. Each sheet keeps a blank margin, the artwork of
   neighboring sheets overlaps, and alignment marks in the margin show the corners of
   each sheet's artwork and where to trim one sheet to line it up with the next. The
   sheets are centered on the page; drag them on the export preview, or set their
   position, to place the joins where you want them.
 - **Low resolution warning**: image layers that would print below a chosen resolution
-  (150 DPI by default, set in the Export window) are flagged with a ⚠ in the layer list,
-  in Properties and in the Export window. The resolution is measured where the image is
+  (150 DPI by default, set in the Print panel) are flagged with a ⚠ in the layer list,
+  in Properties, in the Print panel and in the Export window. The resolution is measured where the image is
   stretched most, distortion included.
 - **Mirrored export**: the whole print flipped left to right, template lines and marks
   included, to print on the back of clear film or plexi and see it the right way through
   it.
-- **Print margins and marks**: a **bleed** (Template panel) prints the artwork a few mm
+- **Print margins and marks**: a **bleed** (Print panel) prints the artwork a few mm
   past the outline and into the holes, so a cut slightly off the line leaves no blank
-  edge; a **safe area** shows a dashed guide on the canvas, that far inside the outline
-  and around the holes, to keep text and details clear of the cuts. The export can add
-  **crop marks** in line with the edges of the outline's box and **registration
-  marks** at the middle of its sides, both outside the bleed.
+  edge: what is under that band is printed, so a shape meant to reach the cut should
+  go past it by the bleed. **Preview bleed** (Page panel, or **View**) shows it in the
+  cut preview, or turned off, the cut lines themselves. A **safe area** is
+  shown as a dashed guide on the canvas, that far inside the outline and around the
+  holes, to keep text and details clear of the cuts; never printed. Its width is set
+  next to **Preview safe area** (Page panel; also in **View**), which hides or shows
+  it. The Page panel's display settings (Preview cuts and its opacity, Preview bleed,
+  Preview safe area and its width) and the Print panel's settings are the app's, not
+  the project's: saved as soon as they change, and back at the next start. The export can add **crop marks**
+  in line with the edges of the outline's box and **registration marks** at the middle
+  of its sides, both outside the bleed (Print panel).
 - **Projects** are saved, by default, as a single `.artwork` file (a zip archive) holding
   the project and all its images, so it can be moved or shared on its own. **Save As**
   can also write a linked `.json` project that points to the image files on disk; images
   that only exist inside an archive are then written to an "*name* images" folder next to
   it.
-  Both keep the Export window's settings too (formats, resolution, lines, marks, sheets
-  and their position), so a project exports the same way every time. Changing them
-  counts as an unsaved change, but not as an undo step.
-  **File > Open Recent** lists the last 10 projects.
-- **Movable panels**: Controller, Page, Template, Variables, Colors in use, Layers and
-  Properties are each a panel. Drag a panel by its title onto the left or right side of
+  Both keep the Export window's choices too (formats and lines printed); changing them
+  counts as an unsaved change, but not as an undo step. The Print panel's settings
+  are the app's, the same for every project.
+  **File > Open Recent** lists the last 10 projects. With unsaved changes, **New**,
+  **Open**, **Open Recent** and closing the window first ask whether to save them
+  (Save, Don't save or Cancel).
+- **Movable panels**: Controller, Page, Template, Print, Variables, Colors in use,
+  Layers and Properties are each a panel. Drag a panel by its title onto the left or right side of
   the window to dock it there, above or below the other panels of that side (a line shows
   where it goes), or anywhere else to float it over the canvas; drag a floating panel's
   title to move it, or onto a side to dock it again. The menu at the right of a panel's
@@ -294,8 +334,10 @@ describes the elements:
 ```
 
 - `kind` is `outline`, `buttons`, `cutouts` or `anchors`. The outline clips the artwork;
-  buttons and cutouts are holes, left blank in the export unless turned off in the Export
-  window.
+  buttons and cutouts are holes, left blank in the export unless turned off in the Print
+  panel. **Preview cuts** (Page panel) covers all of them on the canvas, at the
+  **Cut opacity** set there, and hatches them, whatever the export prints: the panel is
+  cut there anyway.
 - `anchors` are points that images snap to on the canvas: while an image is moved, its
   center, a corner or the middle of an edge lands on an anchor that comes near, and a corner being resized or
   distorted does too. Hold Alt to drag freely, or turn it off with **View > Snap to
@@ -395,6 +437,7 @@ The default keys:
 | Add an image layer | Ctrl+I, or drop image files on the window |
 | Add a text layer | Ctrl+T |
 | Add a shape layer (the kind added last; others from the Shape button) | Ctrl+R |
+| Add a canvas to paint in (the kind added last; others from the Canvas button) | Ctrl+K |
 | Type in a text layer on the canvas | Double-click it (straight text only); Esc or a click outside it to stop |
 | Finish drawing a polyline or polygon | Double-click, Enter, Esc or right-click; a click on the first point closes it |
 | Edit the points of a line, polyline or polygon | Double-click it; Esc or selecting something else to stop |
@@ -407,6 +450,8 @@ The default keys:
 | Delete layer | Del or Backspace |
 | Nudge by 1 mm (10 mm with Shift) | Arrow keys |
 | Fit page in view | F |
+| Select / Pencil / Brush / Eraser tool (with a closed shape selected) | V / P / B / E (Esc: back to Select) |
+| Clear the paint in the selected shape | Ctrl+Shift+Delete |
 | Pan | Space+drag, middle or right drag, or drag on empty canvas |
 | Zoom | Mouse wheel, or Ctrl+scroll |
 
@@ -417,6 +462,8 @@ On the canvas, with a layer selected:
   perspective. **Holding Ctrl** swaps between resizing and distorting while you drag.
 - **Edge handles** stretch one side; **Alt** stretches both sides from the center.
 - **Rotation handle** rotates; **Shift** snaps to 15° steps.
+- **Ctrl+Alt** on a corner or edge handle of a shape painted in: its paint does the
+  other way than its **Stretch paint** setting says, for that drag only.
 
 A line, polyline or polygon picked in the Shape menu is drawn on the canvas: each click
 places a sharp point, and a press dragged places a smooth one, pulling out its curve

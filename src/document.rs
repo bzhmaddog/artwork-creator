@@ -795,11 +795,6 @@ pub struct Document {
     /// the page being opaque.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background_gradient: Option<crate::gradient::Gradient>,
-    /// How far the artwork goes past the template's cut lines, in mm.
-    pub bleed_mm: f32,
-    /// Width of the margin inside the cut lines that important content should stay
-    /// out of, in mm; 0 shows no safe-area guide.
-    pub safe_margin_mm: f32,
     /// Layers and groups, bottom of the stack first.
     pub layers: Vec<Node>,
     /// Saved colors of the first projects that had them, made color variables once
@@ -825,8 +820,6 @@ impl Default for Document {
             background: [255, 255, 255],
             background_link: None,
             background_gradient: None,
-            bleed_mm: 0.0,
-            safe_margin_mm: 0.0,
             layers: Vec::new(),
             old_palette: Vec::new(),
             variables: Vec::new(),

@@ -17,10 +17,11 @@ use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 use tiny_skia::{
-    FillRule, LineCap, LineJoin, Path, PathBuilder, Pixmap, Rect, Stroke, StrokeDash, Transform,
+    FillRule, LineCap, LineJoin, Mask, Path, PathBuilder, Pixmap, Rect, Stroke, StrokeDash,
+    Transform,
 };
 
-use crate::document::{Document, Layer, P2};
+use crate::document::{Affine, Document, Layer, P2};
 use crate::gradient::Ink;
 use crate::i18n::{tr_noop, translate};
 use crate::render::Outlines;
@@ -40,7 +41,10 @@ const MIN_SIZE_MM: f32 = 0.1;
 /// What a shape layer draws.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum ShapeKind {
+    /// Also what Canvas and Drawing layers, painted in before any closed shape could
+    /// be, load as.
     #[default]
+    #[serde(alias = "Canvas", alias = "Drawing")]
     Rectangle,
     Ellipse,
     Line,
@@ -51,6 +55,7 @@ pub enum ShapeKind {
 }
 
 impl ShapeKind {
+    /// In the order of the Shape menu.
     pub const ALL: [ShapeKind; 7] = [
         ShapeKind::Rectangle,
         ShapeKind::Ellipse,
@@ -83,7 +88,7 @@ impl ShapeKind {
         )
     }
 
-    /// It can be filled: its outline is closed.
+    /// It can be filled, and painted in: its outline is closed.
     pub fn can_fill(self) -> bool {
         self.closed()
     }
@@ -242,6 +247,13 @@ pub struct Shape {
     pub dash: DashStyle,
     pub cap: Cap,
     pub join: Join,
+    /// Strokes painted inside it, bottom first, in its frame, cut off at its outline;
+    /// only a closed shape shows them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub strokes: Vec<crate::paint::PaintStroke>,
+    /// Resizing the shape stretches the strokes painted in it; otherwise they stay where
+    /// they are on the page, as when its points are moved.
+    pub stretch_paint: bool,
 }
 
 impl Default for Shape {
@@ -282,6 +294,8 @@ impl Shape {
             dash: DashStyle::Solid,
             cap: if open { Cap::Round } else { Cap::Butt },
             join: if open { Join::Round } else { Join::Miter },
+            strokes: Vec::new(),
+            stretch_paint: true,
         }
     }
 
@@ -470,9 +484,11 @@ impl Shape {
     }
 
     /// The filled shapes that draw it, in mm in its own frame, bottom first: the fill,
-    /// then the stroke turned into a shape. Each is filled with its color or gradient
-    /// under the non-zero rule. Gradients span the shape's box, stroke included.
-    pub fn coats(&self) -> Vec<(Path, Ink)> {
+    /// the strokes painted inside it, then its own stroke turned into a shape, so that
+    /// paint never covers its border. Each is filled with its color or gradient under
+    /// the non-zero rule, and is true when it is cut off at the outline (the painted
+    /// strokes). Gradients span the shape's box, stroke included.
+    pub fn coats(&self) -> Vec<(Path, Ink, bool)> {
         let Some(path) = self.path() else {
             return Vec::new();
         };
@@ -487,12 +503,19 @@ impl Shape {
             };
             if let Some(stroke) = line.and_then(|l| l.stroke(&self.stroke_style(), CURVE_RES)) {
                 let ink = Ink::of(self.stroke_color, self.stroke_gradient.as_ref(), frame);
-                out.push((stroke, ink));
+                out.push((stroke, ink, false));
             }
+        }
+        if self.kind.closed() {
+            let paint = self
+                .strokes
+                .iter()
+                .filter_map(|s| Some((s.outline()?, Ink::Solid(s.color), true)));
+            out.splice(0..0, paint);
         }
         if self.filled() {
             let ink = Ink::of(self.fill_color, self.fill_gradient.as_ref(), frame);
-            out.insert(0, (path, ink));
+            out.insert(0, (path, ink, false));
         }
         out
     }
@@ -550,7 +573,9 @@ impl Shape {
 
     /// Scales the geometry by `k` along its own axes, around `about`. Lengths that
     /// aren't along an axis (stroke width, corner radius) stay as they are.
-    fn scale(&mut self, k: P2, about: P2) {
+    /// The strokes painted inside stretch with it if `stretch_paint`.
+    fn scale(&mut self, k: P2, about: P2, stretch_paint: bool) {
+        let mut k = k;
         if self.kind.has_points() {
             for p in &mut self.points {
                 *p = std::array::from_fn(|i| about[i] + (p[i] - about[i]) * k[i]);
@@ -559,7 +584,15 @@ impl Shape {
                 *h = [h[0] * k[0], h[1] * k[1]];
             }
         } else {
-            self.size = std::array::from_fn(|i| (self.size[i] * k[i]).max(MIN_SIZE_MM));
+            let before = self.size;
+            self.size = std::array::from_fn(|i| (before[i] * k[i]).max(MIN_SIZE_MM));
+            // The box's true ratio, past its smallest size.
+            k = std::array::from_fn(|i| self.size[i] / before[i].max(1e-6));
+        }
+        if stretch_paint {
+            for s in &mut self.strokes {
+                s.scale(k, about);
+            }
         }
     }
 }
@@ -637,6 +670,12 @@ pub struct ShapeState {
     layout_key: u64,
     /// Identifies what the current pixmap was drawn from.
     key: u64,
+    /// The map from the shape's frame to the page when it was last unscaled, for the
+    /// strokes painted in it to stay in place while it is resized (see `paint_map`).
+    settled: Option<Affine>,
+    /// The resize going on does the other way than `Shape::stretch_paint` says (Ctrl+Alt
+    /// on a handle); cleared once it settles.
+    flip_paint: bool,
 }
 
 /// A new shape layer of `kind` at its default size, centered on `center`.
@@ -660,6 +699,111 @@ pub fn new_drawn_layer(id: u64, kind: ShapeKind, at: P2) -> Layer {
     layer.transform.center = at;
     layout(&mut layer, false);
     layer
+}
+
+/// A new shape of a kind drawn in a box (not a polygon) to paint in, without fill or
+/// stroke, filling the page's box from `lo` to `hi` (mm); strokes are painted in with
+/// [`add_stroke`].
+pub fn new_canvas_layer(id: u64, kind: ShapeKind, lo: P2, hi: P2) -> Layer {
+    let mut layer = Layer::new(id, String::new(), PathBuf::new());
+    let mut shape = Shape::new(kind);
+    shape.size = [hi[0] - lo[0], hi[1] - lo[1]].map(|v| v.abs().max(MIN_SIZE_MM));
+    layer.shape = Some(Box::new(shape));
+    make_canvas(&mut layer);
+    layer.transform.scale = [1.0 / UNITS_PER_MM; 2];
+    layer.transform.center = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0];
+    layout(&mut layer, false);
+    layer
+}
+
+/// Makes a new shape layer a canvas to paint in: no fill or stroke (its outline shows
+/// dashed on screen), named so.
+pub fn make_canvas(layer: &mut Layer) {
+    layer.name = translate(tr_noop!("DEFAULT_CANVAS_LAYER_NAME")).to_owned();
+    if let Some(s) = layer.shape.as_deref_mut() {
+        s.fill = false;
+        s.stroke = false;
+    }
+}
+
+/// How many mm of the layer's frame make one mm on the page: 1 unless it was scaled and
+/// the scale not yet put into its geometry.
+fn frame_mm_per_page_mm(layer: &Layer) -> f32 {
+    let s = layer.transform.scale;
+    let k = (s[0].abs() * s[1].abs()).sqrt() * UNITS_PER_MM;
+    if k > 1e-6 { 1.0 / k } else { 1.0 }
+}
+
+/// Adds what `pen` paints inside a closed shape: `samples` are x, y on the page (mm) and
+/// the pen's pressure, its width is in mm and its nib's angle on the page. What is
+/// outside the shape doesn't show; a stroke all outside its box isn't added. Returns
+/// true if anything was added.
+pub fn add_stroke(layer: &mut Layer, samples: &[[f32; 3]], pen: &crate::paint::Pen) -> bool {
+    if layer.shape.as_deref().is_none_or(|s| !s.kind.closed()) {
+        return false;
+    }
+    let k = frame_mm_per_page_mm(layer);
+    let local: Vec<[f32; 3]> = samples
+        .iter()
+        .filter_map(|&[x, y, p]| from_page(layer, [x, y]).map(|q| [q[0], q[1], p]))
+        .collect();
+    let mut pen = crate::paint::Pen {
+        width: pen.width * k,
+        ..*pen
+    };
+    // The nib keeps its angle on the page, however the shape is turned.
+    if let Some(&[x, y, _]) = samples.first() {
+        let (sin, cos) = pen.angle.sin_cos();
+        if let (Some(a), Some(b)) = (
+            from_page(layer, [x, y]),
+            from_page(layer, [x + cos, y + sin]),
+        ) {
+            pen.angle = (b[1] - a[1]).atan2(b[0] - a[0]);
+        }
+    }
+    let strokes = crate::paint::PaintStroke::paint(&local, &pen);
+    let Some(shape) = layer.shape.as_deref_mut() else {
+        return false;
+    };
+    let area = shape.path().and_then(|p| p.compute_tight_bounds());
+    let mut added = false;
+    for stroke in strokes {
+        let inside = stroke.bounds().zip(area).is_some_and(|((lo, hi), a)| {
+            lo[0] < a.right() && hi[0] > a.left() && lo[1] < a.bottom() && hi[1] > a.top()
+        });
+        if inside {
+            shape.strokes.push(stroke);
+            added = true;
+        }
+    }
+    added
+}
+
+/// Cuts the strokes painted inside a shape where an eraser of `radius` mm passed along `path` on
+/// the page. Returns true if anything was cut.
+pub fn erase(layer: &mut Layer, path: &[P2], radius: f32) -> bool {
+    if layer.shape.as_deref().is_none_or(|s| !s.kind.closed()) {
+        return false;
+    }
+    let k = frame_mm_per_page_mm(layer);
+    let local: Vec<P2> = path.iter().filter_map(|&p| from_page(layer, p)).collect();
+    layer
+        .shape
+        .as_deref_mut()
+        .is_some_and(|s| crate::paint::erase(&mut s.strokes, &local, radius * k))
+}
+
+/// Takes out all the strokes painted inside a shape. Returns true if there were any.
+pub fn clear_paint(layer: &mut Layer) -> bool {
+    layer
+        .shape
+        .as_deref_mut()
+        .is_some_and(|s| !std::mem::take(&mut s.strokes).is_empty())
+}
+
+/// A closed shape: it can be painted in.
+pub fn paintable(layer: &Layer) -> bool {
+    layer.shape.as_deref().is_some_and(|s| s.kind.closed())
 }
 
 /// Adds a point at the end of a line, polyline or polygon being drawn. Returns true if
@@ -686,6 +830,56 @@ fn page_of(layer: &Layer, p: P2) -> Option<P2> {
         layer
             .affine()
             .apply([(p[0] - o[0]) * UNITS_PER_MM, (p[1] - o[1]) * UNITS_PER_MM]),
+    )
+}
+
+/// The map from the shape's frame (mm) to the page, distortion left out.
+fn frame_map(layer: &Layer) -> Option<Affine> {
+    let o = layer.shape_state.origin?;
+    Some(
+        Affine::translate(-o[0], -o[1])
+            .then(Affine::scale(UNITS_PER_MM, UNITS_PER_MM))
+            .then(layer.affine()),
+    )
+}
+
+/// For the resize about to start: the paint does the other way than the shape's Stretch
+/// paint says, until the resize settles.
+pub fn flip_paint_once(layer: &mut Layer) {
+    layer.shape_state.flip_paint = true;
+}
+
+/// Resizing the shape stretches its paint now: its setting, unless flipped for the
+/// resize going on.
+fn stretches_paint(layer: &Layer) -> bool {
+    layer
+        .shape
+        .as_deref()
+        .is_some_and(|s| s.stretch_paint != layer.shape_state.flip_paint)
+}
+
+/// The layer's scale isn't yet in its geometry: it is being resized.
+fn is_scaled(layer: &Layer) -> bool {
+    layer
+        .transform
+        .scale
+        .iter()
+        .any(|v| (v.abs() * UNITS_PER_MM - 1.0).abs() > 1e-4)
+}
+
+/// While a shape whose paint doesn't stretch is being resized: where its strokes are in
+/// its frame now, from where they are in its frame unscaled, so that they stay in place
+/// on the page.
+fn paint_map(layer: &Layer) -> Option<Affine> {
+    let shape = layer.shape.as_deref()?;
+    if stretches_paint(layer) || shape.strokes.is_empty() || !is_scaled(layer) {
+        return None;
+    }
+    Some(
+        layer
+            .shape_state
+            .settled?
+            .then(frame_map(layer)?.inverse()?),
     )
 }
 
@@ -1030,7 +1224,8 @@ pub fn set_geometry_size(layer: &mut Layer, size: P2) {
         }
     });
     let c = shape.geometry_center();
-    shape.scale(k, c);
+    let stretch = shape.stretch_paint;
+    shape.scale(k, c, stretch);
 }
 
 /// Turns the shape into another kind, keeping its place and size: its outline's
@@ -1085,6 +1280,11 @@ pub fn set_kind(layer: &mut Layer, kind: ShapeKind) {
         new.size = s.map(|v| if v < big * 0.01 { big } else { v });
         new.points.clear();
         new.handles.clear();
+        // The painted strokes move with the geometry, now centered on the frame's origin.
+        for p in new.strokes.iter_mut().flat_map(|s| &mut s.points) {
+            p[0] += shift[0];
+            p[1] += shift[1];
+        }
     }
     if !shape.kind.can_fill() && kind.can_fill() && kind.closed() {
         new.fill = true;
@@ -1103,6 +1303,19 @@ fn hash_of(v: &impl Serialize) -> u64 {
 /// page. With `settle`, a scale the layer was given (by its handles) goes into its
 /// geometry first.
 fn layout(layer: &mut Layer, settle: bool) {
+    lay_out_box(layer, settle);
+    // Where the frame is on the page once settled, for paint that doesn't stretch.
+    if !is_scaled(layer) {
+        layer.shape_state.settled = frame_map(layer);
+        if settle {
+            layer.shape_state.flip_paint = false;
+        }
+    }
+}
+
+fn lay_out_box(layer: &mut Layer, settle: bool) {
+    let fixed_paint = paint_map(layer);
+    let stretch = stretches_paint(layer);
     let pin = layer
         .shape_state
         .pin
@@ -1118,7 +1331,20 @@ fn layout(layer: &mut Layer, settle: bool) {
     if bake {
         // The map from the frame to the page is linear: scaled around the origin, every
         // point of the geometry stays where the stretched layer showed it.
-        shape.scale(k, [0.0; 2]);
+        shape.scale(k, [0.0; 2], stretch);
+        // Paint that doesn't stretch stays where the resized layer showed it.
+        if let Some(m) = fixed_paint {
+            for s in &mut shape.strokes {
+                for p in &mut s.points {
+                    let q = m.apply([p[0], p[1]]);
+                    (p[0], p[1]) = (q[0] * k[0], q[1] * k[1]);
+                }
+                s.turn_nib(|v| {
+                    let (q, o) = (m.apply(v), m.apply([0.0; 2]));
+                    [(q[0] - o[0]) * k[0], (q[1] - o[1]) * k[1]]
+                });
+            }
+        }
         if let Some((p, _)) = &mut pin {
             *p = [p[0] * k[0], p[1] * k[1]];
         }
@@ -1157,8 +1383,24 @@ fn draw(layer: &Layer, px_per_unit: f32) -> Option<Pixmap> {
     // Exactly the layer's box, even where the pixel size was rounded.
     let ts = Transform::from_translate(-o[0], -o[1])
         .post_scale(UNITS_PER_MM * w / sw, UNITS_PER_MM * h / sh);
-    for (path, ink) in shape.coats() {
-        pixmap.fill_path(&path, &ink.paint(), FillRule::Winding, ts, None);
+    // The painted strokes are cut off at the outline; while the shape is resized, paint
+    // that doesn't stretch is drawn where it was.
+    let paint_ts = match paint_map(layer) {
+        Some(m) => ts.pre_concat(Transform::from_row(m.a, m.b, m.c, m.d, m.e, m.f)),
+        None => ts,
+    };
+    let mut clip = None;
+    for (path, ink, clipped) in shape.coats() {
+        if clipped && clip.is_none() {
+            let mut mask = Mask::new(pixmap.width(), pixmap.height())?;
+            if let Some(outline) = shape.path() {
+                mask.fill_path(&outline, FillRule::Winding, true, ts);
+            }
+            clip = Some(mask);
+        }
+        let mask = clip.as_ref().filter(|_| clipped);
+        let t = if clipped { paint_ts } else { ts };
+        pixmap.fill_path(&path, &ink.paint(), FillRule::Winding, t, mask);
     }
     Some(pixmap)
 }
@@ -1169,10 +1411,10 @@ pub fn outlines(layer: &Layer) -> Option<Outlines> {
     let o = layer.shape_state.origin?;
     let ts = Transform::from_translate(-o[0], -o[1]).post_scale(UNITS_PER_MM, UNITS_PER_MM);
     // The paths, and the box a gradient spans, from the shape's mm to layer units.
-    let fills = shape
+    let coats: Vec<_> = shape
         .coats()
         .into_iter()
-        .filter_map(|(path, ink)| {
+        .filter_map(|(path, ink, clipped)| {
             let ink = match ink {
                 Ink::Gradient { gradient, frame } => Ink::Gradient {
                     gradient,
@@ -1180,11 +1422,19 @@ pub fn outlines(layer: &Layer) -> Option<Outlines> {
                 },
                 solid => solid,
             };
-            Some((path.transform(ts)?, ink))
+            Some((path.transform(ts)?, ink, clipped))
         })
         .collect();
+    // The painted strokes, one after the other, are cut off at the outline.
+    let first = coats.iter().position(|c| c.2);
+    let count = coats.iter().filter(|c| c.2).count();
+    let clip = first
+        .zip(shape.path().and_then(|p| p.transform(ts)))
+        .map(|(i, p)| (p, i..i + count));
+    let fills = coats.into_iter().map(|(p, ink, _)| (p, ink)).collect();
     Some(Outlines {
         fills,
+        clip,
         map: layer.homography(),
     })
 }
@@ -1194,6 +1444,12 @@ fn key(layer: &Layer, ppu: f32) -> u64 {
     layer.shape_state.layout_key.hash(&mut h);
     layer.size_px.hash(&mut h);
     ppu.to_bits().hash(&mut h);
+    // Paint that doesn't stretch is drawn again as the shape is resized.
+    if let Some(m) = paint_map(layer) {
+        for v in [m.a, m.b, m.c, m.d, m.e, m.f] {
+            v.to_bits().hash(&mut h);
+        }
+    }
     h.finish()
 }
 
@@ -1523,5 +1779,175 @@ mod tests {
         assert!(!json.contains("points"), "only for lines and polygons");
         let back: Layer = serde_json::from_str(&json).unwrap();
         assert_eq!(back.shape, l.shape);
+    }
+
+    #[test]
+    fn a_canvas_keeps_its_box_and_cuts_its_strokes_off_there() {
+        use crate::paint::Tool;
+        let mut l = new_canvas_layer(
+            1,
+            crate::shape::ShapeKind::Rectangle,
+            [10.0, 20.0],
+            [110.0, 70.0],
+        );
+        let size = l.size_px;
+        assert_eq!(size, [1000, 500]);
+        // Past its right edge: the box stays, the stroke is kept.
+        let line = [[30.0, 45.0, 1.0], [200.0, 45.0, 1.0]];
+        assert!(add_stroke(
+            &mut l,
+            &line,
+            &crate::paint::Pen::new(Tool::Pencil, 2.0, [0, 0, 0, 255])
+        ));
+        layout(&mut l, false);
+        assert_eq!(l.size_px, size);
+        assert!(close(l.corners()[0], [10.0, 20.0]), "{:?}", l.corners());
+        // All outside: left out.
+        let out = [[150.0, 45.0, 1.0], [200.0, 45.0, 1.0]];
+        assert!(!add_stroke(
+            &mut l,
+            &out,
+            &crate::paint::Pen::new(Tool::Pencil, 2.0, [0, 0, 0, 255])
+        ));
+        // Cut off in the PDF at its box.
+        let o = outlines(&l).unwrap();
+        let (clip, range) = o.clip.expect("a clip");
+        assert_eq!(range, 0..1, "the stroke, nothing else");
+        let clip = clip.compute_tight_bounds().unwrap();
+        assert_eq!(
+            [clip.left(), clip.top(), clip.right(), clip.bottom()],
+            [0.0, 0.0, 1000.0, 500.0]
+        );
+        // Resized by its handles: the strokes stretch with it.
+        l.transform.scale = [0.2, 0.1];
+        layout(&mut l, true);
+        let shape = l.shape.as_ref().unwrap();
+        assert!(close(shape.size, [200.0, 50.0]), "{:?}", shape.size);
+        assert!(close(
+            [shape.strokes[0].points[0][0], shape.strokes[0].points[0][1]],
+            [-60.0, 0.0]
+        ));
+        // Saved as a Canvas or a Drawing layer: a rectangle, the strokes kept.
+        let json = serde_json::to_string(&l)
+            .unwrap()
+            .replace("\"Rectangle\"", "\"Drawing\"");
+        let back: Layer = serde_json::from_str(&json).unwrap();
+        assert!(paintable(&back));
+        assert_eq!(back.shape, l.shape);
+    }
+
+    #[test]
+    fn paint_in_a_shape_goes_between_its_fill_and_its_stroke_cut_off_at_its_outline() {
+        use crate::paint::Tool;
+        let mut l = new_layer(1, ShapeKind::Ellipse, [50.0, 50.0]);
+        // Across the whole box, corners included.
+        let line = [[30.0, 40.0, 1.0], [70.0, 40.0, 1.0]];
+        assert!(add_stroke(
+            &mut l,
+            &line,
+            &crate::paint::Pen::new(Tool::Pencil, 3.0, [255, 0, 0, 255])
+        ));
+        let coats = l.shape.as_ref().unwrap().coats();
+        assert_eq!(
+            coats.iter().map(|c| c.2).collect::<Vec<_>>(),
+            [false, true, false],
+            "fill, paint, stroke"
+        );
+        let o = outlines(&l).unwrap();
+        assert_eq!(o.clip.as_ref().unwrap().1, 1..2);
+        // Drawn: red inside the ellipse, nothing at the box's corner.
+        let pixmap = draw(&l, 1.0).unwrap();
+        let at = |page: P2| {
+            let o = l.shape_state.origin.unwrap();
+            let p = from_page(&l, page).unwrap();
+            let [x, y] = [(p[0] - o[0]) * UNITS_PER_MM, (p[1] - o[1]) * UNITS_PER_MM];
+            pixmap.pixel(x as u32, y as u32).unwrap()
+        };
+        let mid = at([50.0, 40.0]);
+        assert_eq!([mid.red(), mid.green()], [255, 0]);
+        assert_eq!(at([31.0, 40.0]).alpha(), 0, "outside the ellipse");
+        // A line has no inside: nothing painted shows.
+        let mut line_layer = l.clone();
+        set_kind(&mut line_layer, ShapeKind::Line);
+        assert!(!paintable(&line_layer));
+        assert!(
+            line_layer
+                .shape
+                .as_ref()
+                .unwrap()
+                .coats()
+                .iter()
+                .all(|c| !c.2)
+        );
+    }
+
+    #[test]
+    fn paint_stays_in_place_when_resizing_without_stretching_it() {
+        use crate::paint::Tool;
+        let page_ends = |l: &Layer| -> Vec<P2> {
+            l.shape.as_ref().unwrap().strokes[0]
+                .points
+                .iter()
+                .map(|p| to_page(l, [p[0], p[1]]).unwrap())
+                .collect()
+        };
+        let mut l = new_canvas_layer(1, ShapeKind::Rectangle, [0.0, 0.0], [100.0, 50.0]);
+        let line = [[20.0, 25.0, 1.0], [60.0, 25.0, 1.0]];
+        assert!(add_stroke(
+            &mut l,
+            &line,
+            &crate::paint::Pen::new(Tool::Pencil, 2.0, [0, 0, 0, 255])
+        ));
+        let before = page_ends(&l);
+        l.shape.as_mut().unwrap().stretch_paint = false;
+
+        // By the handles: twice as wide, the left edge kept (as a drag on the right edge
+        // leaves it), then settled.
+        l.transform.scale[0] *= 2.0;
+        l.transform.center[0] += 50.0;
+        layout(&mut l, false);
+        assert!(paint_map(&l).is_some(), "drawn in place while resized");
+        layout(&mut l, true);
+        assert!(close(l.shape.as_ref().unwrap().size, [200.0, 50.0]));
+        let after = page_ends(&l);
+        for (a, b) in before.iter().zip(&after) {
+            assert!(close(*a, *b), "{before:?} {after:?}");
+        }
+        // By the Size field.
+        set_geometry_size(&mut l, [80.0, 40.0]);
+        layout(&mut l, true);
+        for (a, b) in before.iter().zip(&page_ends(&l)) {
+            assert!(close(*a, *b));
+        }
+
+        // Stretched, the default: the stroke grows with the shape.
+        l.shape.as_mut().unwrap().stretch_paint = true;
+        set_geometry_size(&mut l, [160.0, 40.0]);
+        layout(&mut l, true);
+        let e = page_ends(&l);
+        let len = |e: &[P2]| e[e.len() - 1][0] - e[0][0];
+        assert!((len(&e) - 2.0 * len(&before)).abs() < 0.01, "{e:?}");
+    }
+
+    #[test]
+    fn a_calligraphy_nib_keeps_its_angle_on_the_page_in_a_turned_shape() {
+        use crate::paint::{BrushKind, Pen, Tip};
+        let mut l = new_layer(1, ShapeKind::Rectangle, [100.0, 100.0]);
+        l.transform.rotation_deg = 90.0;
+        layout(&mut l, false);
+        let line = [[95.0, 100.0, 1.0], [105.0, 100.0, 1.0]];
+        let pen = Pen {
+            angle: 0.0,
+            ..Pen::brush(BrushKind::Calligraphy, 2.0, [0, 0, 0, 255])
+        };
+        assert!(add_stroke(&mut l, &line, &pen));
+        let Tip::Nib { angle } = l.shape.as_ref().unwrap().strokes[0].tip else {
+            panic!("a nib");
+        };
+        // Flat on the page: upright in the shape's frame.
+        assert!(
+            (angle.abs() - std::f32::consts::FRAC_PI_2).abs() < 1e-3,
+            "{angle}"
+        );
     }
 }

@@ -122,11 +122,21 @@ struct GroupPreview {
     rect_mm: (P2, P2),
 }
 
-/// What the template cuts away, rendered over the page.
+/// What the template cuts away, rendered over the page: paper covering it, and
+/// hatching over that.
 struct CutPreview {
     key: u64,
     texture: egui::TextureHandle,
+    hatch: egui::TextureHandle,
 }
+
+/// The cut preview's hatching, in pixels of its texture: from one line to the next
+/// along the diagonal, and a line's width. The texture follows the zoom in powers of
+/// two, so on screen they are between one and two thirds of that.
+const HATCH_PERIOD: f32 = 14.0;
+const HATCH_WIDTH: f32 = 2.5;
+/// The hatching's color, straight RGBA: shows over paper and over artwork alike.
+const HATCH_COLOR: [u8; 4] = [120, 120, 120, 200];
 
 /// Canvas state that lasts across frames: view, drag, display options and caches.
 pub struct CanvasState {
@@ -140,14 +150,20 @@ pub struct CanvasState {
     pub element_show: [bool; KINDS],
     /// Line color per element kind.
     pub element_color: [Color32; KINDS],
-    /// Gray out what the template cuts away, as the export leaves it blank.
+    /// Cover and hatch what is cut out of the panel: outside the outline, inside the
+    /// holes.
     pub preview_cuts: bool,
-    /// What the export cuts; set by the app from the export settings.
+    /// What is cut out of the panel, whatever the export prints there; set by the app.
     pub cuts: Cuts,
+    /// The cut preview shows the bleed: the holes shrunk and the outline grown by it.
+    /// Off, it follows the cut lines themselves. The export always uses the bleed.
+    pub preview_bleed: bool,
+    /// Show the safe area's dashed guide, when the project has one.
+    pub preview_safe_area: bool,
     /// Opacity of the cut preview: below 1, what will be cut stays faintly visible.
     pub cut_opacity: f32,
     cut_preview: Option<CutPreview>,
-    /// The project's safe margin inside the cut lines, in mm; set by the app.
+    /// The safe area's width inside the cut lines, in mm; 0 shows no guide.
     pub safe_margin_mm: f32,
     /// The safe-area guide's rings in page mm, and the key they were made for.
     safe_area: Option<(u64, Vec<Vec<P2>>)>,
@@ -180,6 +196,18 @@ pub struct CanvasState {
     /// A line, polyline or polygon being drawn point by point, after picking it in the
     /// Shape menu.
     pub drawing: Option<Drawing>,
+    /// The paint tool picked last and its settings; painting in the selected closed
+    /// shape replaces selecting and moving. The tool is kept while no such shape is
+    /// selected, and in hand again once one is (see [`active_tool`]).
+    pub brushes: crate::paint::Brushes,
+    /// Each command's shortcut as text, for the tool bar's tooltips; set by the app.
+    pub keys: HashMap<crate::shortcuts::Command, String>,
+    /// The stroke being painted: x, y on the page (mm) and the pen's pressure.
+    painting: Vec<[f32; 3]>,
+    /// The pen's pressure during the stroke, when the system reports one.
+    pen_pressure: Option<f32>,
+    /// The stroke being painted, drawn as it will be.
+    paint_preview: Option<egui::TextureHandle>,
     group_previews: HashMap<u64, GroupPreview>,
     /// The page background's gradient drawn small, with what it was drawn from.
     background: Option<(u64, egui::TextureHandle)>,
@@ -201,6 +229,8 @@ impl Default for CanvasState {
             }),
             preview_cuts: true,
             cuts: Cuts::default(),
+            preview_bleed: true,
+            preview_safe_area: true,
             cut_opacity: 0.8,
             cut_preview: None,
             safe_margin_mm: 0.0,
@@ -219,11 +249,71 @@ impl Default for CanvasState {
             drawing: None,
             group_previews: HashMap::new(),
             background: None,
+            brushes: Default::default(),
+            keys: HashMap::new(),
+            painting: Vec::new(),
+            paint_preview: None,
+            pen_pressure: None,
         }
     }
 }
 
+/// The Page panel's display settings, kept with the app's preferences (not the
+/// project): how the canvas previews the cuts, the bleed and the safe area.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct Previews {
+    cuts: bool,
+    cut_opacity: f32,
+    bleed: bool,
+    safe_area: bool,
+    safe_margin_mm: f32,
+}
+
+impl Default for Previews {
+    fn default() -> Self {
+        let s = CanvasState::default();
+        Self {
+            cuts: s.preview_cuts,
+            cut_opacity: s.cut_opacity,
+            bleed: s.preview_bleed,
+            safe_area: s.preview_safe_area,
+            safe_margin_mm: s.safe_margin_mm,
+        }
+    }
+}
+
+/// Where they are kept.
+const PREVIEWS_KEY: &str = "canvas_previews";
+
 impl CanvasState {
+    /// The canvas with the display settings saved by a previous session.
+    pub fn load(storage: Option<&dyn eframe::Storage>) -> Self {
+        let p: Previews = storage
+            .and_then(|s| eframe::get_value(s, PREVIEWS_KEY))
+            .unwrap_or_default();
+        Self {
+            preview_cuts: p.cuts,
+            cut_opacity: p.cut_opacity.clamp(0.0, 1.0),
+            preview_bleed: p.bleed,
+            preview_safe_area: p.safe_area,
+            safe_margin_mm: p.safe_margin_mm.clamp(0.0, crate::print::MAX_MARGIN_MM),
+            ..Default::default()
+        }
+    }
+
+    /// Keeps its display settings for the next session.
+    pub fn save(&self, storage: &mut dyn eframe::Storage) {
+        let p = Previews {
+            cuts: self.preview_cuts,
+            cut_opacity: self.cut_opacity,
+            bleed: self.preview_bleed,
+            safe_area: self.preview_safe_area,
+            safe_margin_mm: self.safe_margin_mm,
+        };
+        eframe::set_value(storage, PREVIEWS_KEY, &p);
+    }
+
     /// `p` (page mm) if it is well inside the visible part of the canvas, otherwise the
     /// middle of the view: where to put something new so that it can be seen.
     pub fn in_view(&self, p: P2) -> P2 {
@@ -464,6 +554,9 @@ pub fn show(
     let rect = ui.available_rect_before_wrap();
     let response = ui.allocate_rect(rect, Sense::click_and_drag());
     let mut changed = false;
+    // The cursor as the panels and windows drawn so far left it: the canvas' own only
+    // show over the canvas itself (see the end).
+    let cursor_before = ui.ctx().output(|o| o.cursor_icon);
 
     // Keep the view centered when the window resizes, and fit on demand.
     if state.fit_pending || !state.rect.is_positive() {
@@ -520,10 +613,10 @@ pub fn show(
     if !ui.input(|i| i.pointer.primary_down()) {
         state.panning = false;
     }
-    if response.dragged_by(PointerButton::Middle)
+    let panning_now = response.dragged_by(PointerButton::Middle)
         || response.dragged_by(PointerButton::Secondary)
-        || (response.dragged_by(PointerButton::Primary) && (space || state.panning))
-    {
+        || (response.dragged_by(PointerButton::Primary) && (space || state.panning));
+    if panning_now {
         state.camera.pan += response.drag_delta();
         ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
     } else if space && hover.is_some() {
@@ -532,9 +625,12 @@ pub fn show(
 
     let cam = state.camera;
     let shift = ui.input(|i| i.modifiers.shift);
-    let alt = ui.input(|i| i.modifiers.alt);
+    // Ctrl+Alt on a resize handle: the paint in a shape does the other way than its
+    // Stretch paint says, for that drag. Neither key then does what it does alone.
+    let flip_paint = ui.input(|i| i.modifiers.command && i.modifiers.alt);
+    let alt = ui.input(|i| i.modifiers.alt) && !flip_paint;
     // Ctrl swaps the corner handles between resizing and distorting while held.
-    let distorting = state.distort_mode != ui.input(|i| i.modifiers.command);
+    let distorting = state.distort_mode != (ui.input(|i| i.modifiers.command) && !flip_paint);
     // Snapping reach in mm, when on and the template has anchors.
     let anchors: Vec<P2> = elements.iter().flat_map(|e| &e.anchors).copied().collect();
     let snap_reach =
@@ -576,6 +672,27 @@ pub fn show(
                 .map(|i| (layer.id, DragKind::Stretch(i)))
         }
     };
+
+    // A paint tool takes the left button: it paints or erases in the selected closed
+    // shape instead of selecting. Esc goes back to selecting. Without one to paint in,
+    // the tool waits for the next one.
+    if active_tool(doc, *selected, &state.brushes).is_some()
+        && !ui.ctx().egui_wants_keyboard_input()
+        && ui.input(|i| i.key_pressed(Key::Escape))
+    {
+        state.brushes.tool = None;
+    }
+    let active = active_tool(doc, *selected, &state.brushes);
+    if active.is_none() {
+        state.painting.clear();
+    }
+    let paint_tool = active.filter(|_| !space);
+    if let Some(tool) = paint_tool {
+        state.typing = None;
+        state.drawing = None;
+        state.points = None;
+        changed |= paint_input(ui, doc, *selected, state, cam, rect, &response, tool);
+    }
 
     // Typing on the canvas takes the clicks and drags on its text.
     let on_handle = hover.is_some_and(|p| handle_at(doc, *selected, p).is_some());
@@ -626,7 +743,7 @@ pub fn show(
     changed |= points.changed;
     snapped = snapped.or(points.snapped);
 
-    if !space && !typing.took && !points.took {
+    if !space && !typing.took && !points.took && paint_tool.is_none() {
         if response.drag_started_by(PointerButton::Primary) {
             let origin = ui
                 .input(|i| i.pointer.press_origin())
@@ -665,6 +782,13 @@ pub fn show(
                     .into_iter()
                     .filter_map(|id| Some((id, doc.layer(id)?.transform)))
                     .collect();
+                if flip_paint && matches!(kind, DragKind::Scale | DragKind::Stretch(_)) {
+                    for (id, _) in &layers {
+                        if let Some(l) = doc.layer_mut(*id) {
+                            crate::shape::flip_paint_once(l);
+                        }
+                    }
+                }
                 state.drag = (!layers.is_empty()).then_some(Drag {
                     kind,
                     layers,
@@ -924,6 +1048,7 @@ pub fn show(
         }
     } else if let Some(p) = hover
         && !space
+        && !panning_now
         && !typing.over_text
         && !points.took
         && !points.over_handle
@@ -953,6 +1078,9 @@ pub fn show(
     state.snapped = snapped;
     state.snapped_guides = snapped_guides;
     paint(ui, doc, elements, *selected, state, rect, distorting);
+    if can_paint(doc, *selected) && tool_bar(ui, state, rect, has_paint(doc, *selected)) {
+        changed |= clear_paint(doc, *selected);
+    }
     canvas_text::paint(ui, doc, &state.typing, cam, rect);
     let painter = ui.painter_at(rect);
     let look = canvas_points::Look {
@@ -961,6 +1089,11 @@ pub fn show(
     };
     canvas_points::paint(&painter, doc, &state.points, cam, rect, &look);
     canvas_points::paint_drawing(&painter, doc, &state.drawing, cam, rect, hover, keys, &look);
+    // Outside the canvas, or over its tool bar, a window or a popup, even during a drag
+    // that started on it: the cursor of what is there.
+    if !ui.rect_contains_pointer(rect) {
+        ui.ctx().output_mut(|o| o.cursor_icon = cursor_before);
+    }
     changed
 }
 
@@ -1196,9 +1329,9 @@ impl Painting<'_> {
     }
 }
 
-/// Covers what the template cuts away (outside the outline, inside holes) with paper, as
-/// the export leaves it blank; with `cut_opacity` below 1, what will be cut shows through
-/// faintly.
+/// Covers what is cut out of the panel (outside the outline, inside the button holes and
+/// cutouts) with paper, whether the export prints there or not; with `cut_opacity` below
+/// 1, what will be cut shows through faintly.
 fn paint_cuts(
     ctx: &egui::Context,
     painter: &egui::Painter,
@@ -1222,14 +1355,22 @@ fn paint_cuts(
         (page[0] * px_per_mm).ceil().max(1.0) as u32,
         (page[1] * px_per_mm).ceil().max(1.0) as u32,
     ];
+    // The bleed only when asked for: the cut lines themselves otherwise.
+    let cuts = Cuts {
+        bleed_mm: if state.preview_bleed {
+            state.cuts.bleed_mm
+        } else {
+            0.0
+        },
+        ..state.cuts
+    };
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    state.cuts.hash(&mut h);
+    cuts.hash(&mut h);
     px_per_mm.to_bits().hash(&mut h);
     hash_elements(elements, &mut h);
     let key = h.finish();
     if state.cut_preview.as_ref().is_none_or(|c| c.key != key) {
-        let Some(keep) =
-            crate::render::keep_mask(elements, state.cuts, [0.0, 0.0], size, px_per_mm)
+        let Some(keep) = crate::render::keep_mask(elements, cuts, [0.0, 0.0], size, px_per_mm)
         else {
             state.cut_preview = None;
             return;
@@ -1242,21 +1383,54 @@ fn paint_cuts(
                 [a, a, a, a]
             })
             .collect();
-        let image =
-            egui::ColorImage::from_rgba_premultiplied([size[0] as usize, size[1] as usize], &rgba);
-        let texture = match state.cut_preview.take() {
-            Some(mut c) => {
-                c.texture.set(image, egui::TextureOptions::LINEAR);
-                c.texture
+        let [w, h] = size.map(|v| v as usize);
+        let image = egui::ColorImage::from_rgba_premultiplied([w, h], &rgba);
+        // Diagonal lines, where it is cut, smoothed at their edges.
+        let mut lines = vec![0u8; w * h * 4];
+        for (i, (px, &k)) in lines
+            .as_chunks_mut::<4>()
+            .0
+            .iter_mut()
+            .zip(&keep)
+            .enumerate()
+        {
+            if k == 255 {
+                continue;
             }
-            None => ctx.load_texture("template-cuts", image, egui::TextureOptions::LINEAR),
+            let (x, y) = ((i % w) as f32 + 0.5, (i / w) as f32 + 0.5);
+            let d = (x + y).rem_euclid(HATCH_PERIOD);
+            let off = d.min(HATCH_PERIOD - d) - HATCH_WIDTH / 2.0;
+            let line = (0.5 - off).clamp(0.0, 1.0) * (255 - k) as f32 / 255.0;
+            // Premultiplied.
+            let a = HATCH_COLOR[3] as f32 / 255.0 * line;
+            let [r, g, b, _] = HATCH_COLOR.map(|v| (v as f32 * a).round() as u8);
+            px.copy_from_slice(&[r, g, b, (a * 255.0).round() as u8]);
+        }
+        let hatch = egui::ColorImage::from_rgba_premultiplied([w, h], &lines);
+        let options = egui::TextureOptions::LINEAR;
+        let (texture, hatch) = match state.cut_preview.take() {
+            Some(mut c) => {
+                c.texture.set(image, options);
+                c.hatch.set(hatch, options);
+                (c.texture, c.hatch)
+            }
+            None => (
+                ctx.load_texture("template-cuts", image, options),
+                ctx.load_texture("template-cuts-hatch", hatch, options),
+            ),
         };
-        state.cut_preview = Some(CutPreview { key, texture });
+        state.cut_preview = Some(CutPreview {
+            key,
+            texture,
+            hatch,
+        });
     }
     if let Some(c) = &state.cut_preview {
         let corners =
             [[0.0, 0.0], [page[0], 0.0], page, [0.0, page[1]]].map(|p| cam.to_screen(rect, p));
         paint_quad(painter, c.texture.id(), corners, state.cut_opacity);
+        // The hatching shows what is cut away at any opacity.
+        paint_quad(painter, c.hatch.id(), corners, 1.0);
     }
 }
 
@@ -1424,7 +1598,7 @@ fn paint(
             painter.line_segment([p - v, p + v], stroke);
         }
     }
-    if state.show_template {
+    if state.show_template && state.preview_safe_area {
         paint_safe_area(&painter, elements, state, rect);
     }
     // The anchor the dragged image snapped to, shown even when anchors are hidden.
@@ -1432,6 +1606,9 @@ fn paint(
         let p = cam.to_screen(rect, a);
         painter.circle_stroke(p, ANCHOR_MARK * 1.6, Stroke::new(2.0, ACCENT));
     }
+    canvas_frames(doc, &painter, state, rect);
+    paint_brush(ui, &painter, doc, selected, state, rect);
+
     // The guides the dragged layer snapped to, across the whole canvas.
     let guide = Stroke::new(1.0, ACCENT);
     if let Some(x) = state.snapped_guides[0] {
@@ -1530,6 +1707,476 @@ fn paint(
             painter.circle(rot, HANDLE_RADIUS, Color32::WHITE, stroke);
         }
     }
+}
+
+/// The canvas' tools, with their commands: selecting and moving, then painting.
+pub const TOOLS: [(crate::shortcuts::Command, Option<crate::paint::Tool>); 4] = [
+    (crate::shortcuts::Command::SelectTool, None),
+    (
+        crate::shortcuts::Command::PencilTool,
+        Some(crate::paint::Tool::Pencil),
+    ),
+    (
+        crate::shortcuts::Command::BrushTool,
+        Some(crate::paint::Tool::Brush),
+    ),
+    (
+        crate::shortcuts::Command::EraserTool,
+        Some(crate::paint::Tool::Eraser),
+    ),
+];
+
+/// The tool bar at the canvas' top left, while a closed shape is selected: the tools,
+/// the button clearing the shape's paint (`can_clear` says whether it has any), then,
+/// for a paint tool, its color (not the eraser's) and width. Returns true if the
+/// clear button was clicked.
+fn tool_bar(ui: &egui::Ui, state: &mut CanvasState, rect: Rect, can_clear: bool) -> bool {
+    use crate::layers_ui::{Tool as Icon, tool_icon};
+    let mut clear = false;
+    egui::Area::new(ui.scope_id().with("tool_bar"))
+        .fixed_pos(rect.min + vec2(8.0, 8.0))
+        .order(egui::Order::Middle)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style())
+                .inner_margin(4.0)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        for (command, tool) in TOOLS {
+                            let icon = match tool {
+                                None => Icon::Select,
+                                Some(crate::paint::Tool::Pencil) => Icon::Pencil,
+                                Some(crate::paint::Tool::Brush) => Icon::Brush(state.brushes.brush),
+                                Some(crate::paint::Tool::Eraser) => Icon::Eraser,
+                            };
+                            let mut tip = crate::shortcuts::with_key(
+                                command.label(),
+                                state.keys.get(&command),
+                            );
+                            if tool == Some(crate::paint::Tool::Brush) {
+                                tip = format!("{tip}\n{}", crate::i18n::tr!("BRUSH_KIND_HINT"));
+                            }
+                            // The tool in use stands out.
+                            let on = state.brushes.tool == tool;
+                            let at = ui.cursor().min;
+                            if on {
+                                ui.painter().rect_filled(
+                                    Rect::from_min_size(at, vec2(24.0, 24.0)),
+                                    3.0,
+                                    ui.visuals().selection.bg_fill,
+                                );
+                            }
+                            let button = tool_icon(ui, icon, true, &tip);
+                            if button.clicked() {
+                                state.brushes.tool = tool;
+                                state.painting.clear();
+                            }
+                            if tool == Some(crate::paint::Tool::Brush) {
+                                brush_menu(ui, &button, &mut state.brushes);
+                            }
+                        }
+                        // Emptying the shape of its paint, with any tool.
+                        ui.add_space(4.0);
+                        let c = crate::shortcuts::Command::ClearPaint;
+                        let tip = crate::shortcuts::with_key(c.label(), state.keys.get(&c));
+                        clear =
+                            crate::layers_ui::tool_button(ui, Icon::ClearPaint, can_clear, &tip);
+                        let Some(tool) = state.brushes.tool else {
+                            return;
+                        };
+                        ui.separator();
+                        if tool != crate::paint::Tool::Eraser {
+                            let mut link = None;
+                            crate::colors::button(ui, &mut state.brushes.color, true, &mut link)
+                                .on_hover_text(crate::i18n::tr!("PAINT_COLOR_HINT"));
+                        }
+                        ui.add(
+                            egui::DragValue::new(state.brushes.width_mut(tool))
+                                .range(0.05..=100.0)
+                                .speed(0.05)
+                                .max_decimals(2)
+                                .suffix(" mm"),
+                        )
+                        .on_hover_text(crate::i18n::tr!("PAINT_WIDTH_HINT"));
+                        if tool == crate::paint::Tool::Brush {
+                            brush_options(ui, &mut state.brushes);
+                        }
+                    });
+                });
+        });
+    clear
+}
+
+/// The brush button's corner mark, saying it has more kinds, and the menu of them
+/// below it, opened by a click (which also takes the brush): each kind's icon and name.
+fn brush_menu(ui: &egui::Ui, button: &egui::Response, brushes: &mut crate::paint::Brushes) {
+    use crate::i18n::translate;
+    use crate::layers_ui::{Tool as Icon, icon_entry};
+    let r = button.rect;
+    let color = ui.visuals().widgets.inactive.fg_stroke.color;
+    ui.painter().add(Shape::convex_polygon(
+        vec![
+            r.right_bottom() - vec2(1.0, 1.0),
+            r.right_bottom() - vec2(1.0, 5.0),
+            r.right_bottom() - vec2(5.0, 1.0),
+        ],
+        color,
+        Stroke::NONE,
+    ));
+    let labels = crate::paint::BrushKind::ALL.map(|k| translate(k.name_key()));
+    egui::Popup::menu(button).show(|ui| {
+        for kind in crate::paint::BrushKind::ALL {
+            let on = brushes.brush == kind;
+            let name = translate(kind.name_key());
+            if icon_entry(ui, Icon::Brush(kind), name, &labels, on).clicked() {
+                brushes.brush = kind;
+                ui.close();
+            }
+        }
+    });
+}
+
+/// A dial for an angle in degrees, counterclockwise from the right: a ring with a dot at
+/// the angle and a faint line through its center, the calligraphy nib. Dragging or
+/// clicking on it turns it there; a double click puts it back to the default.
+fn angle_dial(ui: &mut egui::Ui, deg: &mut f32) -> egui::Response {
+    const SIDE: f32 = 22.0;
+    let (rect, mut r) = ui.allocate_exact_size(vec2(SIDE, SIDE), Sense::click_and_drag());
+    let c = rect.center();
+    if r.double_clicked() {
+        *deg = crate::paint::Brushes::default().nib_angle;
+        r.mark_changed();
+    } else if (r.dragged() || r.clicked())
+        && let Some(p) = r.interact_pointer_pos()
+    {
+        let v = p - c;
+        if v.length() > 1.0 {
+            // Up on screen is counterclockwise.
+            *deg = (-v.y).atan2(v.x).to_degrees().round();
+            r.mark_changed();
+        }
+    }
+    if ui.is_rect_visible(rect) {
+        let visuals = ui.style().interact(&r);
+        let p = ui.painter();
+        let radius = SIDE / 2.0 - 1.5;
+        p.circle(c, radius, visuals.bg_fill, visuals.bg_stroke);
+        let a = deg.to_radians();
+        let dir = vec2(a.cos(), -a.sin());
+        let faint = visuals.fg_stroke.color.gamma_multiply(0.4);
+        p.line_segment(
+            [c - dir * radius, c + dir * radius],
+            Stroke::new(1.0, faint),
+        );
+        p.circle_filled(c + dir * (radius - 3.0), 2.5, visuals.fg_stroke.color);
+    }
+    r
+}
+
+/// The settings of the brush kinds that have some: the calligraphy nib's angle, the
+/// spray's density.
+fn brush_options(ui: &mut egui::Ui, brushes: &mut crate::paint::Brushes) {
+    use crate::i18n::tr;
+    use crate::paint::BrushKind;
+    match brushes.brush {
+        BrushKind::Calligraphy => {
+            angle_dial(ui, &mut brushes.nib_angle).on_hover_text(tr!("NIB_ANGLE_HINT"));
+        }
+        BrushKind::Spray => {
+            let mut percent = brushes.spray_density * 100.0;
+            if ui
+                .add(
+                    egui::DragValue::new(&mut percent)
+                        .range(1.0..=100.0)
+                        .speed(1.0)
+                        .max_decimals(0)
+                        .suffix(" %"),
+                )
+                .on_hover_text(tr!("SPRAY_DENSITY_HINT"))
+                .changed()
+            {
+                brushes.spray_density = percent / 100.0;
+            }
+        }
+        _ => {}
+    }
+}
+
+/// The selected shape can be painted in and has paint to clear.
+pub fn has_paint(doc: &Document, selected: Option<u64>) -> bool {
+    can_paint(doc, selected)
+        && selected
+            .and_then(|id| doc.layer(id))
+            .and_then(|l| l.shape.as_deref())
+            .is_some_and(|s| !s.strokes.is_empty())
+}
+
+/// Empties the selected shape of its paint, if it can be painted in. Returns true if
+/// anything was cleared.
+pub fn clear_paint(doc: &mut Document, selected: Option<u64>) -> bool {
+    has_paint(doc, selected)
+        && selected
+            .and_then(|id| doc.layer_mut(id))
+            .is_some_and(crate::shape::clear_paint)
+}
+
+/// The paint tool in hand: the one picked last, while a shape that can be painted in is
+/// selected.
+pub fn active_tool(
+    doc: &Document,
+    selected: Option<u64>,
+    brushes: &crate::paint::Brushes,
+) -> Option<crate::paint::Tool> {
+    brushes.tool.filter(|_| can_paint(doc, selected))
+}
+
+/// The selected layer, if it is a shape that can be painted in: closed, visible and
+/// unlocked.
+pub fn can_paint(doc: &Document, selected: Option<u64>) -> bool {
+    selected.is_some_and(|id| {
+        doc.layer(id).is_some_and(crate::shape::paintable)
+            && !doc.effectively_locked(id)
+            && doc.effectively_visible(id)
+    })
+}
+
+/// Painting with the pencil or the brush, or erasing, in the selected closed shape: a
+/// drag on the page paints a stroke, added when the button is released (what goes past
+/// the shape's outline doesn't show); a click, a dot. The eraser cuts its strokes
+/// as it goes. Returns true if the document changed.
+#[allow(clippy::too_many_arguments)]
+fn paint_input(
+    ui: &egui::Ui,
+    doc: &mut Document,
+    selected: Option<u64>,
+    state: &mut CanvasState,
+    cam: Camera,
+    rect: Rect,
+    response: &egui::Response,
+    tool: crate::paint::Tool,
+) -> bool {
+    use crate::paint::Tool;
+    let Some(id) = selected.filter(|_| can_paint(doc, selected)) else {
+        return false;
+    };
+    // A pen's pressure comes with touch events.
+    let force = ui.input(|i| {
+        i.events.iter().rev().find_map(|e| match e {
+            egui::Event::Touch { force: Some(f), .. } => Some(f.clamp(0.0, 1.0)),
+            _ => None,
+        })
+    });
+    if force.is_some() {
+        state.pen_pressure = force;
+    }
+    let pressure = state.pen_pressure.unwrap_or(1.0);
+    let mut changed = false;
+    let at = |p: Pos2| {
+        let m = cam.to_mm(rect, p);
+        [m[0], m[1], pressure]
+    };
+    let eraser = state.brushes.width(Tool::Eraser) / 2.0;
+    let erase = |doc: &mut Document, path: &[P2]| {
+        doc.layer_mut(id)
+            .is_some_and(|l| crate::shape::erase(l, path, eraser))
+    };
+    if response.drag_started_by(PointerButton::Primary)
+        && let Some(p) = ui
+            .input(|i| i.pointer.press_origin())
+            .or(response.interact_pointer_pos())
+    {
+        state.painting = vec![at(p)];
+    }
+    let pointer = response.interact_pointer_pos();
+    if response.dragged_by(PointerButton::Primary)
+        && let Some(p) = pointer
+        && !state.painting.is_empty()
+    {
+        let s = at(p);
+        let last = *state.painting.last().unwrap_or(&s);
+        if last[0] != s[0] || last[1] != s[1] {
+            state.painting.push(s);
+            if tool == Tool::Eraser {
+                changed |= erase(doc, &[[last[0], last[1]], [s[0], s[1]]]);
+            }
+        }
+        ui.ctx().request_repaint();
+    }
+    let done = response.drag_stopped_by(PointerButton::Primary)
+        || (response.clicked_by(PointerButton::Primary) && state.painting.is_empty());
+    if done {
+        let mut samples = std::mem::take(&mut state.painting);
+        if samples.is_empty()
+            && let Some(p) = pointer
+        {
+            samples.push(at(p));
+        }
+        if !samples.is_empty() {
+            changed |= match tool {
+                Tool::Eraser => {
+                    let path: Vec<P2> = samples.iter().map(|s| [s[0], s[1]]).collect();
+                    erase(doc, &path)
+                }
+                _ => {
+                    let pen = state.brushes.pen(tool, &samples);
+                    doc.layer_mut(id)
+                        .is_some_and(|l| crate::shape::add_stroke(l, &samples, &pen))
+                }
+            };
+        }
+        state.pen_pressure = None;
+    }
+    changed
+}
+
+/// The outlines of the visible closed shapes with neither fill nor stroke, faint and
+/// dashed so that one added to paint in shows (not printed).
+fn canvas_frames(doc: &Document, painter: &egui::Painter, state: &CanvasState, rect: Rect) {
+    let cam = state.camera;
+    let frame = Stroke::new(1.0, Color32::from_gray(140));
+    for leaf in doc.leaves() {
+        let unseen = leaf
+            .layer
+            .shape
+            .as_deref()
+            .is_some_and(|s| s.kind.closed() && !s.fill && !(s.stroke && s.stroke_width > 0.0));
+        if !leaf.visible || !unseen {
+            continue;
+        }
+        let Some((outline, _)) = crate::shape::page_outline(leaf.layer) else {
+            continue;
+        };
+        let mut pts: Vec<Pos2> = outline.iter().map(|&p| cam.to_screen(rect, p)).collect();
+        pts.extend(pts.first().copied());
+        painter.extend(Shape::dashed_line(&pts, frame, 4.0, 4.0));
+    }
+}
+
+/// The stroke being painted, as it goes, and the tool's size around the pointer.
+fn paint_brush(
+    ui: &egui::Ui,
+    painter: &egui::Painter,
+    doc: &Document,
+    selected: Option<u64>,
+    state: &mut CanvasState,
+    rect: Rect,
+) {
+    use crate::paint::{BrushKind, Tool};
+    let Some(tool) = active_tool(doc, selected, &state.brushes) else {
+        return;
+    };
+    let cam = state.camera;
+    let width = state.brushes.width(tool) * cam.zoom;
+    if tool != Tool::Eraser && !state.painting.is_empty() {
+        // Cut off at the canvas' box on screen, as the stroke will be.
+        let clip = selected
+            .and_then(|id| doc.layer(id))
+            .and_then(crate::shape::page_outline)
+            .map(|(o, _)| {
+                Rect::from_points(
+                    &o.iter()
+                        .map(|&p| cam.to_screen(rect, p))
+                        .collect::<Vec<_>>(),
+                )
+            });
+        let painter = match clip {
+            Some(c) => painter.with_clip_rect(c.intersect(painter.clip_rect())),
+            None => painter.clone(),
+        };
+        let pen = state.brushes.pen(tool, &state.painting);
+        let strokes = crate::paint::PaintStroke::paint(&state.painting, &pen);
+        stroke_preview(
+            ui.ctx(),
+            &painter,
+            &mut state.paint_preview,
+            &strokes,
+            cam,
+            rect,
+        );
+    }
+    // Only over the bare canvas, not the tool bar, a window or a popup over it.
+    if let Some(p) = ui
+        .ctx()
+        .pointer_hover_pos()
+        .filter(|_| ui.rect_contains_pointer(rect))
+    {
+        ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
+        // The tool's reach, in black and white so it shows on anything: the calligraphy
+        // nib as a line at its angle.
+        if tool == Tool::Brush && state.brushes.brush == BrushKind::Calligraphy {
+            let a = state.brushes.nib_angle.to_radians();
+            let h = vec2(a.cos(), -a.sin()) * (width / 2.0).max(4.0);
+            painter.line_segment([p - h, p + h], Stroke::new(3.0, Color32::WHITE));
+            painter.line_segment([p - h, p + h], Stroke::new(1.0, Color32::BLACK));
+        } else {
+            let r = (width / 2.0).max(2.0);
+            painter.circle_stroke(p, r + 1.0, Stroke::new(1.0, Color32::WHITE));
+            painter.circle_stroke(p, r, Stroke::new(1.0, Color32::BLACK));
+        }
+    }
+}
+
+/// Draws `strokes` (page mm) as they will be filled, over the part of the screen they
+/// cover within the painter's clip, through `texture`.
+fn stroke_preview(
+    ctx: &egui::Context,
+    painter: &egui::Painter,
+    texture: &mut Option<egui::TextureHandle>,
+    strokes: &[crate::paint::PaintStroke],
+    cam: Camera,
+    rect: Rect,
+) {
+    let Some((lo, hi)) = strokes
+        .iter()
+        .filter_map(crate::paint::PaintStroke::bounds)
+        .reduce(|a, b| {
+            (
+                [a.0[0].min(b.0[0]), a.0[1].min(b.0[1])],
+                [a.1[0].max(b.1[0]), a.1[1].max(b.1[1])],
+            )
+        })
+    else {
+        return;
+    };
+    let area = Rect::from_min_max(cam.to_screen(rect, lo), cam.to_screen(rect, hi))
+        .expand(1.0)
+        .intersect(painter.clip_rect());
+    if !area.is_positive() {
+        return;
+    }
+    let ppp = ctx.pixels_per_point();
+    let size = [area.width(), area.height()].map(|v| (v * ppp).ceil().clamp(1.0, 8192.0) as u32);
+    let Some(mut pixmap) = tiny_skia::Pixmap::new(size[0], size[1]) else {
+        return;
+    };
+    // From page mm to the pixmap's pixels.
+    let o = cam.to_screen(rect, [0.0; 2]);
+    let k = cam.zoom * ppp;
+    let ts = tiny_skia::Transform::from_scale(k, k)
+        .post_translate((o.x - area.min.x) * ppp, (o.y - area.min.y) * ppp);
+    for s in strokes {
+        if let Some(path) = s.outline() {
+            let ink = crate::gradient::Ink::Solid(s.color);
+            pixmap.fill_path(&path, &ink.paint(), tiny_skia::FillRule::Winding, ts, None);
+        }
+    }
+    let image = egui::ColorImage::from_rgba_premultiplied(
+        [size[0] as usize, size[1] as usize],
+        pixmap.data(),
+    );
+    let options = egui::TextureOptions::LINEAR;
+    let id = match texture {
+        Some(t) => {
+            t.set(image, options);
+            t.id()
+        }
+        None => texture
+            .insert(ctx.load_texture("paint-preview", image, options))
+            .id(),
+    };
+    let shown = Rect::from_min_size(area.min, vec2(size[0] as f32, size[1] as f32) / ppp);
+    let uv = Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0));
+    painter.image(id, shown, uv, Color32::WHITE);
 }
 
 /// Longest side of the page background's gradient as drawn on screen, in pixels: a
@@ -1672,6 +2319,75 @@ mod tests {
     }
 
     #[test]
+    fn display_settings_come_back_next_session() {
+        #[derive(Default)]
+        struct Memory(HashMap<String, String>);
+        impl eframe::Storage for Memory {
+            fn get_string(&self, key: &str) -> Option<String> {
+                self.0.get(key).cloned()
+            }
+            fn set_string(&mut self, key: &str, value: String) {
+                self.0.insert(key.to_owned(), value);
+            }
+            fn remove_string(&mut self, key: &str) {
+                self.0.remove(key);
+            }
+            fn flush(&mut self) {}
+        }
+        let mut storage = Memory::default();
+        let fresh = CanvasState::load(Some(&storage));
+        assert!(fresh.preview_cuts && fresh.preview_bleed && fresh.preview_safe_area);
+        let state = CanvasState {
+            preview_cuts: false,
+            cut_opacity: 0.4,
+            preview_bleed: false,
+            preview_safe_area: false,
+            safe_margin_mm: 3.0,
+            ..Default::default()
+        };
+        state.save(&mut storage);
+        let back = CanvasState::load(Some(&storage));
+        assert!(!back.preview_cuts && !back.preview_bleed && !back.preview_safe_area);
+        assert_eq!((back.cut_opacity, back.safe_margin_mm), (0.4, 3.0));
+    }
+
+    #[test]
+    fn the_safe_area_preview_can_be_turned_off() {
+        use crate::template::Polyline;
+        let elements = [PlacedElement {
+            kind: ElementKind::Outline,
+            polylines: vec![Polyline {
+                points: vec![[10.0, 10.0], [90.0, 10.0], [90.0, 40.0], [10.0, 40.0]],
+                closed: true,
+            }],
+            anchors: Vec::new(),
+        }];
+        let ctx = egui::Context::default();
+        let mut doc = Document::default();
+        let mut selected = None;
+        let mut frame = |state: &mut CanvasState| {
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(600.0, 400.0))),
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                show(ui, &mut doc, &elements, &mut selected, state);
+            });
+            out.textures_delta.clear();
+        };
+        let mut state = CanvasState {
+            safe_margin_mm: 2.0,
+            preview_safe_area: false,
+            ..Default::default()
+        };
+        frame(&mut state);
+        assert!(state.safe_area.is_none(), "hidden: not drawn");
+        state.preview_safe_area = true;
+        frame(&mut state);
+        assert!(state.safe_area.is_some(), "shown");
+    }
+
+    #[test]
     fn dragging_a_member_of_the_selected_group_moves_the_group() {
         use crate::document::Group;
         let square = |id: u64, x: f32| {
@@ -1757,6 +2473,148 @@ mod tests {
     }
 
     #[test]
+    fn a_canvas_is_placed_by_a_drag_then_painted_in_and_erased() {
+        use crate::paint::Tool;
+        let mut doc = Document::default();
+        let ctx = egui::Context::default();
+        let mut state = CanvasState::default();
+        let mut selected = None;
+        let mut time = 0.0;
+        let mut frame = |doc: &mut Document,
+                         sel: &mut Option<u64>,
+                         state: &mut CanvasState,
+                         events: Vec<Event>| {
+            time += 0.1;
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 800.0))),
+                time: Some(time),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                show(ui, doc, &[], sel, state);
+            });
+            out.textures_delta.clear();
+        };
+        frame(&mut doc, &mut selected, &mut state, vec![]);
+        let (cam, rect) = (state.camera, state.rect);
+        let button = |pos, pressed| Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        let mut drag = |doc: &mut Document,
+                        sel: &mut Option<u64>,
+                        state: &mut CanvasState,
+                        from: P2,
+                        to: P2| {
+            let (a, b) = (cam.to_screen(rect, from), cam.to_screen(rect, to));
+            frame(doc, sel, state, vec![Event::PointerMoved(a)]);
+            frame(doc, sel, state, vec![button(a, true)]);
+            for k in 1..=10 {
+                let p = a + (b - a) * (k as f32 / 10.0);
+                frame(doc, sel, state, vec![Event::PointerMoved(p)]);
+            }
+            frame(doc, sel, state, vec![button(b, false)]);
+            frame(doc, sel, state, vec![]);
+        };
+        let strokes = |doc: &Document, id: u64| {
+            doc.layer(id)
+                .unwrap()
+                .shape
+                .as_ref()
+                .unwrap()
+                .strokes
+                .clone()
+        };
+
+        // No Canvas selected: the pencil waits, a click paints nothing (a drag on the
+        // empty page would pan it).
+        state.brushes.tool = Some(Tool::Pencil);
+        drag(
+            &mut doc,
+            &mut selected,
+            &mut state,
+            [50.0, 100.0],
+            [50.0, 100.0],
+        );
+        assert_eq!(
+            state.brushes.tool,
+            Some(Tool::Pencil),
+            "kept for the next Canvas"
+        );
+        assert!(doc.layers.is_empty());
+
+        // A Canvas selected, as the Canvas button leaves it.
+        doc.layers
+            .push(Node::Layer(Box::new(crate::shape::new_canvas_layer(
+                7,
+                crate::shape::ShapeKind::Rectangle,
+                [40.0, 80.0],
+                [160.0, 140.0],
+            ))));
+        // The pencil picked before is in hand.
+        selected = Some(7);
+        let id = 7;
+        let size = doc.layer(id).unwrap().shape.as_ref().unwrap().size;
+
+        drag(
+            &mut doc,
+            &mut selected,
+            &mut state,
+            [50.0, 100.0],
+            [150.0, 100.0],
+        );
+        assert_eq!(strokes(&doc, id).len(), 1);
+        let s = &strokes(&doc, id)[0];
+        assert_eq!(s.points.len(), 2, "a straight line: its two ends");
+        // Painted where the pointer went: its ends on the page.
+        let ends: Vec<P2> = s
+            .points
+            .iter()
+            .map(|p| crate::shape::to_page(doc.layer(id).unwrap(), [p[0], p[1]]).unwrap())
+            .collect();
+        assert!(
+            (ends[0][0] - 50.0).abs() < 0.5 && (ends[1][0] - 150.0).abs() < 0.5,
+            "{ends:?}"
+        );
+
+        // The next stroke goes into it too; the canvas keeps its size.
+        drag(
+            &mut doc,
+            &mut selected,
+            &mut state,
+            [50.0, 120.0],
+            [150.0, 120.0],
+        );
+        assert_eq!(selected, Some(id));
+        assert_eq!(strokes(&doc, id).len(), 2);
+        assert_eq!(doc.layers.len(), 1);
+        assert_eq!(doc.layer(id).unwrap().shape.as_ref().unwrap().size, size);
+        // A stroke all outside it is left out.
+        drag(
+            &mut doc,
+            &mut selected,
+            &mut state,
+            [50.0, 200.0],
+            [150.0, 200.0],
+        );
+        assert_eq!(strokes(&doc, id).len(), 2);
+
+        // The eraser across the first stroke, between both: it is cut in two.
+        state.brushes.tool = Some(Tool::Eraser);
+        drag(
+            &mut doc,
+            &mut selected,
+            &mut state,
+            [100.0, 90.0],
+            [100.0, 110.0],
+        );
+        assert_eq!(strokes(&doc, id).len(), 3);
+    }
+
+    #[test]
     fn locked_layers_are_selected_by_a_click_but_not_moved() {
         let square = |id: u64, x: f32, size: u32, locked: bool| {
             let mut l = Layer::new(id, format!("l{id}"), "x.png".into());
@@ -1826,6 +2684,240 @@ mod tests {
         frame(&mut doc, &mut selected, vec![button(to, false)]);
         assert_eq!(selected, Some(1));
         assert_eq!(doc.layer(1).unwrap().transform.center, [100.0, 50.0]);
+    }
+
+    #[test]
+    fn a_pen_pressing_lightly_paints_thinner() {
+        use crate::paint::Tool;
+        let mut doc = Document::default();
+        let ctx = egui::Context::default();
+        let mut state = CanvasState::default();
+        state.brushes.tool = Some(Tool::Pencil);
+        *state.brushes.width_mut(Tool::Pencil) = 2.0;
+        doc.layers
+            .push(Node::Layer(Box::new(crate::shape::new_canvas_layer(
+                1,
+                crate::shape::ShapeKind::Rectangle,
+                [0.0, 50.0],
+                [200.0, 150.0],
+            ))));
+        let mut selected = Some(1);
+        let mut time = 0.0;
+        let mut frame = |doc: &mut Document, state: &mut CanvasState, events: Vec<Event>| {
+            time += 0.1;
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 800.0))),
+                time: Some(time),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                show(ui, doc, &[], &mut selected, state);
+            });
+            out.textures_delta.clear();
+        };
+        frame(&mut doc, &mut state, vec![]);
+        let (cam, rect) = (state.camera, state.rect);
+        let (a, b) = (
+            cam.to_screen(rect, [50.0, 100.0]),
+            cam.to_screen(rect, [150.0, 100.0]),
+        );
+        // A pen: touch events with its pressure, alongside the pointer it moves.
+        let touch = |pos, phase| Event::Touch {
+            device_id: egui::TouchDeviceId(1),
+            id: egui::TouchId(1),
+            phase,
+            pos,
+            force: Some(0.5),
+        };
+        let button = |pos, pressed| Event::PointerButton {
+            pos,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        frame(&mut doc, &mut state, vec![Event::PointerMoved(a)]);
+        frame(
+            &mut doc,
+            &mut state,
+            vec![touch(a, egui::TouchPhase::Start), button(a, true)],
+        );
+        for k in 1..=10 {
+            let p = a + (b - a) * (k as f32 / 10.0);
+            frame(
+                &mut doc,
+                &mut state,
+                vec![touch(p, egui::TouchPhase::Move), Event::PointerMoved(p)],
+            );
+        }
+        frame(
+            &mut doc,
+            &mut state,
+            vec![touch(b, egui::TouchPhase::End), button(b, false)],
+        );
+        let layer = doc.leaves()[0].layer;
+        let s = &layer.shape.as_ref().unwrap().strokes[0];
+        assert!(
+            s.points.iter().all(|p| (p[2] - 1.0).abs() < 0.01),
+            "{:?}",
+            s.points
+        );
+    }
+
+    #[test]
+    fn clear_paint_empties_the_selected_shape_only() {
+        use crate::paint::{Pen, Tool};
+        let mut l = crate::shape::new_layer(1, crate::shape::ShapeKind::Rectangle, [50.0, 50.0]);
+        let line = [[45.0, 50.0, 1.0], [55.0, 50.0, 1.0]];
+        assert!(crate::shape::add_stroke(
+            &mut l,
+            &line,
+            &Pen::new(Tool::Pencil, 1.0, [0; 4])
+        ));
+        let mut doc = Document {
+            layers: vec![Node::Layer(Box::new(l))],
+            ..Default::default()
+        };
+        assert!(!clear_paint(&mut doc, None));
+        assert!(has_paint(&doc, Some(1)));
+        assert!(clear_paint(&mut doc, Some(1)));
+        assert!(
+            doc.layer(1)
+                .unwrap()
+                .shape
+                .as_ref()
+                .unwrap()
+                .strokes
+                .is_empty()
+        );
+        // Nothing left: nothing changes.
+        assert!(!has_paint(&doc, Some(1)) && !clear_paint(&mut doc, Some(1)));
+    }
+
+    /// A stroke of the pencil and of each kind of brush painted in an ellipse, one cut
+    /// by the eraser, the strokes cut off at its outline, under its stroke, with the
+    /// tool bar and the calligraphy brush in use, to look at them:
+    /// `PAINT_PREVIEW=out.png cargo test paint_preview -- --ignored`.
+    #[test]
+    #[ignore]
+    fn paint_preview() {
+        use crate::paint::{BrushKind, Pen, Tool};
+        let Ok(path) = std::env::var("PAINT_PREVIEW") else {
+            return;
+        };
+        let mut layer = crate::shape::new_canvas_layer(
+            1,
+            crate::shape::ShapeKind::Rectangle,
+            [40.0, 40.0],
+            [200.0, 150.0],
+        );
+        // Its background and border: the paint goes between them.
+        crate::shape::set_kind(&mut layer, crate::shape::ShapeKind::Ellipse);
+        if let Some(s) = layer.shape.as_deref_mut() {
+            (s.fill, s.fill_color) = (true, [250, 240, 200, 255]);
+            (s.stroke, s.stroke_width) = (true, 2.0);
+        }
+        let wave = |y0: f32, amp: f32| -> Vec<[f32; 3]> {
+            (0..=120)
+                .map(|i| {
+                    let x = 40.0 + i as f32 * 1.4;
+                    [x, y0 + amp * (x / 18.0).sin(), 1.0]
+                })
+                .collect()
+        };
+        let strokes = [
+            (Pen::new(Tool::Pencil, 0.8, [20, 20, 20, 255]), 55.0),
+            (Pen::brush(BrushKind::Round, 8.0, [200, 40, 60, 255]), 70.0),
+            (
+                Pen::brush(BrushKind::Calligraphy, 7.0, [20, 20, 90, 255]),
+                85.0,
+            ),
+            (
+                Pen::brush(BrushKind::Marker, 8.0, [240, 200, 0, 255]),
+                100.0,
+            ),
+            (Pen::brush(BrushKind::Spray, 9.0, [30, 140, 60, 255]), 115.0),
+            (
+                Pen::brush(BrushKind::Bristle, 8.0, [120, 60, 20, 255]),
+                132.0,
+            ),
+        ];
+        for (pen, y) in strokes {
+            assert!(crate::shape::add_stroke(&mut layer, &wave(y, 6.0), &pen));
+        }
+        crate::shape::erase(&mut layer, &[[120.0, 40.0], [125.0, 80.0]], 2.0);
+        let doc = std::cell::RefCell::new(Document {
+            layers: vec![Node::Layer(Box::new(layer))],
+            ..Default::default()
+        });
+        let mut st = CanvasState::default();
+        st.brushes.tool = Some(Tool::Brush);
+        st.brushes.brush = BrushKind::Calligraphy;
+        st.brushes.color = [200, 40, 60, 255];
+        let state = std::cell::RefCell::new(st);
+        // The preview draws each theme with a context of its own: the layer's texture
+        // is made again for each.
+        let last: std::cell::RefCell<Option<egui::Context>> = Default::default();
+        crate::preview::render(&path, vec2(760.0, 560.0), |ui| {
+            let mut doc = doc.borrow_mut();
+            if last.borrow().as_ref() != Some(ui.ctx()) {
+                doc.for_each_layer_mut(|l| l.pixmap = None);
+                *last.borrow_mut() = Some(ui.ctx().clone());
+            }
+            crate::shape::sync(ui.ctx(), &mut doc, true);
+            let mut sel = Some(1);
+            show(ui, &mut doc, &[], &mut sel, &mut state.borrow_mut());
+        });
+    }
+
+    /// A rectangle under a square outline with a square button hole, the cut preview
+    /// covering and hatching what is cut away, to look at it:
+    /// `CUTS_PREVIEW=out.png cargo test cuts_preview -- --ignored`.
+    #[test]
+    #[ignore]
+    fn cuts_preview() {
+        use crate::template::Polyline;
+        let Ok(path) = std::env::var("CUTS_PREVIEW") else {
+            return;
+        };
+        let mut l = crate::shape::new_layer(1, crate::shape::ShapeKind::Rectangle, [100.0, 80.0]);
+        crate::shape::set_geometry_size(&mut l, [180.0, 140.0]);
+        let doc = std::cell::RefCell::new(Document {
+            layers: vec![Node::Layer(Box::new(l))],
+            ..Default::default()
+        });
+        let square = |c: P2, r: f32| Polyline {
+            points: vec![
+                [c[0] - r, c[1] - r],
+                [c[0] + r, c[1] - r],
+                [c[0] + r, c[1] + r],
+                [c[0] - r, c[1] + r],
+            ],
+            closed: true,
+        };
+        let element = |kind, poly| PlacedElement {
+            kind,
+            polylines: vec![poly],
+            anchors: Vec::new(),
+        };
+        let elements = vec![
+            element(ElementKind::Outline, square([100.0, 80.0], 50.0)),
+            element(ElementKind::Buttons, square([100.0, 80.0], 15.0)),
+        ];
+        let state = std::cell::RefCell::new(CanvasState::default());
+        // Each theme is drawn with a context of its own: textures are made again.
+        let last: std::cell::RefCell<Option<egui::Context>> = Default::default();
+        crate::preview::render(&path, vec2(500.0, 400.0), |ui| {
+            let mut doc = doc.borrow_mut();
+            if last.borrow().as_ref() != Some(ui.ctx()) {
+                doc.for_each_layer_mut(|l| l.pixmap = None);
+                *state.borrow_mut() = CanvasState::default();
+                *last.borrow_mut() = Some(ui.ctx().clone());
+            }
+            crate::shape::sync(ui.ctx(), &mut doc, true);
+            let mut sel = None;
+            show(ui, &mut doc, &elements, &mut sel, &mut state.borrow_mut());
+        });
     }
 
     /// A selected locked layer, with its padlock badge, to look at it:
@@ -2241,6 +3333,19 @@ mod tests {
         assert!(close(pts[0], [100.0, 100.0]));
         assert!(close(pts[1], [150.5, 60.5]), "snapped: {:?}", pts[1]);
 
+        // A polygon canvas from the Canvas menu: drawn the same, to paint in.
+        let mut d = Drawing::new(ShapeKind::Polygon);
+        d.canvas = true;
+        state.drawing = Some(d);
+        for p in [[20.0, 20.0], [60.0, 20.0], [40.0, 50.0], [20.1, 20.1]] {
+            frame(&mut doc, &mut state, &mut selected, click(p));
+        }
+        let l = doc.layer(selected.unwrap()).unwrap();
+        let s = l.shape.as_ref().unwrap();
+        assert_eq!((s.kind, l.name.as_str()), (ShapeKind::Polygon, "Canvas"));
+        assert!(!s.fill && !s.stroke, "neither background nor border yet");
+        assert!(can_paint(&doc, selected));
+
         // Enter finishes an open polyline.
         state.drawing = Some(Drawing::new(ShapeKind::Polyline));
         for p in [[50.0, 50.0], [60.0, 70.0], [70.0, 50.0]] {
@@ -2274,7 +3379,7 @@ mod tests {
         assert!(state.drawing.is_none());
         let l = doc.layer(selected.unwrap()).unwrap();
         assert_eq!(shape::page_points(l).len(), 2);
-        assert_eq!(doc.leaves().len(), 3);
+        assert_eq!(doc.leaves().len(), 4);
     }
 
     /// Runs one canvas frame with these events, in the tests that need helpers.
@@ -2759,6 +3864,160 @@ mod tests {
                 mods.command
             );
         }
+    }
+
+    #[test]
+    fn ctrl_alt_on_a_handle_resizes_a_shape_without_stretching_its_paint() {
+        use crate::shape::ShapeKind;
+        let close = |a: P2, b: P2| (a[0] - b[0]).abs() < 0.05 && (a[1] - b[1]).abs() < 0.05;
+        let ctx = egui::Context::default();
+        let mut doc = Document::default();
+        let mut l =
+            crate::shape::new_canvas_layer(1, ShapeKind::Rectangle, [50.0, 75.0], [150.0, 125.0]);
+        let line = [[60.0, 100.0, 1.0], [90.0, 100.0, 1.0]];
+        let pencil = crate::paint::Tool::Pencil;
+        assert!(crate::shape::add_stroke(
+            &mut l,
+            &line,
+            &crate::paint::Pen::new(pencil, 2.0, [0; 4])
+        ));
+        doc.layers.push(Node::Layer(Box::new(l)));
+        crate::shape::sync(&ctx, &mut doc, true);
+        let ends = |doc: &Document| -> Vec<P2> {
+            let l = doc.layer(1).unwrap();
+            l.shape.as_ref().unwrap().strokes[0]
+                .points
+                .iter()
+                .map(|p| crate::shape::to_page(l, [p[0], p[1]]).unwrap())
+                .collect()
+        };
+        let before = ends(&doc);
+        let ctrl_alt = egui::Modifiers::COMMAND | egui::Modifiers::ALT;
+
+        // The right edge's handle dragged out with Ctrl+Alt: wider, the paint in place.
+        canvas_drag_in(
+            &mut doc,
+            [150.0, 100.0],
+            [200.0, 100.0],
+            ctrl_alt,
+            false,
+            &[],
+        );
+        crate::shape::sync(&ctx, &mut doc, true);
+        let size = |doc: &Document| doc.layer(1).unwrap().shape.as_ref().unwrap().size;
+        assert!(close(size(&doc), [150.0, 50.0]), "{:?}", size(&doc));
+        for (a, b) in before.iter().zip(&ends(&doc)) {
+            assert!(close(*a, *b), "{before:?} {:?}", ends(&doc));
+        }
+        // Only for that drag: the next one stretches it, the shape's setting.
+        let shape = doc.layer(1).unwrap().shape.as_ref().unwrap();
+        assert!(shape.stretch_paint);
+        canvas_drag_in(
+            &mut doc,
+            [200.0, 100.0],
+            [350.0, 100.0],
+            egui::Modifiers::NONE,
+            false,
+            &[],
+        );
+        crate::shape::sync(&ctx, &mut doc, true);
+        let after = ends(&doc);
+        assert!(close(size(&doc), [300.0, 50.0]), "{:?}", size(&doc));
+        let len = |e: &[P2]| e[e.len() - 1][0] - e[0][0];
+        assert!((len(&after) - 2.0 * len(&before)).abs() < 0.1, "{after:?}");
+    }
+
+    #[test]
+    fn the_paint_cursor_leaves_the_tool_bar_alone() {
+        let ctx = egui::Context::default();
+        let mut state = CanvasState::default();
+        state.brushes.tool = Some(crate::paint::Tool::Brush);
+        let mut doc = Document {
+            layers: vec![Node::Layer(Box::new(crate::shape::new_layer(
+                1,
+                crate::shape::ShapeKind::Rectangle,
+                [100.0, 100.0],
+            )))],
+            ..Default::default()
+        };
+        let mut selected = Some(1);
+        let mut frame = |state: &mut CanvasState, time: f64, at: Pos2| {
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 800.0))),
+                time: Some(time),
+                events: vec![Event::PointerMoved(at)],
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                crate::shape::sync(ui.ctx(), &mut doc, true);
+                show(ui, &mut doc, &[], &mut selected, state);
+            });
+            out.textures_delta.clear();
+            out.platform_output.cursor_icon
+        };
+        // The tool bar needs a few frames to size and show itself.
+        for k in 0..4 {
+            frame(&mut state, k as f64 * 0.02, pos2(600.0, 500.0));
+        }
+        assert_eq!(
+            frame(&mut state, 0.1, pos2(600.0, 500.0)),
+            CursorIcon::Crosshair
+        );
+        // Over its pencil, at the canvas' top left.
+        assert_ne!(
+            frame(&mut state, 0.2, pos2(48.0, 20.0)),
+            CursorIcon::Crosshair
+        );
+    }
+
+    #[test]
+    fn canvas_cursors_stay_on_the_canvas() {
+        let ctx = egui::Context::default();
+        let mut state = CanvasState::default();
+        let mut doc = Document::default();
+        let mut selected = None;
+        let mut text = String::from("text");
+        let mut frame = |state: &mut CanvasState, time: f64, events: Vec<Event>| {
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 800.0))),
+                time: Some(time),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                // A panel with a text field at the left, drawn first as in the app.
+                egui::Panel::left("side").exact_size(200.0).show(ui, |ui| {
+                    ui.add_sized(vec2(180.0, 40.0), egui::TextEdit::singleline(&mut text))
+                });
+                egui::CentralPanel::default().show(ui, |ui| {
+                    show(ui, &mut doc, &[], &mut selected, state);
+                });
+            });
+            out.textures_delta.clear();
+            out.platform_output.cursor_icon
+        };
+        let moved = |p| vec![Event::PointerMoved(p)];
+        let button = |p, pressed| Event::PointerButton {
+            pos: p,
+            button: PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        let canvas = pos2(600.0, 400.0);
+        let field = pos2(60.0, 25.0);
+        for k in 0..3 {
+            frame(&mut state, k as f64 * 0.02, moved(canvas));
+        }
+        // A drag on the empty canvas pans: a closed hand, while on the canvas.
+        frame(&mut state, 0.1, vec![button(canvas, true)]);
+        frame(&mut state, 0.15, moved(canvas + vec2(15.0, 0.0)));
+        let pan = frame(&mut state, 0.2, moved(canvas + vec2(30.0, 0.0)));
+        assert_eq!(pan, CursorIcon::Grabbing);
+        // Carried over the text field: not the canvas' hand any more.
+        assert_eq!(frame(&mut state, 0.3, moved(field)), CursorIcon::Default);
+        // Once let go: the text field's own.
+        frame(&mut state, 0.4, vec![button(field, false)]);
+        assert_eq!(frame(&mut state, 0.5, moved(field)), CursorIcon::Text);
     }
 
     #[test]

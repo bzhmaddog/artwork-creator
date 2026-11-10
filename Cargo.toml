@@ -1,6 +1,6 @@
 [package]
 name = "artwork-creator"
-version = "0.8.0"
+version = "0.9.0"
 edition = "2024"
 description = "Design printable artwork for arcade controllers on DXF templates, with print-ready PNG/PDF export"
 license-file = "LICENSE"

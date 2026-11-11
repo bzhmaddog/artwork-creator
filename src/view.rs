@@ -13,8 +13,9 @@ use crate::canvas_points;
 pub use crate::canvas_points::{Drawing, PointEdit};
 use crate::canvas_text;
 use crate::document::{
-    Affine, Document, Homography, Layer, Node, P2, Transform, UNIT_CORNERS, is_convex,
+    Affine, Document, Guide, Homography, Layer, Node, P2, Transform, UNIT_CORNERS, is_convex,
 };
+use crate::i18n::tr;
 use crate::layers_ui;
 use crate::render::{self, SceneNode};
 use crate::render::{Cuts, PlacedElement};
@@ -44,6 +45,14 @@ const SNAP_RADIUS: f32 = 10.0;
 const MIN_GUIDE_SIDE_MM: f32 = 2.0;
 /// Half the size of the cross marking an anchor, in screen points.
 const ANCHOR_MARK: f32 = 5.0;
+/// Width of the rulers along the canvas' top and left edges, in screen points.
+const RULER: f32 = 20.0;
+/// Shortest distance between two numbered marks on a ruler, in screen points.
+const RULER_LABEL_SPACING: f32 = 50.0;
+/// How close (screen points) the pointer must come to a guide to grab it.
+const GUIDE_GRAB: f32 = 4.0;
+/// Color of the guides: cyan, apart from the template element colors and the accent.
+const GUIDE_COLOR: Color32 = Color32::from_rgb(0, 180, 216);
 
 /// Maps page mm to the screen: zoom and pan.
 #[derive(Clone, Copy, Debug)]
@@ -184,8 +193,34 @@ pub struct CanvasState {
     /// The guides the dragged layer snapped to this frame: a vertical line's x and a
     /// horizontal line's y, in page mm, to show them.
     snapped_guides: [Option<f32>; 2],
-    /// Where the canvas is on screen.
+    /// Show rulers along the canvas' top and left edges; guides are dragged out of them.
+    pub show_rulers: bool,
+    /// Show the project's guides. Hidden guides are neither snapped to nor moved.
+    pub show_guides: bool,
+    /// Edges and centers of layers snap to the guides while moved or resized, and a
+    /// dragged guide snaps to the layers, the page and the outline. Holding Alt turns it
+    /// off for the drag.
+    pub snap_to_guides: bool,
+    /// The guides can't be moved, deleted or edited on the canvas.
+    pub lock_guides: bool,
+    /// The guide being dragged: its index in `Document::guides`.
+    guide_drag: Option<usize>,
+    /// The guide under the pointer, to highlight it.
+    guide_hover: Option<usize>,
+    /// The guide whose position is being typed, after a double click on it.
+    pub guide_edit: Option<GuideEdit>,
+    /// Another version of the template, shown left of a divider to compare it with the
+    /// project's (right of it); set by the app.
+    pub compare: Option<Compare>,
+    /// Where the divider stands, as a fraction of the canvas' width.
+    compare_split: f32,
+    /// The other version's cut preview and safe-area guide, kept apart from the project's.
+    compare_cut_preview: Option<CutPreview>,
+    compare_safe_area: Option<(u64, Vec<Vec<P2>>)>,
+    /// Where the canvas is on screen, rulers left out.
     pub(crate) rect: Rect,
+    /// Where the canvas is on screen, rulers included.
+    full_rect: Rect,
     drag: Option<Drag>,
     /// A left drag that started on empty canvas pans the view.
     panning: bool,
@@ -241,7 +276,19 @@ impl Default for CanvasState {
             snapped: None,
             snap_to_edges: true,
             snapped_guides: [None; 2],
+            show_rulers: true,
+            show_guides: true,
+            snap_to_guides: true,
+            lock_guides: false,
+            guide_drag: None,
+            guide_hover: None,
+            guide_edit: None,
+            compare: None,
+            compare_split: 0.5,
+            compare_cut_preview: None,
+            compare_safe_area: None,
             rect: Rect::NOTHING,
+            full_rect: Rect::NOTHING,
             drag: None,
             panning: false,
             typing: None,
@@ -258,27 +305,52 @@ impl Default for CanvasState {
     }
 }
 
-/// The Page panel's display settings, kept with the app's preferences (not the
-/// project): how the canvas previews the cuts, the bleed and the safe area.
+/// Another version of the template, compared with the project's on the canvas.
+pub struct Compare {
+    /// Its elements, placed on the page.
+    pub elements: Vec<PlacedElement>,
+    /// What each side shows, written at the top of the canvas: left, then right.
+    pub labels: [String; 2],
+}
+
+/// The guide whose position is being typed: its index in `Document::guides`, and the
+/// value typed so far, in mm.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GuideEdit {
+    pub index: usize,
+    pub at: f32,
+    /// Give the field the keyboard focus on the next frame.
+    focus: bool,
+}
+
+/// The View panel's display settings, kept with the app's preferences (not the
+/// project): whether the canvas shows the template's lines, how it previews the cuts,
+/// the bleed and the safe area, and whether it shows the rulers and the guides.
 #[derive(serde::Serialize, serde::Deserialize)]
 #[serde(default)]
 struct Previews {
+    template: bool,
     cuts: bool,
     cut_opacity: f32,
     bleed: bool,
     safe_area: bool,
     safe_margin_mm: f32,
+    rulers: bool,
+    guides: bool,
 }
 
 impl Default for Previews {
     fn default() -> Self {
         let s = CanvasState::default();
         Self {
+            template: s.show_template,
             cuts: s.preview_cuts,
             cut_opacity: s.cut_opacity,
             bleed: s.preview_bleed,
             safe_area: s.preview_safe_area,
             safe_margin_mm: s.safe_margin_mm,
+            rulers: s.show_rulers,
+            guides: s.show_guides,
         }
     }
 }
@@ -293,11 +365,14 @@ impl CanvasState {
             .and_then(|s| eframe::get_value(s, PREVIEWS_KEY))
             .unwrap_or_default();
         Self {
+            show_template: p.template,
             preview_cuts: p.cuts,
             cut_opacity: p.cut_opacity.clamp(0.0, 1.0),
             preview_bleed: p.bleed,
             preview_safe_area: p.safe_area,
             safe_margin_mm: p.safe_margin_mm.clamp(0.0, crate::print::MAX_MARGIN_MM),
+            show_rulers: p.rulers,
+            show_guides: p.guides,
             ..Default::default()
         }
     }
@@ -305,11 +380,14 @@ impl CanvasState {
     /// Keeps its display settings for the next session.
     pub fn save(&self, storage: &mut dyn eframe::Storage) {
         let p = Previews {
+            template: self.show_template,
             cuts: self.preview_cuts,
             cut_opacity: self.cut_opacity,
             bleed: self.preview_bleed,
             safe_area: self.preview_safe_area,
             safe_margin_mm: self.safe_margin_mm,
+            rulers: self.show_rulers,
+            guides: self.show_guides,
         };
         eframe::set_value(storage, PREVIEWS_KEY, &p);
     }
@@ -551,7 +629,13 @@ pub fn show(
     selected: &mut Option<u64>,
     state: &mut CanvasState,
 ) -> bool {
-    let rect = ui.available_rect_before_wrap();
+    // The rulers take a band along the top and left edges.
+    let full = ui.available_rect_before_wrap();
+    let rect = if state.show_rulers {
+        Rect::from_min_max(full.min + vec2(RULER, RULER), full.max)
+    } else {
+        full
+    };
     let response = ui.allocate_rect(rect, Sense::click_and_drag());
     let mut changed = false;
     // The cursor as the panels and windows drawn so far left it: the canvas' own only
@@ -562,10 +646,34 @@ pub fn show(
     if state.fit_pending || !state.rect.is_positive() {
         state.camera.fit(rect, doc.page_mm());
         state.fit_pending = false;
+    } else if full == state.full_rect && rect != state.rect {
+        // The rulers were shown or hidden: the page stays where it is on screen.
+        state.camera.pan -= rect.min - state.rect.min;
     } else if state.rect.size() != rect.size() {
         state.camera.pan += (rect.size() - state.rect.size()) / 2.0;
     }
     state.rect = rect;
+    state.full_rect = full;
+
+    // The comparison's divider, dragged across the canvas.
+    let mut on_divider = false;
+    if state.compare.is_some() {
+        let x = rect.left() + rect.width() * state.compare_split;
+        let zone = Rect::from_x_y_ranges(x - DIVIDER_GRAB..=x + DIVIDER_GRAB, rect.y_range());
+        let r = ui.interact(zone, ui.scope_id().with("compare_divider"), Sense::drag());
+        if r.dragged()
+            && let Some(p) = r.interact_pointer_pos()
+        {
+            state.compare_split = ((p.x - rect.left()) / rect.width()).clamp(0.02, 0.98);
+        }
+        if r.hovered() || r.dragged() {
+            ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+            on_divider = true;
+        }
+    } else {
+        state.compare_cut_preview = None;
+        state.compare_safe_area = None;
+    }
 
     // Only when no window, dialog or popup covers the canvas under the pointer.
     let hover = ui
@@ -636,11 +744,50 @@ pub fn show(
     let snap_reach =
         (state.snap_to_anchors && !alt && !anchors.is_empty()).then_some(SNAP_RADIUS / cam.zoom);
     let mut snapped = None;
-    // The page's and the outline's guides, and their reach in mm when snapping to them
-    // is on.
-    let guides = guides(elements, state.cuts.bleed_mm, doc.page_mm());
-    let guide_reach = (state.snap_to_edges && !alt).then_some(SNAP_RADIUS / cam.zoom);
+    // The lines layers snap to: the page's and the outline's, and the guides, each when
+    // snapping to them is on; and their reach in mm.
+    let edges = guides(elements, state.cuts.bleed_mm, doc.page_mm());
+    let mut lines = if state.snap_to_edges {
+        edges.clone()
+    } else {
+        Guides::default()
+    };
+    if state.snap_to_guides && state.show_guides {
+        for g in &doc.guides {
+            let axis = if g.vertical {
+                &mut lines.x
+            } else {
+                &mut lines.y
+            };
+            axis.push(g.at);
+        }
+    }
+    let guides = lines.sorted();
+    let guide_reach =
+        (!alt && !(guides.x.is_empty() && guides.y.is_empty())).then_some(SNAP_RADIUS / cam.zoom);
     let mut snapped_guides = [None; 2];
+
+    // A drag out of a ruler adds a guide: a horizontal one from the top ruler, a vertical
+    // one from the left ruler. Hidden guides are shown again.
+    if state.show_rulers && state.guide_drag.is_none() {
+        let (top, left) = ruler_bands(full, rect);
+        for (band, vertical) in [(top, false), (left, true)] {
+            let r = ui.interact(band, ui.scope_id().with(("ruler", vertical)), Sense::drag());
+            if r.drag_started_by(PointerButton::Primary)
+                && let Some(p) = r.interact_pointer_pos()
+            {
+                let at = cam.to_mm(rect, p)[if vertical { 0 } else { 1 }];
+                doc.guides.push(Guide { vertical, at });
+                state.guide_drag = Some(doc.guides.len() - 1);
+                state.show_guides = true;
+                changed = true;
+            }
+        }
+    }
+    // The guide under a screen point, when guides can be grabbed.
+    let grab_guides = state.show_guides && !state.lock_guides;
+    let guide_under =
+        |doc: &Document, p: Pos2| grab_guides.then(|| guide_at(doc, cam, rect, p)).flatten();
 
     // Which handle (if any) of the selected layer is under a screen point. A shape whose
     // points are being edited shows those instead.
@@ -748,7 +895,14 @@ pub fn show(
             let origin = ui
                 .input(|i| i.pointer.press_origin())
                 .or(response.interact_pointer_pos());
-            if let Some(origin) = origin {
+            // A guide is grabbed unless a handle of the selected layer is there.
+            let on_guide = origin
+                .filter(|&o| handle_at(doc, *selected, o).is_none())
+                .and_then(|o| guide_under(doc, o));
+            if let Some(i) = on_guide {
+                state.guide_drag = Some(i);
+                state.panning = false;
+            } else if let Some(origin) = origin {
                 let m = cam.to_mm(rect, origin);
                 let (ids, kind) = match handle_at(doc, *selected, origin) {
                     Some((id, kind)) => (vec![id], kind),
@@ -800,12 +954,28 @@ pub fn show(
         } else if response.clicked_by(PointerButton::Primary)
             && let Some(p) = response.interact_pointer_pos()
             && handle_at(doc, *selected, p).is_none()
+            && guide_under(doc, p).is_none()
         {
             *selected = layer_to_select(doc, cam.to_mm(rect, p));
+        }
+        // A double click on a guide asks for its position.
+        let guide_clicked = response
+            .double_clicked_by(PointerButton::Primary)
+            .then(|| response.interact_pointer_pos())
+            .flatten()
+            .filter(|&p| handle_at(doc, *selected, p).is_none())
+            .and_then(|p| guide_under(doc, p));
+        if let Some(i) = guide_clicked {
+            state.guide_edit = Some(GuideEdit {
+                index: i,
+                at: doc.guides[i].at,
+                focus: true,
+            });
         }
         // A double click on a text layer starts typing in it, where it was clicked. Text
         // on a path is typed in Properties.
         if response.double_clicked_by(PointerButton::Primary)
+            && guide_clicked.is_none()
             && let Some(p) = response.interact_pointer_pos()
             && let Some(layer) = selected.and_then(|id| doc.layer(id))
             && crate::text::is_straight(layer)
@@ -816,6 +986,7 @@ pub fn show(
         }
         // On a line, polyline or polygon, it shows its points to edit them.
         if response.double_clicked_by(PointerButton::Primary)
+            && guide_clicked.is_none()
             && let Some(id) = *selected
             && state.points.is_none()
             && canvas_points::can_edit(doc, id)
@@ -824,6 +995,48 @@ pub fn show(
         }
     }
     changed |= canvas_text::field(ui, doc, &mut state.typing, cam, rect);
+
+    // A guide being dragged follows the pointer; let go off the canvas, it is deleted.
+    if let Some(i) = state.guide_drag {
+        let pointer = ui.input(|i| i.pointer.latest_pos());
+        if i >= doc.guides.len() {
+            state.guide_drag = None;
+        } else if ui.input(|i| i.pointer.primary_down()) {
+            let a = if doc.guides[i].vertical { 0 } else { 1 };
+            if let Some(p) = pointer {
+                let mut at = cam.to_mm(rect, p)[a];
+                // On the canvas, it snaps to the layers, the page and the outline.
+                let reach = (state.snap_to_guides && !alt && rect.contains(p))
+                    .then_some(SNAP_RADIUS / cam.zoom);
+                let target =
+                    reach.and_then(|r| snap_axis(&guide_targets(doc, &edges, a), &[at], r));
+                match target {
+                    Some((_, t)) => {
+                        at = t;
+                        snapped_guides[a] = Some(t);
+                    }
+                    None => at = (at * 10.0).round() / 10.0,
+                }
+                if doc.guides[i].at != at {
+                    doc.guides[i].at = at;
+                    changed = true;
+                }
+            }
+        } else {
+            if pointer.is_none_or(|p| !rect.contains(p)) {
+                doc.guides.remove(i);
+                changed = true;
+            }
+            state.guide_drag = None;
+        }
+    }
+    // The guide under the pointer, or the one dragged, is highlighted.
+    state.guide_hover = state.guide_drag.or_else(|| {
+        hover
+            .filter(|_| state.drag.is_none() && paint_tool.is_none() && state.drawing.is_none())
+            .filter(|&p| !space && !points.over_handle && handle_at(doc, *selected, p).is_none())
+            .and_then(|p| guide_under(doc, p))
+    });
 
     if let Some(drag) = &state.drag {
         if response.dragged_by(PointerButton::Primary)
@@ -1053,6 +1266,7 @@ pub fn show(
         && !points.took
         && !points.over_handle
     {
+        let hovered_guide = state.guide_hover.and_then(|i| doc.guides.get(i));
         match handle_at(doc, *selected, p) {
             Some((_, DragKind::Rotate)) => ui.ctx().set_cursor_icon(CursorIcon::Alias),
             Some((id, DragKind::Stretch(edge))) => {
@@ -1068,6 +1282,9 @@ pub fn show(
                 });
             }
             Some(_) => ui.ctx().set_cursor_icon(CursorIcon::Crosshair),
+            None if let Some(g) = hovered_guide => {
+                ui.ctx().set_cursor_icon(guide_cursor(g.vertical))
+            }
             None if topmost_hit(doc, cam.to_mm(rect, p)).is_some() => {
                 ui.ctx().set_cursor_icon(CursorIcon::Move)
             }
@@ -1094,7 +1311,353 @@ pub fn show(
     if !ui.rect_contains_pointer(rect) {
         ui.ctx().output_mut(|o| o.cursor_icon = cursor_before);
     }
+    if let Some(g) = state.guide_drag.and_then(|i| doc.guides.get(i)) {
+        ui.ctx().set_cursor_icon(guide_cursor(g.vertical));
+    }
+    if on_divider {
+        ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
+    }
+    if state.show_rulers {
+        paint_rulers(ui, state, doc.page_mm(), full, rect);
+    }
+    changed |= guide_dialog(ui.ctx(), doc, state);
     changed
+}
+
+/// The template's lines and anchors, and the safe-area guide, as the canvas shows them.
+fn paint_template(
+    painter: &egui::Painter,
+    elements: &[PlacedElement],
+    state: &mut CanvasState,
+    rect: Rect,
+) {
+    let cam = state.camera;
+    for e in elements.iter().filter(|_| state.show_template) {
+        let k = e.kind.index();
+        if !state.element_show[k] {
+            continue;
+        }
+        let stroke = Stroke::new(1.2, state.element_color[k]);
+        for poly in &e.polylines {
+            let pts: Vec<Pos2> = poly
+                .points
+                .iter()
+                .map(|&p| cam.to_screen(rect, p))
+                .collect();
+            painter.add(if poly.closed {
+                Shape::closed_line(pts, stroke)
+            } else {
+                Shape::line(pts, stroke)
+            });
+        }
+        // Anchors: small crosses.
+        for &a in &e.anchors {
+            let p = cam.to_screen(rect, a);
+            let (h, v) = (vec2(ANCHOR_MARK, 0.0), vec2(0.0, ANCHOR_MARK));
+            painter.line_segment([p - h, p + h], stroke);
+            painter.line_segment([p - v, p + v], stroke);
+        }
+    }
+    if state.show_template && state.preview_safe_area {
+        paint_safe_area(painter, elements, state, rect);
+    }
+}
+
+/// Puts the compared template's cut preview and safe-area guide in place of the
+/// project's, or back.
+fn swap_compare_caches(state: &mut CanvasState) {
+    std::mem::swap(&mut state.cut_preview, &mut state.compare_cut_preview);
+    std::mem::swap(&mut state.safe_area, &mut state.compare_safe_area);
+}
+
+/// Half the width of the zone where the comparison's divider is grabbed, in screen
+/// points.
+const DIVIDER_GRAB: f32 = 6.0;
+
+/// The divider between the two versions of the template at `x`, a round handle in its
+/// middle, and what each side shows at the top.
+fn paint_divider(ui: &egui::Ui, painter: &egui::Painter, rect: Rect, x: f32, labels: &[String; 2]) {
+    let visuals = ui.visuals();
+    let line = Stroke::new(2.0, Color32::WHITE);
+    let shadow = Stroke::new(4.0, Color32::from_black_alpha(90));
+    let ends = [pos2(x, rect.top()), pos2(x, rect.bottom())];
+    painter.line_segment(ends, shadow);
+    painter.line_segment(ends, line);
+    let c = pos2(x, rect.center().y);
+    painter.circle(c, 12.0, Color32::WHITE, shadow);
+    // Arrows both ways on the handle.
+    let ink = Color32::from_gray(60);
+    for dir in [-1.0, 1.0] {
+        let tip = c + vec2(dir * 8.0, 0.0);
+        painter.add(Shape::convex_polygon(
+            vec![tip, tip - vec2(dir * 5.0, 4.0), tip - vec2(dir * 5.0, -4.0)],
+            ink,
+            Stroke::NONE,
+        ));
+    }
+    let font = egui::FontId::proportional(12.0);
+    for (k, text) in labels.iter().enumerate() {
+        let galley = painter.layout_no_wrap(text.clone(), font.clone(), visuals.text_color());
+        let size = galley.size() + vec2(12.0, 6.0);
+        let min = if k == 0 {
+            pos2(x - 10.0 - size.x, rect.top() + 10.0)
+        } else {
+            pos2(x + 10.0, rect.top() + 10.0)
+        };
+        let chip = Rect::from_min_size(min, size);
+        painter.rect_filled(chip, 4.0, visuals.extreme_bg_color.gamma_multiply(0.9));
+        painter.galley(chip.min + vec2(6.0, 3.0), galley, visuals.text_color());
+    }
+}
+
+/// The rulers' bands: along the top of the canvas, then along its left edge, leaving
+/// the corner where they meet out.
+fn ruler_bands(full: Rect, rect: Rect) -> (Rect, Rect) {
+    (
+        Rect::from_min_max(
+            pos2(rect.left(), full.top()),
+            pos2(full.right(), rect.top()),
+        ),
+        Rect::from_min_max(
+            pos2(full.left(), rect.top()),
+            pos2(rect.left(), full.bottom()),
+        ),
+    )
+}
+
+/// Millimeters between two numbered marks on a ruler at `zoom`, so that they are at least
+/// `RULER_LABEL_SPACING` apart on screen, and how many parts the marks between them cut
+/// that into.
+fn ruler_step(zoom: f32) -> (f32, i64) {
+    let mut base = 1.0;
+    loop {
+        for (m, parts) in [(1.0, 10), (2.0, 4), (5.0, 5)] {
+            let step = base * m;
+            if step * zoom >= RULER_LABEL_SPACING || step >= 10_000.0 {
+                return (step, parts);
+            }
+        }
+        base *= 10.0;
+    }
+}
+
+/// The rulers along the canvas' top and left edges, in mm from the page's top-left
+/// corner, the page's extent lighter and the pointer's position marked.
+fn paint_rulers(ui: &egui::Ui, state: &CanvasState, page: P2, full: Rect, rect: Rect) {
+    let painter = ui.painter_at(full);
+    let visuals = ui.visuals();
+    let ink = visuals.weak_text_color();
+    let text = visuals.text_color();
+    let border = visuals.widgets.noninteractive.bg_stroke;
+    let cam = state.camera;
+    let (top, left) = ruler_bands(full, rect);
+    for band in [top, left, Rect::from_min_max(full.min, rect.min)] {
+        painter.rect_filled(band, 0.0, visuals.panel_fill);
+    }
+    let (p0, p1) = (cam.to_screen(rect, [0.0, 0.0]), cam.to_screen(rect, page));
+    let (step, parts) = ruler_step(cam.zoom);
+    let minor = step / parts as f32;
+    let font = egui::FontId::proportional(10.0);
+    for (axis, band) in [(0, top), (1, left)] {
+        let clip = painter.with_clip_rect(band);
+        let along = |a: f32, b: f32| {
+            if axis == 0 {
+                Rect::from_min_max(pos2(a, band.top()), pos2(b, band.bottom()))
+            } else {
+                Rect::from_min_max(pos2(band.left(), a), pos2(band.right(), b))
+            }
+        };
+        clip.rect_filled(along(p0[axis], p1[axis]), 0.0, visuals.extreme_bg_color);
+        let screen = |mm: f32| rect.min[axis] + cam.pan[axis] + mm * cam.zoom;
+        let to_mm = |s: f32| (s - rect.min[axis] - cam.pan[axis]) / cam.zoom;
+        let (from, to) = (band.min[axis], band.max[axis]);
+        let (k0, k1) = (
+            (to_mm(from) / minor).floor() as i64,
+            (to_mm(to) / minor).ceil() as i64,
+        );
+        for k in k0..=k1 {
+            let s = screen(k as f32 * minor);
+            let len = if k % parts == 0 {
+                RULER * 0.6
+            } else if parts % 2 == 0 && k % (parts / 2) == 0 {
+                RULER * 0.4
+            } else {
+                RULER * 0.25
+            };
+            // Marks stand on the canvas' edge.
+            let mark = if axis == 0 {
+                [pos2(s, band.bottom()), pos2(s, band.bottom() - len)]
+            } else {
+                [pos2(band.right(), s), pos2(band.right() - len, s)]
+            };
+            clip.line_segment(mark, Stroke::new(1.0, ink));
+            if k % parts == 0 {
+                let label = format!("{}", ((k / parts) as f32 * step).round() as i64);
+                if axis == 0 {
+                    clip.text(
+                        pos2(s + 3.0, band.top() + 1.0),
+                        egui::Align2::LEFT_TOP,
+                        label,
+                        font.clone(),
+                        text,
+                    );
+                } else {
+                    // Read from the bottom up, just above the mark.
+                    let galley = clip.layout_no_wrap(label, font.clone(), text);
+                    let at = pos2(band.left() + 1.0, s - 3.0);
+                    clip.add(
+                        egui::epaint::TextShape::new(at, galley, text)
+                            .with_angle(-std::f32::consts::FRAC_PI_2),
+                    );
+                }
+            }
+        }
+        if let Some(c) = state.cursor_mm {
+            let s = screen(c[axis]);
+            let line = if axis == 0 {
+                [pos2(s, band.top()), pos2(s, band.bottom())]
+            } else {
+                [pos2(band.left(), s), pos2(band.right(), s)]
+            };
+            clip.line_segment(line, Stroke::new(1.0, ACCENT));
+        }
+    }
+    painter.line_segment(
+        [
+            pos2(full.left(), rect.top()),
+            pos2(full.right(), rect.top()),
+        ],
+        border,
+    );
+    painter.line_segment(
+        [
+            pos2(rect.left(), full.top()),
+            pos2(rect.left(), full.bottom()),
+        ],
+        border,
+    );
+}
+
+/// The guide drawn within `GUIDE_GRAB` of screen point `p` (the nearest one), if `p` is
+/// on the canvas.
+fn guide_at(doc: &Document, cam: Camera, rect: Rect, p: Pos2) -> Option<usize> {
+    if !rect.contains(p) {
+        return None;
+    }
+    let m = cam.to_mm(rect, p);
+    doc.guides
+        .iter()
+        .enumerate()
+        .map(|(i, g)| {
+            (
+                i,
+                (m[if g.vertical { 0 } else { 1 }] - g.at).abs() * cam.zoom,
+            )
+        })
+        .filter(|&(_, d)| d <= GUIDE_GRAB)
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|(i, _)| i)
+}
+
+/// The cursor over a guide: it moves across its length.
+fn guide_cursor(vertical: bool) -> CursorIcon {
+    if vertical {
+        CursorIcon::ResizeHorizontal
+    } else {
+        CursorIcon::ResizeVertical
+    }
+}
+
+/// A guide's line across the canvas, on screen.
+fn guide_line(cam: Camera, rect: Rect, g: &Guide) -> [Pos2; 2] {
+    if g.vertical {
+        let x = cam.to_screen(rect, [g.at, 0.0]).x;
+        [pos2(x, rect.top()), pos2(x, rect.bottom())]
+    } else {
+        let y = cam.to_screen(rect, [0.0, g.at]).y;
+        [pos2(rect.left(), y), pos2(rect.right(), y)]
+    }
+}
+
+/// What a dragged guide snaps to along `axis` (0: x, 1: y): the page's and the outline's
+/// lines in `edges`, and the edges and middle of each visible layer.
+fn guide_targets(doc: &Document, edges: &Guides, axis: usize) -> Vec<f32> {
+    let mut targets = if axis == 0 {
+        edges.x.clone()
+    } else {
+        edges.y.clone()
+    };
+    for leaf in doc.leaves().into_iter().filter(|l| l.visible) {
+        if let Some((lo, hi)) = layers_ui::layers_bounds(doc, &[leaf.layer.id]) {
+            targets.extend([lo[axis], (lo[axis] + hi[axis]) / 2.0, hi[axis]]);
+        }
+    }
+    targets
+}
+
+/// The window where the position of the guide double-clicked on the canvas is typed, or
+/// the guide deleted. Returns true if it changed the guides.
+fn guide_dialog(ctx: &egui::Context, doc: &mut Document, state: &mut CanvasState) -> bool {
+    use crate::app::{at_left_edge, dialog, dialog_button_row};
+    let Some(mut edit) = state.guide_edit else {
+        return false;
+    };
+    let Some(&guide) = doc.guides.get(edit.index) else {
+        state.guide_edit = None;
+        return false;
+    };
+    let mut entered = false;
+    let response = dialog(ctx, "guide_position").show(ctx, |ui| {
+        ui.heading(if guide.vertical {
+            tr!("VERTICAL_GUIDE")
+        } else {
+            tr!("HORIZONTAL_GUIDE")
+        });
+        ui.add_space(4.0);
+        ui.horizontal(|ui| {
+            ui.label(if guide.vertical {
+                tr!("GUIDE_FROM_LEFT")
+            } else {
+                tr!("GUIDE_FROM_TOP")
+            });
+            let r = ui.add(
+                egui::DragValue::new(&mut edit.at)
+                    .speed(0.1)
+                    .max_decimals(2)
+                    .suffix(" mm"),
+            );
+            if std::mem::take(&mut edit.focus) {
+                r.request_focus();
+            }
+            entered = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+        });
+        ui.add_space(8.0);
+        dialog_button_row(ui, |ui| {
+            let ok = ui.button(tr!("OK")).clicked();
+            let cancel = ui.button(tr!("CANCEL")).clicked();
+            let delete = at_left_edge(ui, |ui| ui.button(tr!("DELETE_GUIDE")).clicked());
+            (ok, cancel, delete)
+        })
+    });
+    let (ok, cancel, delete) = response.inner;
+    if delete {
+        doc.guides.remove(edit.index);
+        state.guide_edit = None;
+        true
+    } else if ok || entered {
+        let changed = doc.guides[edit.index].at != edit.at;
+        doc.guides[edit.index].at = edit.at;
+        state.guide_edit = None;
+        changed
+    } else {
+        state.guide_edit = (!cancel && !response.should_close()).then_some(edit);
+        false
+    }
+}
+
+/// Removes all the guides. Returns true if there were any.
+pub fn clear_guides(doc: &mut Document) -> bool {
+    !std::mem::take(&mut doc.guides).is_empty()
 }
 
 /// Draws a textured quad with the given corners on screen.
@@ -1551,7 +2114,36 @@ fn paint(
     // Previews not drawn this frame are dropped with their textures.
     state.group_previews = painting.used;
 
-    paint_cuts(ui.ctx(), &painter, doc.page_mm(), elements, state, rect);
+    // While comparing, the project's template right of the divider, the other one left.
+    let split = state
+        .compare
+        .as_ref()
+        .map(|_| rect.left() + rect.width() * state.compare_split);
+    let right = split.map_or(rect, |x| Rect::from_min_max(pos2(x, rect.top()), rect.max));
+    let left = split.map(|x| Rect::from_min_max(rect.min, pos2(x, rect.bottom())));
+    let painter_right = painter.with_clip_rect(right);
+    paint_cuts(
+        ui.ctx(),
+        &painter_right,
+        doc.page_mm(),
+        elements,
+        state,
+        rect,
+    );
+    let compare = state.compare.take();
+    if let (Some(left), Some(other)) = (left, &compare) {
+        swap_compare_caches(state);
+        let painter_left = painter.with_clip_rect(left);
+        paint_cuts(
+            ui.ctx(),
+            &painter_left,
+            doc.page_mm(),
+            &other.elements,
+            state,
+            rect,
+        );
+        swap_compare_caches(state);
+    }
 
     // Darken whatever falls outside the page: it will not be printed.
     let dim = Color32::from_black_alpha(dim);
@@ -1572,34 +2164,25 @@ fn paint(
         StrokeKind::Outside,
     );
 
-    for e in elements.iter().filter(|_| state.show_template) {
-        let k = e.kind.index();
-        if !state.element_show[k] {
-            continue;
-        }
-        let stroke = Stroke::new(1.2, state.element_color[k]);
-        for poly in &e.polylines {
-            let pts: Vec<Pos2> = poly
-                .points
-                .iter()
-                .map(|&p| cam.to_screen(rect, p))
-                .collect();
-            painter.add(if poly.closed {
-                Shape::closed_line(pts, stroke)
-            } else {
-                Shape::line(pts, stroke)
-            });
-        }
-        // Anchors: small crosses.
-        for &a in &e.anchors {
-            let p = cam.to_screen(rect, a);
-            let (h, v) = (vec2(ANCHOR_MARK, 0.0), vec2(0.0, ANCHOR_MARK));
-            painter.line_segment([p - h, p + h], stroke);
-            painter.line_segment([p - v, p + v], stroke);
-        }
+    paint_template(&painter_right, elements, state, rect);
+    if let (Some(left), Some(other)) = (left, &compare) {
+        swap_compare_caches(state);
+        paint_template(&painter.with_clip_rect(left), &other.elements, state, rect);
+        swap_compare_caches(state);
     }
-    if state.show_template && state.preview_safe_area {
-        paint_safe_area(&painter, elements, state, rect);
+    if let (Some(x), Some(other)) = (split, &compare) {
+        paint_divider(ui, &painter, rect, x, &other.labels);
+    }
+    state.compare = compare;
+    if state.show_guides {
+        for (i, g) in doc.guides.iter().enumerate() {
+            let width = if state.guide_hover == Some(i) {
+                2.0
+            } else {
+                1.0
+            };
+            painter.line_segment(guide_line(cam, rect, g), Stroke::new(width, GUIDE_COLOR));
+        }
     }
     // The anchor the dragged image snapped to, shown even when anchors are hidden.
     if let Some(a) = state.snapped {
@@ -2343,11 +2926,15 @@ mod tests {
             preview_bleed: false,
             preview_safe_area: false,
             safe_margin_mm: 3.0,
+            show_template: false,
+            show_rulers: false,
+            show_guides: false,
             ..Default::default()
         };
         state.save(&mut storage);
         let back = CanvasState::load(Some(&storage));
         assert!(!back.preview_cuts && !back.preview_bleed && !back.preview_safe_area);
+        assert!(!back.show_template && !back.show_rulers && !back.show_guides);
         assert_eq!((back.cut_opacity, back.safe_margin_mm), (0.4, 3.0));
     }
 
@@ -2870,6 +3457,90 @@ mod tests {
         });
     }
 
+    /// Compares two outlines on the canvas, the divider in the middle, in both themes:
+    /// `COMPARE_PREVIEW=out.png cargo test compare_preview -- --ignored`.
+    #[test]
+    #[ignore]
+    fn compare_preview() {
+        let Ok(path) = std::env::var("COMPARE_PREVIEW") else {
+            return;
+        };
+        let doc = std::cell::RefCell::new(Document {
+            layers: vec![Node::Layer(Box::new(crate::shape::new_layer(
+                1,
+                crate::shape::ShapeKind::Ellipse,
+                [148.5, 105.0],
+            )))],
+            ..Default::default()
+        });
+        let state = std::cell::RefCell::new(CanvasState::default());
+        let last: std::cell::RefCell<Option<egui::Context>> = Default::default();
+        crate::preview::render(&path, vec2(760.0, 560.0), |ui| {
+            let mut doc = doc.borrow_mut();
+            let mut state = state.borrow_mut();
+            // Textures belong to their context: made again for each.
+            if last.borrow().as_ref() != Some(ui.ctx()) {
+                doc.for_each_layer_mut(|l| l.pixmap = None);
+                *state = CanvasState::default();
+                *last.borrow_mut() = Some(ui.ctx().clone());
+            }
+            crate::shape::sync(ui.ctx(), &mut doc, true);
+            state.compare = Some(Compare {
+                elements: outline([30.0, 30.0], [267.0, 180.0]),
+                labels: ["Installed (1.1)".into(), "Project (1.0)".into()],
+            });
+            let mut sel = None;
+            show(
+                ui,
+                &mut doc,
+                &outline([50.0, 40.0], [247.0, 170.0]),
+                &mut sel,
+                &mut state,
+            );
+        });
+    }
+
+    /// Draws the rulers and two guides, in both themes:
+    /// `RULERS_PREVIEW=out.png cargo test rulers_preview -- --ignored`.
+    #[test]
+    #[ignore]
+    fn rulers_preview() {
+        let Ok(path) = std::env::var("RULERS_PREVIEW") else {
+            return;
+        };
+        let mut doc = Document {
+            layers: vec![Node::Layer(Box::new(crate::shape::new_layer(
+                1,
+                crate::shape::ShapeKind::Rectangle,
+                [148.5, 105.0],
+            )))],
+            ..Default::default()
+        };
+        doc.guides = vec![
+            Guide {
+                vertical: true,
+                at: 60.0,
+            },
+            Guide {
+                vertical: false,
+                at: 150.0,
+            },
+        ];
+        let doc = std::cell::RefCell::new(doc);
+        let state = std::cell::RefCell::new(CanvasState::default());
+        let last: std::cell::RefCell<Option<egui::Context>> = Default::default();
+        crate::preview::render(&path, vec2(760.0, 560.0), |ui| {
+            let mut doc = doc.borrow_mut();
+            if last.borrow().as_ref() != Some(ui.ctx()) {
+                doc.for_each_layer_mut(|l| l.pixmap = None);
+                *last.borrow_mut() = Some(ui.ctx().clone());
+            }
+            crate::shape::sync(ui.ctx(), &mut doc, true);
+            let mut sel = None;
+            show(ui, &mut doc, &[], &mut sel, &mut state.borrow_mut());
+        });
+    }
+
     /// A rectangle under a square outline with a square button hole, the cut preview
     /// covering and hatching what is cut away, to look at it:
     /// `CUTS_PREVIEW=out.png cargo test cuts_preview -- --ignored`.
@@ -3069,6 +3740,192 @@ mod tests {
         Document {
             layers: vec![Node::Layer(Box::new(l))],
             ..Default::default()
+        }
+    }
+
+    /// The canvas run frame by frame on a 1000 x 800 window, with layer 1 selected.
+    struct Canvas {
+        ctx: egui::Context,
+        time: f64,
+        selected: Option<u64>,
+        state: CanvasState,
+    }
+
+    impl Canvas {
+        fn new(doc: &mut Document) -> Self {
+            let mut c = Self {
+                ctx: egui::Context::default(),
+                time: 0.0,
+                selected: Some(1),
+                state: CanvasState::default(),
+            };
+            c.frame(doc, Vec::new());
+            c
+        }
+
+        fn frame(&mut self, doc: &mut Document, events: Vec<Event>) {
+            self.time += 0.02;
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 800.0))),
+                time: Some(self.time),
+                events,
+                ..Default::default()
+            };
+            let (selected, state) = (&mut self.selected, &mut self.state);
+            let mut out = self.ctx.run_ui(input, |ui| {
+                show(ui, doc, &[], selected, state);
+            });
+            out.textures_delta.clear();
+        }
+
+        /// A page point on screen.
+        fn screen(&self, p: P2) -> Pos2 {
+            self.state.camera.to_screen(self.state.rect, p)
+        }
+
+        /// A point in the top ruler above page x, or in the left one beside page y.
+        fn on_ruler(&self, vertical: bool, at: f32) -> Pos2 {
+            let full = self.state.full_rect;
+            if vertical {
+                pos2(full.left() + RULER / 2.0, self.screen([0.0, at]).y)
+            } else {
+                pos2(self.screen([at, 0.0]).x, full.top() + RULER / 2.0)
+            }
+        }
+
+        fn button(pos: Pos2, pressed: bool) -> Event {
+            Event::PointerButton {
+                pos,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers: egui::Modifiers::NONE,
+            }
+        }
+
+        /// Presses at `from`, moves to `to` in a few steps and lets go there.
+        fn drag(&mut self, doc: &mut Document, from: Pos2, to: Pos2) {
+            self.frame(doc, vec![Event::PointerMoved(from)]);
+            self.frame(doc, vec![Self::button(from, true)]);
+            for k in 1..=4 {
+                let p = from + (to - from) * (k as f32 / 4.0);
+                self.frame(doc, vec![Event::PointerMoved(p)]);
+            }
+            self.frame(doc, vec![Self::button(to, false)]);
+            self.frame(doc, Vec::new());
+        }
+
+        fn double_click(&mut self, doc: &mut Document, at: Pos2) {
+            // Long after any earlier click, so it isn't taken for a triple click.
+            self.time += 1.0;
+            self.frame(doc, vec![Event::PointerMoved(at)]);
+            for _ in 0..2 {
+                self.frame(doc, vec![Self::button(at, true)]);
+                self.frame(doc, vec![Self::button(at, false)]);
+            }
+            self.frame(doc, Vec::new());
+        }
+    }
+
+    #[test]
+    fn a_guide_is_dragged_out_of_a_ruler_and_back_onto_it() {
+        let mut doc = snap_doc();
+        let mut c = Canvas::new(&mut doc);
+        let (from, to) = (c.on_ruler(false, 30.0), c.screen([30.0, 40.0]));
+        c.drag(&mut doc, from, to);
+        assert_eq!(doc.guides.len(), 1);
+        let g = doc.guides[0];
+        assert!(!g.vertical && (g.at - 40.0).abs() < 0.2, "{g:?}");
+        assert_eq!(g.at, (g.at * 10.0).round() / 10.0, "to a tenth of a mm");
+
+        let from = c.screen([30.0, g.at]);
+        let to = c.on_ruler(false, 30.0);
+        c.drag(&mut doc, from, to);
+        assert!(doc.guides.is_empty(), "dropped on the ruler: deleted");
+    }
+
+    #[test]
+    fn a_dragged_guide_snaps_to_layer_edges() {
+        let mut doc = snap_doc();
+        let mut c = Canvas::new(&mut doc);
+        let (from, to) = (c.on_ruler(true, 160.0), c.screen([151.0, 160.0]));
+        c.drag(&mut doc, from, to);
+        assert_eq!(
+            doc.guides,
+            [Guide {
+                vertical: true,
+                at: 150.0
+            }]
+        );
+    }
+
+    #[test]
+    fn layers_snap_to_guides_unless_turned_off() {
+        for snap in [true, false] {
+            let mut doc = snap_doc();
+            doc.guides.push(Guide {
+                vertical: true,
+                at: 160.0,
+            });
+            let mut c = Canvas::new(&mut doc);
+            c.state.snap_to_guides = snap;
+            let (from, to) = (c.screen([100.0, 100.0]), c.screen([108.5, 100.0]));
+            c.drag(&mut doc, from, to);
+            let x = doc.layer(1).unwrap().transform.center[0];
+            let expected = if snap { 110.0 } else { 108.5 };
+            assert!((x - expected).abs() < 0.05, "snap {snap}: {x}");
+        }
+    }
+
+    #[test]
+    fn locked_guides_stay_put_and_a_double_click_types_a_position() {
+        let mut doc = snap_doc();
+        doc.guides.push(Guide {
+            vertical: false,
+            at: 160.0,
+        });
+        let mut c = Canvas::new(&mut doc);
+        c.state.lock_guides = true;
+        let (from, to) = (c.screen([20.0, 160.0]), c.screen([20.0, 180.0]));
+        c.drag(&mut doc, from, to);
+        assert_eq!(doc.guides[0].at, 160.0, "locked");
+        c.double_click(&mut doc, c.screen([20.0, 160.0]));
+        assert!(c.state.guide_edit.is_none(), "locked: no position to type");
+
+        // That click was on empty canvas: it unselected the layer.
+        c.selected = Some(1);
+        c.state.lock_guides = false;
+        c.double_click(&mut doc, c.screen([20.0, 160.0]));
+        assert_eq!(
+            c.state.guide_edit.map(|e| (e.index, e.at)),
+            Some((0, 160.0))
+        );
+        assert_eq!(
+            c.selected,
+            Some(1),
+            "clicks on a guide leave the selection alone"
+        );
+    }
+
+    #[test]
+    fn guides_are_saved_only_when_there_are_some() {
+        let mut doc = Document::default();
+        assert!(!serde_json::to_string(&doc).unwrap().contains("guides"));
+        doc.guides.push(Guide {
+            vertical: true,
+            at: 12.5,
+        });
+        let back: Document = serde_json::from_str(&serde_json::to_string(&doc).unwrap()).unwrap();
+        assert_eq!(back.guides, doc.guides);
+        assert!(clear_guides(&mut doc) && doc.guides.is_empty() && !clear_guides(&mut doc));
+    }
+
+    #[test]
+    fn ruler_marks_stay_apart_at_every_zoom() {
+        for zoom in [MIN_ZOOM, 0.5, 1.0, 3.0, 10.0, MAX_ZOOM] {
+            let (step, parts) = ruler_step(zoom);
+            assert!(step * zoom >= RULER_LABEL_SPACING, "{zoom}");
+            assert!(step * zoom < RULER_LABEL_SPACING * 2.5, "{zoom}");
+            assert!(step / parts as f32 * zoom >= 4.0, "{zoom}");
         }
     }
 
@@ -3326,7 +4183,9 @@ mod tests {
         let id = selected.expect("the new shape is selected");
         let l = doc.layer(id).unwrap();
         let s = l.shape.as_ref().unwrap();
-        assert_eq!((s.kind, l.name.as_str()), (ShapeKind::Polygon, "Polygon"));
+        assert_eq!(s.kind, ShapeKind::Polygon);
+        // Named with two random words, kept when the polyline was closed.
+        assert_eq!(l.name.split(' ').count(), 2, "{}", l.name);
         assert!(s.fill, "closed: filled");
         let pts = shape::page_points(l);
         assert_eq!(pts.len(), 3);
@@ -3342,7 +4201,8 @@ mod tests {
         }
         let l = doc.layer(selected.unwrap()).unwrap();
         let s = l.shape.as_ref().unwrap();
-        assert_eq!((s.kind, l.name.as_str()), (ShapeKind::Polygon, "Canvas"));
+        assert_eq!(s.kind, ShapeKind::Polygon);
+        assert_eq!(l.name.split(' ').count(), 2, "{}", l.name);
         assert!(!s.fill && !s.stroke, "neither background nor border yet");
         assert!(can_paint(&doc, selected));
 
@@ -3963,9 +4823,9 @@ mod tests {
             frame(&mut state, 0.1, pos2(600.0, 500.0)),
             CursorIcon::Crosshair
         );
-        // Over its pencil, at the canvas' top left.
+        // Over its pencil, at the canvas' top left, below and right of the rulers.
         assert_ne!(
-            frame(&mut state, 0.2, pos2(48.0, 20.0)),
+            frame(&mut state, 0.2, pos2(48.0 + RULER, 20.0 + RULER)),
             CursorIcon::Crosshair
         );
     }

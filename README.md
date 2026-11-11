@@ -30,7 +30,10 @@ layers panel on the right](doc/capture.png)
   from the original, each one a step further. The first paste of a cut, or of a copy
   from another window, lands in place. A copy whose name is taken is named "name copy",
   then "name copy (2)", and so on, as with Duplicate. New text and shape layers go in the
-  middle of the template, or of the view when that is out of sight.
+  middle of the template, or of the view when that is out of sight. A new shape or canvas
+  is named with two random words, an adjective and a noun (Swift Otter, Golden Comet...),
+  a name the project doesn't use yet; a new text says such a name, selected to be typed over, and is named after its text until
+  renamed.
 - **Text layers**: typed in place on the canvas, in any installed font, bold and italic,
   multi-line text aligned left, centered or right, letter and line spacing, color and
   outline. Text layers move, scale, rotate, distort and take effects like images, and are
@@ -54,7 +57,8 @@ layers panel on the right](doc/capture.png)
   images, and are drawn at the export resolution.
 - **SVG import**: an SVG file picked from **Path...** in the Shape menu or dropped on the
   window comes in as shape layers above the selection, with a group for each of its
-  own that has an id or an opacity. Fills, strokes (width, color, opacity, caps, joins,
+  own that has an id or an opacity. When that makes several layers and groups, they all
+  go in one group named after the file, so the layer list gets one entry. Fills, strokes (width, color, opacity, caps, joins,
   dashes as the nearest of the app's styles), linear and radial gradients and fill rules
   are kept; it keeps its true size, shrunk to fit the page if larger. A path made of
   several outlines (a letter with a hole, a logo in one piece) becomes a **path** shape,
@@ -63,12 +67,10 @@ layers panel on the right](doc/capture.png)
   masks, clipping and patterns are left out (the app says which), and nothing the file
   points to is ever loaded.
 - **Painting**: any closed shape (rectangle, ellipse, polygon, star, closed path) can be
-  painted in. While one is selected, a tool bar at the canvas' top left (also in the
-  **Tools** menu) has Select, Pencil, Brush and Eraser; the tool picked last comes back
+  painted in. While one is selected, a tool bar at the canvas' top left has Select, Pencil, Brush and Eraser; the tool picked last comes back
   whenever such a shape is selected. The pencil paints an even line; each tool has its
   color and width (in mm) on the tool bar. The brush comes in several kinds, picked in
-  the menu its tool bar button opens (its icon shows the kind in use) or in **Tools >
-  Brush kind**: **round** (thinning out at both ends),
+  the menu its tool bar button opens (its icon shows the kind in use): **round** (thinning out at both ends),
   **calligraphy** (a flat nib at an angle set by turning the wheel on the tool bar:
   broad across it, thin along it), **marker** (square ends, at half the color's
   opacity, like a highlighter), **spray** (dots scattered around the line, denser in the middle, as
@@ -87,8 +89,7 @@ layers panel on the right](doc/capture.png)
   its handles stretch it), or, for a polygon, drawn point by point as from the Shape
   menu. Its shortcut adds the kind added last. The eraser cuts the selected shape's
   strokes where it passes; a stroke crossed in the middle becomes two, a spray loses
-  the dots it passes over. **Clear the paint**, next to the tools on the tool bar (also
-  in the **Tools** menu), empties the selected shape of all its strokes at once (Undo
+  the dots it passes over. **Clear the paint**, next to the tools on the tool bar, empties the selected shape of all its strokes at once (Undo
   brings them back). With a pen on Windows, the width follows its pressure. Esc
   goes back to selecting.
 - **Gradients**: a shape's fill and stroke, a text's letters and the page background can
@@ -168,11 +169,23 @@ layers panel on the right](doc/capture.png)
   to the page's edges and middle, and to the template's outline: the edges and middle of
   its bounds, its straight sides, and the bleed line when there is a bleed. An edge being
   stretched and a corner being resized snap too. A dashed line shows the guide it snapped
-  to. Hold Alt to drag freely, or turn it off with **View > Snap to page and outline**.
+  to. Hold Alt to drag freely, or turn it off with **Snap to page and outline** in the View panel.
+- **Rulers and guides**: rulers along the canvas' top and left edges measure in mm from
+  the page's top-left corner. Drag from a ruler to add a guide: a horizontal one from the
+  top ruler, a vertical one from the left ruler. Drag a guide to move it, off the canvas
+  (onto a ruler) to delete it, or double-click it to type its position. Guides are saved
+  with the project and never printed. While moved or resized, layer edges and centers snap
+  to them as they do to the page; a dragged guide snaps to the edges and centers of the
+  layers, the page and the outline. Hold Alt to drag freely. The View panel shows or
+  hides the rulers and the guides, turns snapping to guides on or off, locks the guides
+  so they can't be moved by accident, and clears them all.
 - **Align** layers or groups to the page or to the template.
 - **Undo / redo** for every change to the project.
 - **Templates** made of several elements, each in its own DXF file, with its own color and
-  visibility.
+  visibility. The **Template** panel picks the template and shows or hides each
+  element's lines, and sets their color. The template sits on the page as its
+  `template.json` says (see [Templates](#templates)), whatever the project was saved
+  with.
 - **Export** PNG, PDF and/or SVG. The Export window only asks what to export: the formats
   and which template lines are printed, saved with the project. How it is printed is
   set once for all projects in the **Print** panel: the resolution (72 to 1200 DPI),
@@ -209,22 +222,20 @@ layers panel on the right](doc/capture.png)
 - **Print margins and marks**: a **bleed** (Print panel) prints the artwork a few mm
   past the outline and into the holes, so a cut slightly off the line leaves no blank
   edge: what is under that band is printed, so a shape meant to reach the cut should
-  go past it by the bleed. **Preview bleed** (Page panel, or **View**) shows it in the
+  go past it by the bleed. **Preview bleed** (View panel) shows it in the
   cut preview, or turned off, the cut lines themselves. A **safe area** is
   shown as a dashed guide on the canvas, that far inside the outline and around the
   holes, to keep text and details clear of the cuts; never printed. Its width is set
-  next to **Preview safe area** (Page panel; also in **View**), which hides or shows
-  it. The Page panel's display settings (Preview cuts and its opacity, Preview bleed,
-  Preview safe area and its width) and the Print panel's settings are the app's, not
+  next to **Preview safe area** (View panel), which hides or shows
+  it. The View panel's display settings (Show template lines, Preview cuts and its
+  opacity, Preview bleed, Preview safe area and its width, Show rulers and Show guides) and the Print panel's settings are the app's, not
   the project's: saved as soon as they change, and back at the next start. The export can add **crop marks**
   in line with the edges of the outline's box and **registration marks** at the middle
   of its sides, both outside the bleed (Print panel).
-- **Projects** are saved, by default, as a single `.artwork` file (a zip archive) holding
-  the project and all its images, so it can be moved or shared on its own. **Save As**
-  can also write a linked `.json` project that points to the image files on disk; images
-  that only exist inside an archive are then written to an "*name* images" folder next to
-  it.
-  Both keep the Export window's choices too (formats and lines printed); changing them
+- **Projects** are saved as a single `.artwork` file (a zip archive) holding the project,
+  all its images and fonts and its own copy of its template, so it can be moved or shared
+  on its own and opens the same where that template isn't installed.
+  It keeps the Export window's choices too (formats and lines printed); changing them
   counts as an unsaved change, but not as an undo step. The Print panel's settings
   are the app's, the same for every project.
   **File > Open Recent** lists the last 10 projects. With unsaved changes, **New**,
@@ -241,7 +252,7 @@ layers panel on the right](doc/capture.png)
   ("Last saved 5 minutes ago") and, with unsaved changes, when their recovery copy was
   made ("Recovery copy just now"): the project file itself is only written when you
   save it.
-- **Movable panels**: Controller, Page, Template, Print, Variables, Colors in use,
+- **Movable panels**: Template, Page, View, Print, Variables, Colors in use,
   Layers and Properties are each a panel. Drag a panel by its title onto the left or right side of
   the window to dock it there, above or below the other panels of that side (a line shows
   where it goes), or anywhere else to float it over the canvas; drag a floating panel's
@@ -275,6 +286,14 @@ make test       # run the tests
 make plugins    # build the example plugins into plugins/ (.so and .dll)
 make dist       # package each build with the templates folder into dist/
 ```
+
+The app's icon is in [`assets/icon`](assets/icon): the SVG it is drawn from, PNGs from 16
+to 1024 px and the Windows `.ico`. `build.rs` builds the `.ico` into the Windows
+executable (with MinGW's `windres`; `WINDRES` names another one), and the app sets the
+256 px PNG as its window icon. The Linux package also holds `artwork-creator.png` and
+`artwork-creator.desktop`: to list the app in the desktop's menus, copy the PNG to
+`~/.local/share/icons/` and the `.desktop` file to `~/.local/share/applications/`, with
+its `Exec` line set to where the executable is.
 
 ## Development
 
@@ -325,14 +344,27 @@ the text is for, in upper snake case: `ADD_TEXT_LAYER`, `EXPORT_CANCELED`.
 
 ### Releasing
 
-`make version` lists the commits since the last release tag and suggests the next version.
-Only commits that change the app count (`src`, `locales`, `templates`, `plugin-sdk`,
-`Cargo.toml` and `Cargo.lock`); tooling, CI, docs and tests never call for a release. It
-suggests minor when a commit message adds something ("Added...", "New...") or the plugin interface
-changed (major from 1.0.0 on), patch otherwise. `make release` sets that version in `Cargo.toml`, commits and tags
-it after asking; `make release V=0.3.0` (or `V=major|minor|patch`) picks the version, and
-`SDK=minor` releases the plugin SDK too. Nothing is pushed. See
-[`scripts/version.sh`](scripts/version.sh) for the details.
+`make version-check` lists the commits since the last release (its "Release vX.Y.Z"
+commit) and suggests the next version. Only commits that change the app count (`src`,
+`locales`, `templates`, `plugin-sdk`, `Cargo.toml` and `Cargo.lock`); tooling, CI, docs and
+tests never call for a release. It suggests minor when a commit message adds something
+("Added...", "New...") or the plugin interface changed (major from 1.0.0 on), patch
+otherwise, counting from the last release; a version `Cargo.toml` was already bumped to is
+suggested when it is that far.
+
+```sh
+make version-check            # what changed since the last release, and the next version
+make version-bump-minor       # set the version, commit "Bump version to X.Y.Z"
+                              # (also version-bump-patch, version-bump-major)
+make version-bump V=2.0.0     # an exact version
+make version-release          # commit "Release vX.Y.Z": the bumped or suggested version
+make version-release-patch    # or one picked: version-release-minor, -major, or V=X.Y.Z
+```
+
+Patch, minor and major count from the current version, and a bump is not a release. `SDK=...` sets the plugin SDK's version too, in either. Both ask before
+committing; neither makes a tag or pushes. The release packages are built by GitHub Actions
+when a `vX.Y.Z` tag is pushed (as publishing a GitHub Release does), or when run by hand
+from the Actions tab. See [`scripts/version.sh`](scripts/version.sh) for the details.
 
 ## Templates
 
@@ -342,7 +374,8 @@ describes the elements:
 
 ```json
 {
-  "name": "Cosmox T16",
+  "vendor": "Cosmox",
+  "name": "T16",
   "units": "inch",
   "elements": [
     { "kind": "outline", "dxf": "outline.dxf" },
@@ -351,19 +384,20 @@ describes the elements:
     { "kind": "cutouts", "dxf": "holes.dxf", "name": "Fastener holes", "color": "#ff8c00" },
     { "kind": "anchors", "dxf": "anchors.dxf", "name": "Button centers" }
   ],
+  "page": { "size": "A4", "orientation": "landscape" },
   "placement": { "rotation": 90, "flip_x": false, "flip_y": true, "offset_mm": [0, 0] }
 }
 ```
 
 - `kind` is `outline`, `buttons`, `cutouts` or `anchors`. The outline clips the artwork;
   buttons and cutouts are holes, left blank in the export unless turned off in the Print
-  panel. **Preview cuts** (Page panel) covers all of them on the canvas, at the
+  panel. **Preview cuts** (View panel) covers all of them on the canvas, at the
   **Cut opacity** set there, and hatches them, whatever the export prints: the panel is
   cut there anyway.
 - `anchors` are points that images snap to on the canvas: while an image is moved, its
   center, a corner or the middle of an edge lands on an anchor that comes near, and a corner being resized or
-  distorted does too. Hold Alt to drag freely, or turn it off with **View > Snap to
-  anchors**. Anchors are drawn as small crosses and cut nothing; they are printed only when
+  distorted does too. Hold Alt to drag freely, or turn it off with **Snap to
+  anchors** in the View panel. Anchors are drawn as small crosses and cut nothing; they are printed only when
   ticked under **Print lines** in the Export window. They are read from the DXF's POINT
   entities, usually all in one `anchors.dxf`. The center of each closed shape counts too,
   so an anchors element can also point at a buttons DXF to get the button centers. They
@@ -371,11 +405,30 @@ describes the elements:
 - All DXF files of a template must share the same coordinates, as when they are exported
   from one drawing. Outlines drawn as separate lines and arcs are joined automatically.
 - `units` (`mm`, `cm` or `inch`) is used when the DXF files don't declare their units.
-- `name`, `color` (`#rrggbb`) and `placement` are optional. The template's default placement
-  can also be saved from the app.
+- `page` is the page the template is made for: `size` is `A5`, `A4`, `A3`, `A2`, `Letter`,
+  `Legal` or `Tabloid`, or `[width, height]` in mm for a custom page; `orientation` is
+  `landscape` or `portrait`. Picking the template, or starting a new project with it, sets
+  them in the Page panel (what `page` leaves out stays as it was); a project that is
+  opened keeps its own page. They can still be changed there afterwards.
+- `vendor`, `name`, `color` (`#rrggbb`), `page` and `placement` are optional. Templates are listed
+  by `vendor` in the Template panel, each vendor's models under its name (`name` is then
+  the model's, shown as "Cosmox - T16" once picked); those without one come first. `name`
+  defaults to the folder's name. `placement` turns the template
+  (`rotation` 0, 90, 180 or 270 degrees), mirrors it (`flip_x`, `flip_y`) and moves it from
+  the middle of the page (`offset_mm`). Without it, the template is centered on the page
+  and turned a quarter when that fits the page better. The app doesn't change it.
 - Without `elements`, the folder's single DXF file is used as the outline.
+- `version` (optional, such as `"1.2"`) tells versions of a template apart for people;
+  the app tells them apart by their files' contents in any case.
 
-The app reloads a template when its files change on disk.
+A project archive keeps its own copy of its template (`template.json` and the DXF files)
+and always opens with it. When the installed template of the same folder differs from that
+copy, now or after its files change on disk, a popup says so, with both versions, and
+offers to **Compare** them (the installed one left of a divider on the canvas, the
+project's right of it; drag the divider, and choose from the bar at the bottom of the
+canvas), **Use installed** (the project takes it and keeps it; Undo goes back), or **Keep
+project's** (not asked again for that installed version). Esc decides later: the Template
+panel then has a **Review...** button that brings the popup back.
 
 ## Plugins
 
@@ -442,7 +495,7 @@ window says which, and briefly highlights that command's row and key (shown what
 search); remove it there first. The circular
 arrow at the end of the row gives a command its default keys back, those another command
 does not use by then, and
-**Reset all** does it for every command. Save As, Quit, Real size, the View options and the window itself have no key by
+**Reset all** does it for every command. Save As, Quit, Real size, the View panel's options and the window itself have no key by
 default; you can give them one. Cut, Copy and Paste, and the arrow keys, keep theirs.
 Search by command name or by key. While you type in a text field, only the File commands
 work, and only with Ctrl or Alt held. The keys are kept between sessions; menus and
@@ -474,6 +527,9 @@ The default keys:
 | Fit page in view | F |
 | Select / Pencil / Brush / Eraser tool (with a closed shape selected) | V / P / B / E (Esc: back to Select) |
 | Clear the paint in the selected shape | Ctrl+Shift+Delete |
+| Add a guide | Drag from a ruler |
+| Move / delete a guide | Drag it / drag it off the canvas |
+| Type a guide's position | Double-click it |
 | Pan | Space+drag, middle or right drag, or drag on empty canvas |
 | Zoom | Mouse wheel, or Ctrl+scroll |
 

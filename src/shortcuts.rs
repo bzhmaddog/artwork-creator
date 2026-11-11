@@ -58,6 +58,11 @@ pub enum Command {
     PreviewSafeArea,
     SnapToAnchors,
     SnapToEdges,
+    SnapToGuides,
+    ShowRulers,
+    ShowGuides,
+    LockGuides,
+    ClearGuides,
     KeyboardShortcuts,
     SelectTool,
     PencilTool,
@@ -73,6 +78,8 @@ enum Group {
     File,
     Edit,
     Layers,
+    /// The View panel, the zoom buttons in the status bar and the View menu's Keyboard
+    /// shortcuts.
     View,
     Tools,
     Help,
@@ -110,7 +117,7 @@ const NONE: Modifiers = Modifiers::NONE;
 
 impl Command {
     /// In the order of the window.
-    pub const ALL: [Command; 36] = [
+    pub const ALL: [Command; 41] = [
         Command::NewProject,
         Command::OpenProject,
         Command::Save,
@@ -140,6 +147,11 @@ impl Command {
         Command::PreviewSafeArea,
         Command::SnapToAnchors,
         Command::SnapToEdges,
+        Command::SnapToGuides,
+        Command::ShowRulers,
+        Command::ShowGuides,
+        Command::LockGuides,
+        Command::ClearGuides,
         Command::KeyboardShortcuts,
         Command::SelectTool,
         Command::PencilTool,
@@ -181,6 +193,11 @@ impl Command {
             Command::PreviewSafeArea => tr_noop!("PREVIEW_SAFE_AREA"),
             Command::SnapToAnchors => tr_noop!("SNAP_TO_ANCHORS"),
             Command::SnapToEdges => tr_noop!("SNAP_TO_EDGES"),
+            Command::SnapToGuides => tr_noop!("SNAP_TO_GUIDES"),
+            Command::ShowRulers => tr_noop!("SHOW_RULERS"),
+            Command::ShowGuides => tr_noop!("SHOW_GUIDES"),
+            Command::LockGuides => tr_noop!("LOCK_GUIDES"),
+            Command::ClearGuides => tr_noop!("CLEAR_GUIDES"),
             Command::KeyboardShortcuts => tr_noop!("MENU_KEYBOARD_SHORTCUTS"),
             Command::SelectTool => tr_noop!("TOOL_SELECT"),
             Command::PencilTool => tr_noop!("TOOL_PENCIL"),
@@ -222,6 +239,11 @@ impl Command {
             | Command::PreviewSafeArea
             | Command::SnapToAnchors
             | Command::SnapToEdges
+            | Command::SnapToGuides
+            | Command::ShowRulers
+            | Command::ShowGuides
+            | Command::LockGuides
+            | Command::ClearGuides
             | Command::KeyboardShortcuts => Group::View,
             Command::SelectTool
             | Command::PencilTool
@@ -305,6 +327,11 @@ impl Command {
             Command::PreviewSafeArea => "preview_safe_area",
             Command::SnapToAnchors => "snap_to_anchors",
             Command::SnapToEdges => "snap_to_edges",
+            Command::SnapToGuides => "snap_to_guides",
+            Command::ShowRulers => "show_rulers",
+            Command::ShowGuides => "show_guides",
+            Command::LockGuides => "lock_guides",
+            Command::ClearGuides => "clear_guides",
             Command::KeyboardShortcuts => "keyboard_shortcuts",
             Command::SelectTool => "select_tool",
             Command::PencilTool => "pencil_tool",

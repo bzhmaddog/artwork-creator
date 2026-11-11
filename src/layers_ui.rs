@@ -186,19 +186,7 @@ pub fn insertion_path(doc: &mut Document, selected: Option<u64>) -> Vec<usize> {
 /// of that name already: "name copy", then "name copy (2)", "(3)"... A copy of a copy is
 /// named after the original, not "name copy copy".
 pub fn name_copy(doc: &Document, node: &mut Node) {
-    let mut names = Vec::new();
-    fn collect<'a>(nodes: &'a [Node], names: &mut Vec<&'a str>) {
-        for n in nodes {
-            match n {
-                Node::Group(g) => {
-                    names.push(&g.name);
-                    collect(&g.children, names);
-                }
-                Node::Layer(l) => names.push(&l.name),
-            }
-        }
-    }
-    collect(&doc.layers, &mut names);
+    let names = all_names(doc);
     let name = name_mut(node);
     if !names.contains(&name.as_str()) {
         return;
@@ -211,6 +199,58 @@ pub fn name_copy(doc: &Document, node: &mut Node) {
         })
         .find(|candidate| !names.contains(&candidate.as_str()))
         .expect("an unused name");
+}
+
+/// The names of the layers and groups of `doc`.
+fn all_names(doc: &Document) -> Vec<&str> {
+    fn collect<'a>(nodes: &'a [Node], names: &mut Vec<&'a str>) {
+        for n in nodes {
+            match n {
+                Node::Group(g) => {
+                    names.push(&g.name);
+                    collect(&g.children, names);
+                }
+                Node::Layer(l) => names.push(&l.name),
+            }
+        }
+    }
+    let mut names = Vec::new();
+    collect(&doc.layers, &mut names);
+    names
+}
+
+/// Two words picked at random from the language's lists, an adjective and a noun put
+/// together by `LAYER_NAME_PATTERN` ("Swift Otter"), to name a new shape or canvas, or to
+/// be a new text's placeholder: a name no layer or group of `doc` has yet, unless many
+/// tries find none.
+pub fn random_name(doc: &Document) -> String {
+    use std::hash::BuildHasher;
+    let list = |text: &'static str| -> Vec<&'static str> {
+        text.split(',')
+            .map(str::trim)
+            .filter(|w| !w.is_empty())
+            .collect()
+    };
+    let adjectives = list(tr!("LAYER_NAME_ADJECTIVES"));
+    let nouns = list(tr!("LAYER_NAME_NOUNS"));
+    if adjectives.is_empty() || nouns.is_empty() {
+        return String::new();
+    }
+    let names = all_names(doc);
+    // Randomly keyed for each call: enough to pick names.
+    let state = std::collections::hash_map::RandomState::new();
+    let now = std::time::SystemTime::now();
+    let pick = |k: u32, n: usize| (state.hash_one((k, now)) % n as u64) as usize;
+    let mut name = String::new();
+    for k in 0..64 {
+        let adjective = adjectives[pick(2 * k, adjectives.len())];
+        let noun = nouns[pick(2 * k + 1, nouns.len())];
+        name = tr!("LAYER_NAME_PATTERN", adjective = adjective, noun = noun);
+        if !names.contains(&name.as_str()) {
+            break;
+        }
+    }
+    name
 }
 
 /// The original's name, for a name made by `name_copy`.
@@ -3018,6 +3058,23 @@ mod tests {
         let empty = Pos2::new(200.0, 780.0);
         h.drag(empty, empty + vec2(40.0, -20.0));
         assert!(h.ctx.memory(|m| m.focused().is_none()));
+    }
+
+    #[test]
+    fn new_layers_get_two_random_words_not_used_yet() {
+        let mut doc = Document::default();
+        for k in 0..40 {
+            let name = random_name(&doc);
+            let words: Vec<&str> = name.split(' ').collect();
+            assert_eq!(words.len(), 2, "{name}");
+            assert!(tr!("LAYER_NAME_ADJECTIVES").contains(words[0]), "{name}");
+            assert!(tr!("LAYER_NAME_NOUNS").contains(words[1]), "{name}");
+            assert!(
+                !all_names(&doc).contains(&name.as_str()),
+                "{name} used already"
+            );
+            doc.layers.push(named(k + 1, &name));
+        }
     }
 
     fn named(id: u64, name: &str) -> Node {

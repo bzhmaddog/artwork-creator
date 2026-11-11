@@ -38,6 +38,21 @@ mod theme;
 mod variables;
 mod view;
 
+/// The app's icon, for its window's title bar and the taskbar or dock (the executable's
+/// own on Windows is built in by `build.rs`).
+fn window_icon() -> std::sync::Arc<egui::IconData> {
+    const PNG: &[u8] = include_bytes!("../assets/icon/png/artwork-creator-256.png");
+    let icon = image::load_from_memory_with_format(PNG, image::ImageFormat::Png)
+        .map(|i| i.into_rgba8())
+        .map(|i| egui::IconData {
+            width: i.width(),
+            height: i.height(),
+            rgba: i.into_raw(),
+        })
+        .unwrap_or_default();
+    std::sync::Arc::new(icon)
+}
+
 /// Starts the app, opening the project file given on the command line, if any.
 fn main() -> eframe::Result {
     // RUST_LOG overrides this. The title bar drawn on Wayland asks the desktop for its
@@ -56,6 +71,9 @@ fn main() -> eframe::Result {
         renderer: eframe::Renderer::Glow,
         viewport: egui::ViewportBuilder::default()
             .with_title("Artwork Creator")
+            // Matches the `.desktop` file's name, for Linux desktops to show its icon.
+            .with_app_id("artwork-creator")
+            .with_icon(window_icon())
             .with_inner_size([1280.0, 800.0])
             .with_min_inner_size([900.0, 600.0])
             .with_drag_and_drop(true),

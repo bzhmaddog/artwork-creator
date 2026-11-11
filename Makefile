@@ -17,9 +17,15 @@
 #                     ARGS=--linux or ARGS=--windows checks one target only
 #   make plugins      build the example plugins for Linux and Windows into plugins/
 #   make dist         package each release build with its templates folder into dist/
-#   make version      show the commits since the last release and suggest the next version
-#   make release      set the version, commit and tag it; V=X.Y.Z or V=major|minor|patch
-#                     picks the version, SDK=... releases the plugin SDK too
+#   make version-check
+#                     show the commits since the last release and suggest the next version
+#   make version-bump-patch, version-bump-minor, version-bump-major
+#                     set the version and commit "Bump version to X.Y.Z" (not a release);
+#                     make version-bump V=X.Y.Z sets an exact one
+#   make version-release
+#                     commit "Release vX.Y.Z" for the bumped or suggested version;
+#                     version-release-patch|minor|major or V=X.Y.Z picks it
+#                     (all: SDK=... sets the plugin SDK's too; no tag, nothing pushed)
 #   make check-dependencies
 #                     scan Cargo.lock for known vulnerable or malicious crates with
 #                     Trivy, run in a Docker or Podman container
@@ -48,8 +54,11 @@ TRIVY_VERSION ?= 0.76.1
 TRIVY_IMAGE   ?= docker.io/aquasec/trivy:$(TRIVY_VERSION)
 TRIVY_CACHE   ?= $(HOME)/.cache/trivy
 
+# version-bump-patch ... version-release-major (see "Versioning" below).
+VERSION_STEPS := $(foreach k,bump release,$(foreach p,patch minor major,version-$(k)-$(p)))
+
 .PHONY: all linux windows debug debug-linux debug-windows run run-windows \
-        test check check-dependencies fmt clippy hooks pre-commit plugins dist version release dist-linux dist-windows clean
+        test check check-dependencies fmt clippy hooks pre-commit plugins dist version-check version-bump version-release $(VERSION_STEPS) dist-linux dist-windows clean
 
 all: linux windows
 
@@ -114,10 +123,20 @@ clippy:
 	$(CARGO) clippy --workspace --all-targets --target $(WINDOWS) -- -D warnings
 
 # Versioning: see scripts/version.sh.
-version:
-	sh scripts/version.sh suggest
+version-check:
+	sh scripts/version.sh check
 
-release:
+# version-bump-minor is version-bump V=minor, and so on.
+$(filter version-bump-%,$(VERSION_STEPS)): version-bump-%:
+	sh scripts/version.sh bump $* $(if $(SDK),--sdk $(SDK))
+
+$(filter version-release-%,$(VERSION_STEPS)): version-release-%:
+	sh scripts/version.sh release $* $(if $(SDK),--sdk $(SDK))
+
+version-bump:
+	sh scripts/version.sh bump $(V) $(if $(SDK),--sdk $(SDK))
+
+version-release:
 	sh scripts/version.sh release $(V) $(if $(SDK),--sdk $(SDK))
 
 # The app looks for templates/ next to the executable, so ship them together.
@@ -128,6 +147,9 @@ dist-linux: linux
 	mkdir -p $(DIST)/$(APP)-linux
 	cp $(LINUX_BIN) $(DIST)/$(APP)-linux/
 	cp -r templates $(DIST)/$(APP)-linux/
+	# For desktop menus: see "Building" in README.md.
+	cp assets/icon/png/$(APP)-256.png $(DIST)/$(APP)-linux/$(APP).png
+	cp assets/$(APP).desktop $(DIST)/$(APP)-linux/
 	tar -czf $(DIST)/$(APP)-linux.tar.gz -C $(DIST) $(APP)-linux
 
 dist-windows: windows

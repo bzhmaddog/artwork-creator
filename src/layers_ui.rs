@@ -1386,6 +1386,22 @@ pub fn show(
                     ui.close();
                 }
             }
+            // Paths come from SVG files: a dialog asks for them.
+            ui.separator();
+            let mut b = Button::new(tr!("ADD_PATH_FROM_SVG"));
+            if state.shape_kind == ShapeKind::Path
+                && let Some(s) = state.keys.get(&Command::AddShape)
+            {
+                b = b.shortcut_text(s.as_str());
+            }
+            if ui
+                .add(b)
+                .on_hover_text(tr!("ADD_PATH_FROM_SVG_HINT"))
+                .clicked()
+            {
+                out.add_shape = Some(ShapeKind::Path);
+                ui.close();
+            }
         });
         let hint = match state.keys.get(&Command::AddCanvas) {
             Some(s) => tr!("ADD_CANVAS_LAYER_WITH_SHORTCUT", shortcut = s),
@@ -2188,22 +2204,13 @@ fn shape_section(
         RichText::new(tr!("SHAPE_SECTION")),
         |_| false,
         |ui| {
-            let mut new_kind = None;
             let Some(s) = layer.shape.as_deref_mut() else {
                 return;
             };
             prop_grid(ui, "shape_props").show(ui, |ui| {
+                // A shape keeps the kind it was made as: shown, not offered.
                 ui.label(tr!("SHAPE_KIND"));
-                let mut kind = s.kind;
-                if choice(
-                    ui,
-                    "shape_kind",
-                    &mut kind,
-                    &ShapeKind::ALL,
-                    ShapeKind::name_key,
-                ) {
-                    new_kind = Some(kind);
-                }
+                ui.label(translate(s.kind.name_key()));
                 ui.end_row();
 
                 match s.kind {
@@ -2274,6 +2281,23 @@ fn shape_section(
                             }
                         });
                         ui.end_row();
+                        if k == ShapeKind::Path {
+                            ui.label(tr!("SHAPE_FILL_RULE"));
+                            changed |= choice(
+                                ui,
+                                "shape_fill_rule",
+                                &mut s.even_odd,
+                                &[false, true],
+                                |even_odd| {
+                                    if even_odd {
+                                        tr_noop!("FILL_RULE_EVEN_ODD")
+                                    } else {
+                                        tr_noop!("FILL_RULE_NONZERO")
+                                    }
+                                },
+                            );
+                            ui.end_row();
+                        }
                     }
                     _ => {}
                 }
@@ -2370,7 +2394,7 @@ fn shape_section(
                 ui.end_row();
 
                 // Caps show at the ends of open lines and of dashes.
-                let caps = s.stroke && (!s.kind.closed() || s.dash != DashStyle::Solid);
+                let caps = s.stroke && (s.has_open_ends() || s.dash != DashStyle::Solid);
                 ui.add_enabled_ui(caps, |ui| ui.label(tr!("STROKE_CAPS")));
                 ui.add_enabled_ui(caps, |ui| {
                     changed |= choice(ui, "stroke_cap", &mut s.cap, &Cap::ALL, Cap::name_key);
@@ -2383,10 +2407,6 @@ fn shape_section(
                 });
                 ui.end_row();
             });
-            if let Some(kind) = new_kind {
-                shape::set_kind(layer, kind);
-                changed = true;
-            }
         },
     );
     changed
@@ -3466,8 +3486,14 @@ mod tests {
         let star = h.label("Star");
         h.click(star);
         assert_eq!(h.added_shape, Some(ShapeKind::Star));
+        // Last in the menu, paths come from SVG files.
+        h.added_shape = None;
+        h.click(found.unwrap());
+        let path = h.label("Path...");
+        h.click(path);
+        assert_eq!(h.added_shape, Some(ShapeKind::Path));
 
-        // A shape layer's Properties: its kind, fill and stroke; a new kind from the list.
+        // A shape layer's Properties: its kind (shown, not changed), fill and stroke.
         let l = shape::new_layer(2, ShapeKind::Rectangle, [50.0, 50.0]);
         let mut h = Harness::new(doc_with(vec![Node::Layer(Box::new(l))]));
         h.selected = Some(2);
@@ -3488,13 +3514,14 @@ mod tests {
             .filter(|(t, _)| t == "Rectangle")
             .map(|(_, p)| *p)
             .next_back()
-            .expect("kind list");
+            .expect("kind shown");
         h.click(kind + vec2(4.0, 6.0));
-        let ellipse = h.label("Ellipse");
-        h.click(ellipse);
+        assert!(
+            !h.frame(vec![]).iter().any(|(t, _)| t == "Ellipse"),
+            "no list of kinds"
+        );
         let shape = h.doc.layer(2).unwrap().shape.as_ref().unwrap();
-        assert_eq!(shape.kind, ShapeKind::Ellipse);
-        assert_eq!(shape.size, [40.0, 25.0], "same size");
+        assert_eq!(shape.kind, ShapeKind::Rectangle);
 
         // A polyline's points are edited on the canvas, turned on here too.
         let l = shape::new_layer(3, ShapeKind::Polyline, [50.0, 50.0]);

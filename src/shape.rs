@@ -1,5 +1,6 @@
-//! Shape layers: rectangles, ellipses, lines, polylines, polygons, regular polygons and
-//! stars, with a stroke and a fill, and turning them into pixels.
+//! Shape layers: rectangles, ellipses, lines, polylines, polygons, regular polygons,
+//! stars and paths (several outlines in one, such as a letter with a hole, from an SVG
+//! file), with a stroke and a fill, and turning them into pixels.
 //!
 //! A shape layer is an image layer whose pixels are drawn from its shape, as a text
 //! layer's are from its text: moving, rotating, distorting, snapping, effects and export
@@ -52,6 +53,10 @@ pub enum ShapeKind {
     Polygon,
     RegularPolygon,
     Star,
+    /// Points like a polygon's, in several contours, open or closed (see
+    /// `Shape::contours`): what an imported SVG's outlines become. Not drawn from the
+    /// Shape menu.
+    Path,
 }
 
 impl ShapeKind {
@@ -76,6 +81,7 @@ impl ShapeKind {
             ShapeKind::Polygon => tr_noop!("SHAPE_POLYGON"),
             ShapeKind::RegularPolygon => tr_noop!("SHAPE_REGULAR_POLYGON"),
             ShapeKind::Star => tr_noop!("SHAPE_STAR"),
+            ShapeKind::Path => tr_noop!("SHAPE_PATH"),
         }
     }
 
@@ -84,11 +90,12 @@ impl ShapeKind {
     pub fn has_points(self) -> bool {
         matches!(
             self,
-            ShapeKind::Line | ShapeKind::Polyline | ShapeKind::Polygon
+            ShapeKind::Line | ShapeKind::Polyline | ShapeKind::Polygon | ShapeKind::Path
         )
     }
 
-    /// It can be filled, and painted in: its outline is closed.
+    /// It can be filled, and painted in: its outline is closed (a path's open contours
+    /// are filled as if closed).
     pub fn can_fill(self) -> bool {
         self.closed()
     }
@@ -204,6 +211,17 @@ impl Join {
     }
 }
 
+/// One of a path's outlines: the next `len` points, and whether it closes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct Contour {
+    pub len: usize,
+    pub closed: bool,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 /// What a shape layer draws and how. Lengths are in mm on the page.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -221,6 +239,14 @@ pub struct Shape {
     /// has any.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub handles: Vec<[P2; 2]>,
+    /// A path's contours, splitting `points` in order; empty for the other kinds.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contours: Vec<Contour>,
+    /// A path's inside is where its contours go round an odd number of times, so a
+    /// contour inside another is a hole whichever way it turns; otherwise where they go
+    /// round more one way than the other (non-zero), as for every other kind.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub even_odd: bool,
     /// Radius of a rectangle's rounded corners.
     pub corner_radius: f32,
     /// Corners of a regular polygon, or points of a star.
@@ -277,10 +303,21 @@ impl Shape {
                 ShapeKind::Polyline => {
                     vec![[-20.0, 8.0], [-7.0, -8.0], [7.0, 8.0], [20.0, -8.0]]
                 }
-                ShapeKind::Polygon => vec![[0.0, -12.0], [15.0, 12.0], [-15.0, 12.0]],
+                ShapeKind::Polygon | ShapeKind::Path => {
+                    vec![[0.0, -12.0], [15.0, 12.0], [-15.0, 12.0]]
+                }
                 _ => Vec::new(),
             },
             handles: Vec::new(),
+            contours: if kind == ShapeKind::Path {
+                vec![Contour {
+                    len: 3,
+                    closed: true,
+                }]
+            } else {
+                Vec::new()
+            },
+            even_odd: false,
             corner_radius: 0.0,
             sides: if kind == ShapeKind::Star { 5 } else { 6 },
             inner_ratio: 0.5,
@@ -330,6 +367,15 @@ impl Shape {
     fn outline(&self) -> (Vec<P2>, Vec<[P2; 2]>) {
         let [w, h] = self.size.map(|v| v / 2.0);
         match self.kind {
+            ShapeKind::Path => {
+                let r = self.contours().first().map_or(0..0, |c| c.0.clone());
+                let handles = if self.handles.is_empty() {
+                    Vec::new()
+                } else {
+                    r.clone().map(|i| self.handle(i)).collect()
+                };
+                (self.points[r].to_vec(), handles)
+            }
             k if k.has_points() => (self.points.clone(), self.handles.clone()),
             ShapeKind::Rectangle => (vec![[-w, -h], [w, -h], [w, h], [-w, h]], Vec::new()),
             ShapeKind::Ellipse => {
@@ -368,31 +414,119 @@ impl Shape {
         }
     }
 
-    /// Number of segments between the points: a polygon's closes it.
-    pub fn segment_count(&self) -> usize {
+    /// The runs of points drawn as one outline, and whether each closes: a path's
+    /// contours, or all the points of a line, polyline or polygon. Empty for the kinds
+    /// drawn in a box.
+    pub fn contours(&self) -> Vec<(std::ops::Range<usize>, bool)> {
         let n = self.points.len();
         match self.kind {
-            ShapeKind::Polygon if n >= 2 => n,
-            k if k.has_points() => n.saturating_sub(1),
-            _ => 0,
+            ShapeKind::Path => {
+                let mut start = 0;
+                self.contours
+                    .iter()
+                    .filter_map(|c| {
+                        let end = (start + c.len).min(n);
+                        let r = start..end;
+                        start = end;
+                        (!r.is_empty()).then_some((r, c.closed))
+                    })
+                    .collect()
+            }
+            ShapeKind::Polygon => vec![(0..n, true)],
+            k if k.has_points() => vec![(0..n, false)],
+            _ => Vec::new(),
         }
+    }
+
+    /// Has an open outline, whose ends show the line caps.
+    pub fn has_open_ends(&self) -> bool {
+        self.contours().iter().any(|(_, closed)| !closed)
+    }
+
+    /// The points before and after point `i` along its outline; `None` past the ends of
+    /// an open one.
+    pub fn neighbors(&self, i: usize) -> [Option<usize>; 2] {
+        let Some((r, closed)) = self.contours().into_iter().find(|(r, _)| r.contains(&i)) else {
+            return [None, None];
+        };
+        let prev = if i > r.start {
+            Some(i - 1)
+        } else {
+            closed.then_some(r.end - 1)
+        };
+        let next = if i + 1 < r.end {
+            Some(i + 1)
+        } else {
+            closed.then_some(r.start)
+        };
+        [prev, next].map(|p| p.filter(|&p| p != i))
+    }
+
+    /// Number of segments along a run of `len` points.
+    fn run_segments(len: usize, closed: bool) -> usize {
+        if closed && len >= 2 {
+            len
+        } else {
+            len.saturating_sub(1)
+        }
+    }
+
+    /// Number of segments between the points: a polygon's last closes it, and so do
+    /// those of a path's closed contours.
+    pub fn segment_count(&self) -> usize {
+        self.contours()
+            .into_iter()
+            .map(|(r, closed)| Self::run_segments(r.len(), closed))
+            .sum()
+    }
+
+    /// The points at the ends of segment `k`.
+    pub fn segment_ends(&self, k: usize) -> Option<(usize, usize)> {
+        let mut k = k;
+        for (r, closed) in self.contours() {
+            let count = Self::run_segments(r.len(), closed);
+            if k < count {
+                return Some((r.start + k, r.start + (k + 1) % r.len()));
+            }
+            k -= count;
+        }
+        None
+    }
+
+    /// The path contour holding point `i`, as an index in `contours`.
+    fn contour_index(&self, i: usize) -> Option<usize> {
+        let mut start = 0;
+        self.contours.iter().position(|c| {
+            start += c.len;
+            i < start
+        })
     }
 
     /// Segment `k` as a cubic Bezier curve: its two ends and two control points.
     pub fn segment(&self, k: usize) -> Option<[P2; 4]> {
-        let n = self.points.len();
-        if k >= self.segment_count() {
-            return None;
-        }
-        let (a, b) = (k, (k + 1) % n);
+        let (a, b) = self.segment_ends(k)?;
+        Some(self.curve(a, b))
+    }
+
+    /// The curve from point `a` to point `b`, by their handles.
+    fn curve(&self, a: usize, b: usize) -> [P2; 4] {
         let (pa, pb) = (self.points[a], self.points[b]);
         let (out, inn) = (self.handle(a)[1], self.handle(b)[0]);
-        Some([
+        [
             pa,
             [pa[0] + out[0], pa[1] + out[1]],
             [pb[0] + inn[0], pb[1] + inn[1]],
             pb,
-        ])
+        ]
+    }
+
+    /// How its outline's inside is found when it is filled (see `even_odd`).
+    pub fn fill_rule(&self) -> FillRule {
+        if self.kind == ShapeKind::Path && self.even_odd {
+            FillRule::EvenOdd
+        } else {
+            FillRule::Winding
+        }
     }
 
     /// True if point `i` has both handles, lined up on either side of it: dragging one
@@ -422,17 +556,20 @@ impl Shape {
                 if self.points.len() < k.min_points() {
                     return None;
                 }
-                pb.move_to(self.points[0][0], self.points[0][1]);
-                for seg in (0..self.segment_count()).filter_map(|k| self.segment(k)) {
-                    let [a, c1, c2, b] = seg;
-                    if c1 == a && c2 == b {
-                        pb.line_to(b[0], b[1]);
-                    } else {
-                        pb.cubic_to(c1[0], c1[1], c2[0], c2[1], b[0], b[1]);
+                for (r, closed) in self.contours() {
+                    let first = self.points[r.start];
+                    pb.move_to(first[0], first[1]);
+                    for j in 0..Self::run_segments(r.len(), closed) {
+                        let [a, c1, c2, b] = self.curve(r.start + j, r.start + (j + 1) % r.len());
+                        if c1 == a && c2 == b {
+                            pb.line_to(b[0], b[1]);
+                        } else {
+                            pb.cubic_to(c1[0], c1[1], c2[0], c2[1], b[0], b[1]);
+                        }
                     }
-                }
-                if k.closed() {
-                    pb.close();
+                    if closed {
+                        pb.close();
+                    }
                 }
             }
         }
@@ -486,9 +623,10 @@ impl Shape {
     /// The filled shapes that draw it, in mm in its own frame, bottom first: the fill,
     /// the strokes painted inside it, then its own stroke turned into a shape, so that
     /// paint never covers its border. Each is filled with its color or gradient under
-    /// the non-zero rule, and is true when it is cut off at the outline (the painted
-    /// strokes). Gradients span the shape's box, stroke included.
-    pub fn coats(&self) -> Vec<(Path, Ink, bool)> {
+    /// its rule (non-zero but for a path's fill, see `fill_rule`), and is true when it is
+    /// cut off at the outline (the painted strokes). Gradients span the shape's box,
+    /// stroke included.
+    pub fn coats(&self) -> Vec<(Path, Ink, bool, FillRule)> {
         let Some(path) = self.path() else {
             return Vec::new();
         };
@@ -503,26 +641,26 @@ impl Shape {
             };
             if let Some(stroke) = line.and_then(|l| l.stroke(&self.stroke_style(), CURVE_RES)) {
                 let ink = Ink::of(self.stroke_color, self.stroke_gradient.as_ref(), frame);
-                out.push((stroke, ink, false));
+                out.push((stroke, ink, false, FillRule::Winding));
             }
         }
         if self.kind.closed() {
             let paint = self
                 .strokes
                 .iter()
-                .filter_map(|s| Some((s.outline()?, Ink::Solid(s.color), true)));
+                .filter_map(|s| Some((s.outline()?, Ink::Solid(s.color), true, FillRule::Winding)));
             out.splice(0..0, paint);
         }
         if self.filled() {
             let ink = Ink::of(self.fill_color, self.fill_gradient.as_ref(), frame);
-            out.insert(0, (path, ink, false));
+            out.insert(0, (path, ink, false, self.fill_rule()));
         }
         out
     }
 
     /// Area it covers, stroke included, in mm in its own frame: min and max corners.
     /// Dashes are left out, so the box doesn't change with them.
-    fn bounds(&self) -> Option<(P2, P2)> {
+    pub fn bounds(&self) -> Option<(P2, P2)> {
         let path = self.path()?;
         let mut r = path.compute_tight_bounds()?;
         if self.stroked()
@@ -684,6 +822,21 @@ pub fn new_layer(id: u64, kind: ShapeKind, center: P2) -> Layer {
     layer.shape = Some(Box::new(Shape::new(kind)));
     layer.transform.scale = [1.0 / UNITS_PER_MM; 2];
     layer.transform.center = center;
+    layout(&mut layer, false);
+    layer
+}
+
+/// A shape layer named `name` drawing `shape`, the origin of its frame at `at` on the
+/// page.
+pub fn new_shape_layer(id: u64, name: String, shape: Shape, at: P2) -> Layer {
+    let mut layer = Layer::new(id, name, PathBuf::new());
+    // The layer's box is centered on the shape's.
+    let c = shape.bounds().map_or([0.0; 2], |(lo, hi)| {
+        [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0]
+    });
+    layer.shape = Some(Box::new(shape));
+    layer.transform.scale = [1.0 / UNITS_PER_MM; 2];
+    layer.transform.center = [at[0] + c[0], at[1] + c[1]];
     layout(&mut layer, false);
     layer
 }
@@ -1005,18 +1158,19 @@ pub fn move_point(layer: &mut Layer, i: usize, page: P2) -> bool {
     }
 }
 
-/// Adds a point on segment `k` at `t` (0 to 1 along it), as point `k + 1`. The curve
+/// Adds a point on segment `k` at `t` (0 to 1 along it), after its first end. The curve
 /// is split there, so the shape stays the same. Returns true if it was added; a line
 /// keeps its two points.
 pub fn split_segment(layer: &mut Layer, k: usize, t: f32) -> bool {
-    let Some(shape) = layer
-        .shape
-        .as_deref_mut()
-        .filter(|s| matches!(s.kind, ShapeKind::Polyline | ShapeKind::Polygon))
-    else {
+    let Some(shape) = layer.shape.as_deref_mut().filter(|s| {
+        matches!(
+            s.kind,
+            ShapeKind::Polyline | ShapeKind::Polygon | ShapeKind::Path
+        )
+    }) else {
         return false;
     };
-    let Some([p0, p1, p2, p3]) = shape.segment(k) else {
+    let (Some([p0, p1, p2, p3]), Some((a, b))) = (shape.segment(k), shape.segment_ends(k)) else {
         return false;
     };
     let t = t.clamp(0.0, 1.0);
@@ -1025,12 +1179,14 @@ pub fn split_segment(layer: &mut Layer, k: usize, t: f32) -> bool {
     let (r0, r1) = (mix(q0, q1), mix(q1, q2));
     let m = mix(r0, r1);
     let n = shape.points.len();
-    let (a, b) = (k, (k + 1) % n);
     let straight = p1 == p0 && p2 == p3;
-    shape.points.insert(k + 1, m);
+    if let Some(c) = shape.contour_index(a) {
+        shape.contours[c].len += 1;
+    }
+    shape.points.insert(a + 1, m);
     if straight {
         if !shape.handles.is_empty() {
-            shape.handles.insert(k + 1, [[0.0; 2]; 2]);
+            shape.handles.insert(a + 1, [[0.0; 2]; 2]);
         }
         return true;
     }
@@ -1039,7 +1195,7 @@ pub fn split_segment(layer: &mut Layer, k: usize, t: f32) -> bool {
     hs.resize(n, [[0.0; 2]; 2]);
     hs[a][1] = off(q0, p0);
     hs[b][0] = off(q2, p3);
-    hs.insert(k + 1, [off(r0, m), off(r1, m)]);
+    hs.insert(a + 1, [off(r0, m), off(r1, m)]);
     true
 }
 
@@ -1051,6 +1207,13 @@ pub fn remove_point(layer: &mut Layer, i: usize) -> bool {
     };
     if i >= shape.points.len() || shape.points.len() <= shape.kind.min_points() {
         return false;
+    }
+    // Each of a path's contours keeps two points.
+    if shape.kind == ShapeKind::Path {
+        match shape.contour_index(i) {
+            Some(c) if shape.contours[c].len > 2 => shape.contours[c].len -= 1,
+            _ => return false,
+        }
     }
     shape.points.remove(i);
     if i < shape.handles.len() {
@@ -1139,11 +1302,8 @@ pub fn toggle_smooth(layer: &mut Layer, i: usize) -> bool {
         shape.tidy_handles();
         return true;
     }
-    let n = shape.points.len();
-    let closed = shape.kind.closed();
     let p = shape.points[i];
-    let prev = (i > 0 || closed).then(|| shape.points[(i + n - 1) % n]);
-    let next = (i + 1 < n || closed).then(|| shape.points[(i + 1) % n]);
+    let [prev, next] = shape.neighbors(i).map(|k| k.map(|k| shape.points[k]));
     let (Some(a), Some(b)) = (prev.or(next), next.or(prev)) else {
         return false;
     };
@@ -1229,12 +1389,13 @@ pub fn set_geometry_size(layer: &mut Layer, size: P2) {
 }
 
 /// Turns the shape into another kind, keeping its place and size: its outline's
-/// corners become points, points become a box.
+/// corners become points, points become a box. A path stays one: its other contours
+/// would be lost.
 pub fn set_kind(layer: &mut Layer, kind: ShapeKind) {
     let Some(shape) = layer.shape.as_deref() else {
         return;
     };
-    if shape.kind == kind {
+    if shape.kind == kind || shape.kind == ShapeKind::Path {
         return;
     }
     let mut new = shape.clone();
@@ -1264,6 +1425,15 @@ pub fn set_kind(layer: &mut Layer, kind: ShapeKind) {
             let m = [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
             points = vec![a, b, [m[0] + d[1] / 2.0, m[1] - d[0] / 2.0]];
         }
+        new.contours = if kind == ShapeKind::Path {
+            vec![Contour {
+                len: points.len(),
+                // A box kind's outline is closed.
+                closed: !shape.kind.has_points() || shape.contours().first().is_some_and(|c| c.1),
+            }]
+        } else {
+            Vec::new()
+        };
         new.points = points;
         new.handles = handles;
         new.tidy_handles();
@@ -1280,6 +1450,7 @@ pub fn set_kind(layer: &mut Layer, kind: ShapeKind) {
         new.size = s.map(|v| if v < big * 0.01 { big } else { v });
         new.points.clear();
         new.handles.clear();
+        new.contours.clear();
         // The painted strokes move with the geometry, now centered on the frame's origin.
         for p in new.strokes.iter_mut().flat_map(|s| &mut s.points) {
             p[0] += shift[0];
@@ -1390,17 +1561,17 @@ fn draw(layer: &Layer, px_per_unit: f32) -> Option<Pixmap> {
         None => ts,
     };
     let mut clip = None;
-    for (path, ink, clipped) in shape.coats() {
+    for (path, ink, clipped, rule) in shape.coats() {
         if clipped && clip.is_none() {
             let mut mask = Mask::new(pixmap.width(), pixmap.height())?;
             if let Some(outline) = shape.path() {
-                mask.fill_path(&outline, FillRule::Winding, true, ts);
+                mask.fill_path(&outline, shape.fill_rule(), true, ts);
             }
             clip = Some(mask);
         }
         let mask = clip.as_ref().filter(|_| clipped);
         let t = if clipped { paint_ts } else { ts };
-        pixmap.fill_path(&path, &ink.paint(), FillRule::Winding, t, mask);
+        pixmap.fill_path(&path, &ink.paint(), rule, t, mask);
     }
     Some(pixmap)
 }
@@ -1414,7 +1585,7 @@ pub fn outlines(layer: &Layer) -> Option<Outlines> {
     let coats: Vec<_> = shape
         .coats()
         .into_iter()
-        .filter_map(|(path, ink, clipped)| {
+        .filter_map(|(path, ink, clipped, rule)| {
             let ink = match ink {
                 Ink::Gradient { gradient, frame } => Ink::Gradient {
                     gradient,
@@ -1422,7 +1593,7 @@ pub fn outlines(layer: &Layer) -> Option<Outlines> {
                 },
                 solid => solid,
             };
-            Some((path.transform(ts)?, ink, clipped))
+            Some((path.transform(ts)?, ink, clipped, rule))
         })
         .collect();
     // The painted strokes, one after the other, are cut off at the outline.
@@ -1430,8 +1601,11 @@ pub fn outlines(layer: &Layer) -> Option<Outlines> {
     let count = coats.iter().filter(|c| c.2).count();
     let clip = first
         .zip(shape.path().and_then(|p| p.transform(ts)))
-        .map(|(i, p)| (p, i..i + count));
-    let fills = coats.into_iter().map(|(p, ink, _)| (p, ink)).collect();
+        .map(|(i, p)| (p, i..i + count, shape.fill_rule()));
+    let fills = coats
+        .into_iter()
+        .map(|(p, ink, _, rule)| (p, ink, rule))
+        .collect();
     Some(Outlines {
         fills,
         clip,
@@ -1628,6 +1802,79 @@ mod tests {
         }
     }
 
+    /// A 20 mm square with a 10 mm square inside, as a path.
+    fn square_with_hole(even_odd: bool) -> Layer {
+        let mut s = Shape::new(ShapeKind::Path);
+        s.points = vec![
+            [-10.0, -10.0],
+            [10.0, -10.0],
+            [10.0, 10.0],
+            [-10.0, 10.0],
+            [-5.0, -5.0],
+            [5.0, -5.0],
+            [5.0, 5.0],
+            [-5.0, 5.0],
+        ];
+        s.contours = vec![
+            Contour {
+                len: 4,
+                closed: true,
+            },
+            Contour {
+                len: 4,
+                closed: true,
+            },
+        ];
+        s.even_odd = even_odd;
+        s.stroke = false;
+        new_shape_layer(1, "p".into(), s, [50.0, 50.0])
+    }
+
+    #[test]
+    fn path_contours_and_holes() {
+        let l = square_with_hole(true);
+        let s = l.shape.as_deref().unwrap();
+        assert_eq!(s.segment_count(), 8);
+        // The last segment of each contour goes back to its first point.
+        assert_eq!(s.segment_ends(3), Some((3, 0)));
+        assert_eq!(s.segment_ends(7), Some((7, 4)));
+        assert_eq!(s.neighbors(4), [Some(7), Some(5)]);
+        assert!(close(l.transform.center, [50.0, 50.0]));
+        let pm = draw(&l, 1.0).unwrap();
+        let alpha = |x, y| pm.pixel(x, y).unwrap().alpha();
+        let [w, h] = [pm.width() / 2, pm.height() / 2];
+        assert!(alpha(w, h) == 0, "a hole in the middle");
+        assert!(alpha(w / 4, h) == 255);
+        // Under the non-zero rule, the inner square turning the same way fills it.
+        let pm = draw(&square_with_hole(false), 1.0).unwrap();
+        assert!(pm.pixel(w, h).unwrap().alpha() == 255);
+        // The PDF gets the same rule.
+        let o = outlines(&square_with_hole(true)).unwrap();
+        assert_eq!(o.fills[0].2, FillRule::EvenOdd);
+    }
+
+    #[test]
+    fn path_points_edited_per_contour() {
+        let mut l = square_with_hole(true);
+        // A point on the inner square's closing segment goes at the end of its contour.
+        assert!(split_segment(&mut l, 7, 0.5));
+        let s = l.shape.as_deref().unwrap();
+        assert_eq!(s.contours[1].len, 5);
+        assert!(close(s.points[8], [-5.0, 0.0]));
+        assert_eq!(s.segment_count(), 9);
+        // Contours keep two points each.
+        for _ in 0..3 {
+            assert!(remove_point(&mut l, 4));
+        }
+        assert!(!remove_point(&mut l, 4));
+        assert_eq!(l.shape.as_deref().unwrap().contours[1].len, 2);
+        // It stays a path, keeping both contours.
+        set_kind(&mut l, ShapeKind::Polygon);
+        let s = l.shape.as_deref().unwrap();
+        assert_eq!(s.kind, ShapeKind::Path);
+        assert_eq!(s.contours.len(), 2);
+    }
+
     #[test]
     fn star_and_polygon_fill_their_box() {
         let mut s = Shape::new(ShapeKind::Star);
@@ -1811,7 +2058,7 @@ mod tests {
         ));
         // Cut off in the PDF at its box.
         let o = outlines(&l).unwrap();
-        let (clip, range) = o.clip.expect("a clip");
+        let (clip, range, _) = o.clip.expect("a clip");
         assert_eq!(range, 0..1, "the stroke, nothing else");
         let clip = clip.compute_tight_bounds().unwrap();
         assert_eq!(

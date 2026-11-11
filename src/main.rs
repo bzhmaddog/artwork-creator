@@ -28,6 +28,7 @@ mod recent;
 mod render;
 mod shape;
 mod shortcuts;
+mod svg;
 mod template;
 mod text;
 mod text_links;

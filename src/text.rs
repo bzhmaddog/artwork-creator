@@ -1522,7 +1522,7 @@ pub fn outlines(layer: &Layer) -> Option<Outlines> {
                 Some(width) => coat.path.stroke(&round_stroke(width), STROKE_RES)?,
                 None => coat.path.clone(),
             };
-            Some((path, coat.ink))
+            Some((path, coat.ink, FillRule::Winding))
         })
         .collect();
     // The layer's box is the laid out text's, kept up to date by `sync`.

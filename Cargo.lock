@@ -334,6 +334,7 @@ name = "artwork-creator"
 version = "0.9.1"
 dependencies = [
  "artwork-plugin-sdk",
+ "base64",
  "dxf",
  "eframe",
  "egui",

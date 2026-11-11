@@ -31,7 +31,7 @@ Done:
 Done:
 
 - Shapes: rectangle (with optional rounded corners), ellipse / circle, line, polyline,
-  polygon, regular polygon and star; one kind can be turned into another.
+  polygon, regular polygon and star.
 - Stroke: width, color, opacity, dashes, line caps and joins. Resizing keeps its width.
 - Fill for closed shapes: color and opacity, or no fill.
 - Layer effects work on shapes too.
@@ -105,6 +105,9 @@ Done:
   closed shape to paint in.
 - **Gradient fills**, linear or radial with any number of colors, for a shape's fill and
   stroke, a text and the page background; kept as vector gradients in the PDF.
+- **SVG import** as shape layers (its own groups kept): fills, strokes, gradients and fill rules
+  kept; paths with several outlines (holes) as a new path shape; anything that is not a
+  shape left out, nothing loaded from elsewhere.
 
 Planned:
 
@@ -118,7 +121,6 @@ Planned:
 - **Copy and paste effects** from one layer to others.
 - **Per-button artwork**: fill or ring around a single button hole, and export of round
   artwork for clear button caps.
-- **SVG import** as vector layers.
 
 ### Files and safety
 

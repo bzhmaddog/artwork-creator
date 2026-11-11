@@ -36,6 +36,9 @@ const EXPORT_PREVIEW_WIDTH: f32 = 360.0;
 const TILE_COLOR: Color32 = Color32::from_rgb(220, 20, 60);
 const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp", "gif"];
 const IMAGE_FILTERS: &[Filter] = &[Filter::new(tr_noop!("FILTER_IMAGES"), IMAGE_EXTENSIONS)];
+/// SVG files, whose shapes are imported as path layers (see `svg`).
+const SVG_EXTENSIONS: &[&str] = &["svg", "svgz"];
+const SVG_FILTERS: &[Filter] = &[Filter::new(tr_noop!("FILTER_SVG"), SVG_EXTENSIONS)];
 const EXPORT_FILTERS: &[Filter] = &[Filter::new("PNG / PDF", &["png", "pdf"])];
 /// Projects that can be opened: archives and linked JSON projects.
 const OPEN_PROJECT_FILTERS: &[Filter] = &[Filter::new(
@@ -638,9 +641,14 @@ impl ArtworkApp {
 
     /// Adds a shape layer of `kind` above the selection, centered on the template, or on
     /// the view when the template's center is out of sight (see `new_layer_center`). Lines,
-    /// polylines and polygons are drawn point by point on the canvas instead.
+    /// polylines and polygons are drawn point by point on the canvas instead; paths come
+    /// from an SVG file, asked for.
     fn add_shape(&mut self, ctx: &egui::Context, kind: ShapeKind) {
         self.layers_panel.shape_kind = kind;
+        if kind == ShapeKind::Path {
+            self.pick_svg(ctx);
+            return;
+        }
         if kind.has_points() {
             self.canvas.drawing = Some(view::Drawing::new(kind));
             self.canvas.points = None;
@@ -695,6 +703,22 @@ impl ArtworkApp {
         shape::sync(ctx, &mut self.doc, true);
     }
 
+    /// Adds files dropped on the window: SVG files as shapes (see `add_svg`), others as
+    /// images.
+    fn add_dropped(&mut self, ctx: &egui::Context, paths: Vec<PathBuf>) {
+        let (svgs, images): (Vec<PathBuf>, Vec<PathBuf>) = paths.into_iter().partition(|p| {
+            p.extension()
+                .and_then(|e| e.to_str())
+                .is_some_and(|e| SVG_EXTENSIONS.iter().any(|x| e.eq_ignore_ascii_case(x)))
+        });
+        for path in svgs {
+            self.add_svg(ctx, &path);
+        }
+        if !images.is_empty() {
+            self.add_images(ctx, images);
+        }
+    }
+
     /// Adds one layer per image file, fitted to the page, above the selection.
     fn add_images(&mut self, ctx: &egui::Context, paths: Vec<PathBuf>) {
         for path in paths {
@@ -714,6 +738,31 @@ impl ArtworkApp {
                 }
                 Err(e) => self.messages.push(e),
             }
+        }
+    }
+
+    /// Adds an SVG file's shapes (and its groups) above the selection, at its true size
+    /// unless larger than the page.
+    fn add_svg(&mut self, ctx: &egui::Context, path: &std::path::Path) {
+        let (page, center) = (self.doc.page_mm(), self.doc.page_center());
+        let doc = &mut self.doc;
+        match crate::svg::import(path, page, center, &mut || doc.alloc_id()) {
+            Ok(imported) => {
+                // Bottom first, each just above the one before (not inside it, when it
+                // is a group); the top one ends selected.
+                let mut at = layers_ui::insertion_path(&mut self.doc, self.selected);
+                for node in imported.nodes {
+                    self.selected = Some(node.id());
+                    self.doc.insert(&at, node);
+                    if let Some(last) = at.last_mut() {
+                        *last += 1;
+                    }
+                }
+                self.dirty = true;
+                self.messages.extend(imported.notices);
+                shape::sync(ctx, &mut self.doc, true);
+            }
+            Err(e) => self.messages.push(e),
         }
     }
 
@@ -754,6 +803,13 @@ impl ArtworkApp {
                 paths.insert(0, chosen);
                 return self.add_images(ctx, paths);
             }
+            Purpose::ImportSvg => {
+                paths.insert(0, chosen);
+                for path in paths {
+                    self.add_svg(ctx, &path);
+                }
+                return;
+            }
             Purpose::OpenProject => return self.open_project_path(ctx, chosen),
             Purpose::SaveProject => project_save_path(chosen.clone()),
             Purpose::Export => chosen.clone(),
@@ -787,7 +843,7 @@ impl ArtworkApp {
         match purpose {
             Purpose::SaveProject => self.save_to(path),
             Purpose::Export => self.start_export(path),
-            Purpose::AddImages | Purpose::OpenProject => {}
+            Purpose::AddImages | Purpose::ImportSvg | Purpose::OpenProject => {}
         }
     }
 
@@ -856,6 +912,21 @@ impl ArtworkApp {
                 save: false,
                 multiple: true,
                 filters: IMAGE_FILTERS,
+                default_name: String::new(),
+            },
+        );
+    }
+
+    /// Opens the dialog to add the shapes of SVG files as path layers.
+    fn pick_svg(&mut self, ctx: &egui::Context) {
+        self.request_file(
+            ctx,
+            Request {
+                purpose: Purpose::ImportSvg,
+                title: tr!("IMPORT_SVG_DIALOG_TITLE"),
+                save: false,
+                multiple: true,
+                filters: SVG_FILTERS,
                 default_name: String::new(),
             },
         );
@@ -2853,7 +2924,7 @@ impl eframe::App for ArtworkApp {
                 .collect()
         });
         if !dropped.is_empty() {
-            self.add_images(&ctx, dropped);
+            self.add_dropped(&ctx, dropped);
         }
         self.guard_close(&ctx);
         crate::colors::publish(&ctx, &self.doc);

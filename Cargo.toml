@@ -45,6 +45,9 @@ sys-locale = "0.3"
 zip = { version = "9", default-features = false, features = ["deflate-flate2"] }
 # Polygon offsets: the outline grown by the bleed, shrunk to the safe area.
 i_overlay = "9.1"
+# SVG import: the shapes and how they are painted, nothing loaded from elsewhere (no
+# images, no fonts: no text).
+usvg = { version = "0.49", default-features = false, features = ["svgz"] }
 
 # On Wayland (e.g. WSLg) the window draws its own title bar. eframe leaves out winit's
 # decorations, so without this the bar has no title text.

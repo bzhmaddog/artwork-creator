@@ -146,18 +146,13 @@ fn shown_handles(
     let Some(s) = layer.shape.as_deref() else {
         return Vec::new();
     };
-    let n = s.points.len();
-    if i >= n {
+    if i >= s.points.len() {
         return Vec::new();
     }
-    let closed = s.kind.closed();
+    let [prev, next] = s.neighbors(i);
     let mut wanted = vec![(i, 0), (i, 1)];
-    if i > 0 || closed {
-        wanted.push(((i + n - 1) % n, 1));
-    }
-    if i + 1 < n || closed {
-        wanted.push(((i + 1) % n, 0));
-    }
+    wanted.extend(prev.map(|k| (k, 1)));
+    wanted.extend(next.map(|k| (k, 0)));
     wanted.dedup();
     wanted
         .into_iter()
@@ -580,12 +575,13 @@ pub fn input(
     out
 }
 
-/// The point before point `i` on the page, or after it for the first point: the other
-/// end of the segment Shift keeps at an angle.
+/// The point before point `i` on the page, or after it for the first point of an open
+/// outline: the other end of the segment Shift keeps at an angle.
 fn neighbor(layer: &Layer, i: usize) -> Option<P2> {
-    let points = shape::page_points(layer);
-    let k = if i > 0 { i - 1 } else { 1 };
-    points.get(k).copied()
+    let s = layer.shape.as_deref()?;
+    let [prev, next] = s.neighbors(i);
+    let k = prev.filter(|&p| p < i).or(next).or(prev)?;
+    shape::page_points(layer).get(k).copied()
 }
 
 /// `to`, turned around `from` to the nearest multiple of `step` degrees.

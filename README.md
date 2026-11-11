@@ -50,9 +50,18 @@ layers panel on the right](doc/capture.png)
   clicking their points on the canvas, their segments straight or Bezier curves, and
   their points and curve handles can be moved, added and removed afterwards; points snap
   to the template's anchors. Resizing a shape keeps its stroke
-  width in mm, and one kind can be turned into another (a rectangle into a polygon of its
-  corners, for instance). Shapes move, rotate, distort and take effects like
+  width in mm; a shape keeps the kind it was made as. Shapes move, rotate, distort and take effects like
   images, and are drawn at the export resolution.
+- **SVG import**: an SVG file picked from **Path...** in the Shape menu or dropped on the
+  window comes in as shape layers above the selection, with a group for each of its
+  own that has an id or an opacity. Fills, strokes (width, color, opacity, caps, joins,
+  dashes as the nearest of the app's styles), linear and radial gradients and fill rules
+  are kept; it keeps its true size, shrunk to fit the page if larger. A path made of
+  several outlines (a letter with a hole, a logo in one piece) becomes a **path** shape,
+  its fill rule (non-zero or even-odd) set in Properties and its points edited like a
+  polygon's. Only shapes come in: texts, images, scripts, links, embedded HTML, filters,
+  masks, clipping and patterns are left out (the app says which), and nothing the file
+  points to is ever loaded.
 - **Painting**: any closed shape (rectangle, ellipse, polygon, star, closed path) can be
   painted in. While one is selected, a tool bar at the canvas' top left (also in the
   **Tools** menu) has Select, Pencil, Brush and Eraser; the tool picked last comes back
@@ -436,11 +445,11 @@ The default keys:
 | Undo / Redo | Ctrl+Z / Ctrl+Shift+Z or Ctrl+Y |
 | Add an image layer | Ctrl+I, or drop image files on the window |
 | Add a text layer | Ctrl+T |
-| Add a shape layer (the kind added last; others from the Shape button) | Ctrl+R |
+| Add a shape layer (the kind added last; others from the Shape button, Path... importing SVG files) | Ctrl+R, or drop SVG files on the window |
 | Add a canvas to paint in (the kind added last; others from the Canvas button) | Ctrl+K |
 | Type in a text layer on the canvas | Double-click it (straight text only); Esc or a click outside it to stop |
 | Finish drawing a polyline or polygon | Double-click, Enter, Esc or right-click; a click on the first point closes it |
-| Edit the points of a line, polyline or polygon | Double-click it; Esc or selecting something else to stop |
+| Edit the points of a line, polyline, polygon or path | Double-click it; Esc or selecting something else to stop |
 | Add a point while editing points | Double-click a segment |
 | Make a point smooth or sharp | Double-click it while editing points |
 | Place a smooth point while drawing | Press and drag |

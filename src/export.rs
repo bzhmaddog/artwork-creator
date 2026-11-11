@@ -379,17 +379,28 @@ fn write_png(pixmap: &tiny_skia::Pixmap, dpi: f32, path: &Path) -> Result<(), St
     writer.finish().map_err(|e| err(&e))
 }
 
+/// The PDF fill rule matching tiny-skia's.
+fn winding(rule: tiny_skia::FillRule) -> WindingOrder {
+    match rule {
+        tiny_skia::FillRule::Winding => WindingOrder::NonZero,
+        tiny_skia::FillRule::EvenOdd => WindingOrder::EvenOdd,
+    }
+}
+
 /// Millimeters to PDF points (1/72 inch).
 fn mm_to_pt(mm: f32) -> f32 {
     mm * 72.0 / 25.4
 }
 
-/// A shape filled with a gradient: clipped to its outline (`rings`, in PDF points),
-/// then a PDF shading painted in the layer's own units through its map. Only for an
-/// opaque gradient on a layer that is not distorted (see `SceneLayer::vector`).
+/// A shape filled with a gradient: clipped to its outline (`rings`, in PDF points, under
+/// the fill rule `order`), then a PDF shading painted in the layer's own units through
+/// its map. Only for an opaque gradient on a layer that is not distorted (see
+/// `SceneLayer::vector`).
+#[allow(clippy::too_many_arguments)]
 fn gradient_ops(
     doc: &mut PdfDocument,
     rings: Vec<PolygonRing>,
+    order: WindingOrder,
     gradient: &Gradient,
     frame: tiny_skia::Rect,
     map: Homography,
@@ -410,7 +421,7 @@ fn gradient_ops(
         polygon: Polygon {
             rings,
             mode: PaintMode::Clip,
-            winding_order: WindingOrder::NonZero,
+            winding_order: order,
         },
     });
     // Layer units to page mm (the layer's map), then to PDF points with y up.
@@ -653,19 +664,18 @@ fn page_ops(doc: &mut PdfDocument, scene: &Scene, parts: &[Part], dpi: f32) -> V
             Part::Vector(layer) => {
                 let Some(v) = layer.vector() else { continue };
                 // The strokes painted inside a shape are cut off at its outline.
-                let clip = v
-                    .clip
-                    .as_ref()
-                    .map(|(c, range)| (rings(c, v.map, page_h), range.clone()));
-                for (i, (path, ink)) in v.fills.iter().enumerate() {
-                    if let Some((rings, range)) = &clip {
+                let clip = v.clip.as_ref().map(|(c, range, rule)| {
+                    (rings(c, v.map, page_h), range.clone(), winding(*rule))
+                });
+                for (i, (path, ink, rule)) in v.fills.iter().enumerate() {
+                    if let Some((rings, range, order)) = &clip {
                         if i == range.start {
                             ops.push(Op::SaveGraphicsState);
                             ops.push(Op::DrawPolygon {
                                 polygon: Polygon {
                                     rings: rings.clone(),
                                     mode: PaintMode::Clip,
-                                    winding_order: WindingOrder::NonZero,
+                                    winding_order: *order,
                                 },
                             });
                         }
@@ -683,6 +693,7 @@ fn page_ops(doc: &mut PdfDocument, scene: &Scene, parts: &[Part], dpi: f32) -> V
                             ops.extend(gradient_ops(
                                 doc,
                                 rings,
+                                winding(*rule),
                                 gradient,
                                 *frame,
                                 v.map,
@@ -707,12 +718,12 @@ fn page_ops(doc: &mut PdfDocument, scene: &Scene, parts: &[Part], dpi: f32) -> V
                         polygon: Polygon {
                             rings,
                             mode: PaintMode::Fill,
-                            winding_order: WindingOrder::NonZero,
+                            winding_order: winding(*rule),
                         },
                     });
                     ops.push(Op::RestoreGraphicsState);
                 }
-                if clip.is_some_and(|(_, r)| r.end >= v.fills.len()) {
+                if clip.is_some_and(|(_, r, _)| r.end >= v.fills.len()) {
                     ops.push(Op::RestoreGraphicsState);
                 }
             }

@@ -12,6 +12,8 @@ use crate::i18n::{tr, translate};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Purpose {
     AddImages,
+    /// SVG files whose shapes are added as path layers.
+    ImportSvg,
     OpenProject,
     SaveProject,
     Export,

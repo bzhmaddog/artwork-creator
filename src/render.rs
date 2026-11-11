@@ -41,11 +41,11 @@ pub struct SceneLayer {
 #[derive(Debug)]
 pub struct Outlines {
     /// Shapes in the layer's frame (layer units, y down), each filled with its color or
-    /// gradient under the non-zero rule, bottom first.
-    pub fills: Vec<(tiny_skia::Path, crate::gradient::Ink)>,
-    /// An outline in the same frame, and the fills cut off at it (the strokes painted
-    /// inside a shape), if any.
-    pub clip: Option<(tiny_skia::Path, std::ops::Range<usize>)>,
+    /// gradient under its rule, bottom first.
+    pub fills: Vec<(tiny_skia::Path, crate::gradient::Ink, FillRule)>,
+    /// An outline in the same frame, the fills cut off at it (the strokes painted inside
+    /// a shape) and the rule finding its inside, if any.
+    pub clip: Option<(tiny_skia::Path, std::ops::Range<usize>, FillRule)>,
     /// Layer units to page mm, including any distortion.
     pub map: Homography,
 }
@@ -67,7 +67,7 @@ impl SceneLayer {
     /// on a layer that is not distorted (they cannot follow a perspective).
     pub fn vector(&self) -> Option<&Outlines> {
         let v = self.vector.as_deref()?;
-        let gradients_fit = v.fills.iter().all(|(_, ink)| match ink {
+        let gradients_fit = v.fills.iter().all(|(_, ink, _)| match ink {
             crate::gradient::Ink::Solid(_) => true,
             crate::gradient::Ink::Gradient { gradient, .. } => {
                 gradient.is_opaque() && v.map.as_affine().is_some()

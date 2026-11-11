@@ -97,11 +97,13 @@ fn with_export(json: &str, export: &ExportSettings) -> Result<String, String> {
     struct Choices<'a> {
         png: bool,
         pdf: bool,
+        svg: bool,
         print_lines: &'a [bool],
     }
     let choices = Choices {
         png: export.png,
         pdf: export.pdf,
+        svg: export.svg,
         print_lines: &export.print_lines,
     };
     let mut value: serde_json::Value = serde_json::from_str(json).map_err(|e| e.to_string())?;

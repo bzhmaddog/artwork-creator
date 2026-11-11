@@ -6,7 +6,7 @@
 A desktop app for designing printed artwork for arcade controllers and fightsticks.
 
 Load a controller template made of DXF files (outline, buttons, cutouts), arrange your
-images on top, and export print-ready PNG or PDF at true size. The artwork is clipped to the
+images on top, and export print-ready PNG, PDF or SVG at true size. The artwork is clipped to the
 panel outline and left blank in the button and cutout holes. Runs on Windows and Linux.
 Built in Rust with [egui](https://github.com/emilk/egui).
 
@@ -173,7 +173,7 @@ layers panel on the right](doc/capture.png)
 - **Undo / redo** for every change to the project.
 - **Templates** made of several elements, each in its own DXF file, with its own color and
   visibility.
-- **Export** PNG and/or PDF. The Export window only asks what to export: the formats
+- **Export** PNG, PDF and/or SVG. The Export window only asks what to export: the formats
   and which template lines are printed, saved with the project. How it is printed is
   set once for all projects in the **Print** panel: the resolution (72 to 1200 DPI),
   whether the outside of the outline and the inside of buttons and of cutouts are left
@@ -181,7 +181,9 @@ layers panel on the right](doc/capture.png)
   (text as outlines, so no font is needed to print it), gradients included; text and
   shape layers with effects, inside a semi-transparent group, distorted with a gradient,
   or with a gradient whose colors are not all opaque, are printed as images like the
-  rest.
+  rest. The SVG holds the same as the PDF, for a vector editor such as Inkscape or for a
+  cutting machine: the artwork, each template element's lines and the marks are in
+  layers of their own, and the images are embedded in the file.
 - **Page sizes**: A5, A4, A3, A2, Letter, Legal and Tabloid, in portrait or landscape, or
   a custom width and height.
 - **Print** straight from the app (**File > Print…**), at true size. The Print window
@@ -191,8 +193,8 @@ layers panel on the right](doc/capture.png)
   sheets'; keep its scale at 100%. On Linux, printing goes through CUPS (`lp`): pick
   the printer and copies in the Print window.
 - **Tiled printing**: a page larger than your paper is split over several sheets (A5 to
-  Tabloid, portrait or landscape) in the Print panel: one PDF page and one PNG file
-  (`name-r1c2.png`) per sheet. Each sheet keeps a blank margin, the artwork of
+  Tabloid, portrait or landscape) in the Print panel: one PDF page, and one PNG and one
+  SVG file (`name-r1c2.png`, `name-r1c2.svg`) per sheet. Each sheet keeps a blank margin, the artwork of
   neighboring sheets overlaps, and alignment marks in the margin show the corners of
   each sheet's artwork and where to trim one sheet to line it up with the next. The
   sheets are centered on the page; drag them on the export preview, or set their
@@ -228,6 +230,17 @@ layers panel on the right](doc/capture.png)
   **File > Open Recent** lists the last 10 projects. With unsaved changes, **New**,
   **Open**, **Open Recent** and closing the window first ask whether to save them
   (Save, Don't save or Cancel).
+- **Autosave and crash recovery**: while a project has unsaved changes, a copy of it is
+  kept every 2 minutes (**File > Autosave**: off, or every 1 to 30 minutes) in the app's
+  data folder, never in your project file. If the app closes unexpectedly (a crash, a
+  plugin failing), the next start offers the copy back: **Recover** opens it as the
+  project it came from, with its changes unsaved; **Not now** asks again at the next
+  start; **Discard** deletes it. The copy is deleted once the project is saved, its
+  changes let go, or the app closed normally. Several windows of the app each keep
+  their own. The right end of the status bar shows when the project was last saved
+  ("Last saved 5 minutes ago") and, with unsaved changes, when their recovery copy was
+  made ("Recovery copy just now"): the project file itself is only written when you
+  save it.
 - **Movable panels**: Controller, Page, Template, Print, Variables, Colors in use,
   Layers and Properties are each a panel. Drag a panel by its title onto the left or right side of
   the window to dock it there, above or below the other panels of that side (a line shows

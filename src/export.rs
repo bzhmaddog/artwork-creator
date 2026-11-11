@@ -1,4 +1,4 @@
-//! PNG and PDF writers.
+//! PNG and PDF writers, and the export of every format (SVG in `svg_export`).
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
@@ -28,6 +28,8 @@ pub struct ExportSettings {
     pub png: bool,
     /// Write a PDF, with the cut lines as vectors.
     pub pdf: bool,
+    /// Write an SVG, like the PDF, the cut lines in layers of their own.
+    pub svg: bool,
     /// Raster resolution, for both formats.
     pub dpi: u32,
     /// Print the lines of each element kind (`ElementKind::index`).
@@ -65,6 +67,7 @@ impl ExportSettings {
         Self {
             png: choices.png,
             pdf: choices.pdf,
+            svg: choices.svg,
             print_lines: choices.print_lines,
             ..self.clone()
         }
@@ -72,7 +75,8 @@ impl ExportSettings {
 
     /// Both choose to export the same: the part saved with a project.
     pub fn same_choices(&self, other: &ExportSettings) -> bool {
-        (self.png, self.pdf, self.print_lines) == (other.png, other.pdf, other.print_lines)
+        (self.png, self.pdf, self.svg, self.print_lines)
+            == (other.png, other.pdf, other.svg, other.print_lines)
     }
 
     /// The cuts, their bleed included.
@@ -98,27 +102,38 @@ impl ExportSettings {
         })
     }
 
-    /// The files an export of a `page_mm` page to `base` writes: a PNG per sheet when
-    /// tiled, and one PDF.
+    /// The files an export of a `page_mm` page to `base` writes: a PNG and an SVG per
+    /// sheet when tiled, and one PDF.
     pub fn files(&self, base: &Path, page_mm: P2) -> Vec<PathBuf> {
         let mut out = Vec::new();
+        let tiles = self.tiling().map(|t| t.tiles(page_mm));
+        let mut per_sheet = |ext: &str| match &tiles {
+            Some(tiles) => out.extend(tiles.iter().map(|&tile| tile_path(base, tile, ext))),
+            None => out.push(base.with_extension(ext)),
+        };
         if self.png {
-            match self.tiling() {
-                Some(t) => out.extend(t.tiles(page_mm).iter().map(|&tile| tile_path(base, tile))),
-                None => out.push(base.with_extension("png")),
-            }
+            per_sheet("png");
+        }
+        if self.svg {
+            per_sheet("svg");
         }
         if self.pdf {
             out.push(base.with_extension("pdf"));
         }
         out
     }
+
+    /// Some format is chosen.
+    pub fn any_format(&self) -> bool {
+        self.png || self.pdf || self.svg
+    }
 }
 
-/// The PNG of one sheet: the base name followed by its row and column, e.g. "art-r1c2.png".
-fn tile_path(base: &Path, tile: print::Tile) -> PathBuf {
+/// The file of one sheet: the base name followed by its row and column, e.g.
+/// "art-r1c2.png".
+fn tile_path(base: &Path, tile: print::Tile, ext: &str) -> PathBuf {
     let stem = base.file_stem().unwrap_or_default().to_string_lossy();
-    base.with_file_name(format!("{stem}-r{}c{}.png", tile.row + 1, tile.col + 1))
+    base.with_file_name(format!("{stem}-r{}c{}.{ext}", tile.row + 1, tile.col + 1))
 }
 
 impl Default for ExportSettings {
@@ -126,6 +141,7 @@ impl Default for ExportSettings {
         Self {
             png: true,
             pdf: true,
+            svg: false,
             dpi: 300,
             // Anchors are construction marks: printed only when asked for.
             print_lines: ElementKind::ALL.map(|k| k != ElementKind::Anchors),
@@ -191,7 +207,7 @@ impl Progress {
 const RENDER_SHARE: f32 = 0.6;
 
 /// Writes the requested formats next to each other, using `base` with its extension
-/// replaced. The page is rendered once and shared by both formats. On cancel, files
+/// replaced. The page is rendered once and shared by all formats. On cancel, files
 /// already written are removed.
 pub fn run(
     scene: &Scene,
@@ -218,15 +234,17 @@ fn write_all(
 ) -> Result<(), String> {
     let dpi = settings.dpi.clamp(72, 1200) as f32;
     progress.set(tr!("EXPORT_STEP_RENDERING"), 0.0);
-    // The PDF keeps text and shapes as vectors: the rest is rendered in parts around them.
-    let parts = render::compose_parts(scene, dpi, settings.pdf, &mut |f| {
+    // The PDF and SVG keep text and shapes as vectors: the rest is rendered in parts
+    // around them.
+    let vectors = settings.pdf || settings.svg;
+    let parts = render::compose_parts(scene, dpi, vectors, &mut |f| {
         progress.set(tr!("EXPORT_STEP_RENDERING"), f * RENDER_SHARE);
         !progress.is_canceled()
     })?;
     let tiling = settings.tiling();
     let tiles = tiling.map(|t| t.tiles(scene.page_mm)).unwrap_or_default();
-    let pngs = if settings.png { tiles.len().max(1) } else { 0 };
-    let saves = pngs as u32 + settings.pdf as u32;
+    let per_sheet = tiles.len().max(1) as u32;
+    let saves = (settings.png as u32 + settings.svg as u32) * per_sheet + settings.pdf as u32;
     let mut done = 0;
     let mut step = |stage: &str| -> Result<(), String> {
         if progress.is_canceled() {
@@ -241,12 +259,27 @@ fn write_all(
         for_each_sheet(&parts, scene, settings, dpi, &mut |tile, pixmap| {
             step(tr!("EXPORT_STEP_SAVING_PNG"))?;
             let path = match tile {
-                Some(tile) => tile_path(base, tile),
+                Some(tile) => tile_path(base, tile, "png"),
                 None => base.with_extension("png"),
             };
             written.push(path.clone());
             write_png(pixmap, dpi, &path)
         })?;
+    }
+    if settings.svg {
+        let sheets: Vec<_> = match &tiling {
+            Some(t) => tiles.iter().map(|&tile| Some((t, tile))).collect(),
+            None => vec![None],
+        };
+        for sheet in sheets {
+            step(tr!("EXPORT_STEP_SAVING_SVG"))?;
+            let path = match sheet {
+                Some((_, tile)) => tile_path(base, tile, "svg"),
+                None => base.with_extension("svg"),
+            };
+            written.push(path.clone());
+            crate::svg_export::write(scene, &parts, dpi, &path, sheet)?;
+        }
     }
     if settings.pdf {
         step(tr!("EXPORT_STEP_SAVING_PDF"))?;
@@ -858,7 +891,7 @@ fn write_pdf(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::document::Document;
     use crate::template;
@@ -866,7 +899,7 @@ mod tests {
 
     /// A page with the test template, a photo-like square, a text layer over it and a
     /// square over part of the text, as exported at 100 DPI.
-    fn text_scene(distort: bool) -> Scene {
+    pub(crate) fn text_scene(distort: bool) -> Scene {
         use crate::document::{Layer, Node};
         use crate::text;
         let entry = template::tests::fixture();
@@ -971,6 +1004,7 @@ mod tests {
             for (name, distort) in [("text", false), ("text-distorted", true)] {
                 let settings = ExportSettings {
                     dpi: 100,
+                    svg: true,
                     ..Default::default()
                 };
                 run(
@@ -1164,6 +1198,7 @@ mod tests {
             );
             let settings = ExportSettings {
                 dpi: 150,
+                svg: true,
                 ..Default::default()
             };
             let base = std::path::PathBuf::from(dir).join("shapes");
@@ -1284,6 +1319,7 @@ mod tests {
         );
         let settings = ExportSettings {
             dpi: 150,
+            svg: true,
             ..Default::default()
         };
         let base = std::path::PathBuf::from(dir).join("text-on-path");
@@ -1338,6 +1374,7 @@ mod tests {
             scene.cuts.bleed_mm = 3.0;
             let settings = ExportSettings {
                 dpi: 150,
+                svg: true,
                 ..Default::default()
             };
             let base = std::path::PathBuf::from(dir).join("bleed-and-marks");
@@ -1392,6 +1429,7 @@ mod tests {
             dpi: 100,
             tile: true,
             tile_offset_mm: [75.0, 13.5],
+            svg: true,
             ..Default::default()
         };
         // A4 portrait, 190 x 277 mm of artwork each: 3 across, 1 down.
@@ -1399,8 +1437,14 @@ mod tests {
         let expected = settings.files(&base, scene.page_mm);
         let out = run(&scene, &settings, &base, &Progress::default()).unwrap();
         assert_eq!(out, expected);
-        assert_eq!(out.len(), 4, "3 PNG sheets and the PDF");
+        assert_eq!(out.len(), 7, "3 PNG sheets, 3 SVG sheets and the PDF");
         assert!(out[1].ends_with("tiled-r1c2.png"));
+        assert!(out[5].ends_with("tiled-r1c3.svg"));
+        let svg = std::fs::read_to_string(&out[4]).unwrap();
+        assert!(
+            svg.contains(r#"width="210mm" height="297mm""#),
+            "A4 portrait sheets"
+        );
         let sheet = image::open(&out[0]).unwrap().to_rgb8();
         assert_eq!(sheet.dimensions(), (827, 1169), "A4 portrait at 100 DPI");
         // Artwork within the margin, blank paper outside it and below the page.
@@ -1425,6 +1469,7 @@ mod tests {
         let centered = ExportSettings {
             tile_offset_mm: [0.0, 0.0],
             pdf: false,
+            svg: false,
             ..settings.clone()
         };
         let first = run(
@@ -1441,7 +1486,7 @@ mod tests {
         assert_eq!(at(100.0, 22.0), [255, 255, 255]);
         assert_eq!(at(100.0, 25.0)[2], 160);
 
-        let pdf = std::fs::read(&out[3]).unwrap();
+        let pdf = std::fs::read(&out[6]).unwrap();
         let text = String::from_utf8_lossy(&pdf);
         let pages = text.matches("/Type/Page").count() - text.matches("/Type/Pages").count();
         assert_eq!(pages, 3, "a PDF page per sheet");

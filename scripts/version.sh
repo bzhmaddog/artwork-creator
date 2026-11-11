@@ -1,22 +1,16 @@
 #!/bin/sh
-# Suggests the next version from the commits since the last release, bumps the version
-# and makes releases. Run with `make version-check`, `make version-bump` and
-# `make version-release`.
+# Suggests the next version from the commits since the last release and bumps the
+# version. Run with `make version-check` and `make version-bump-*`. A release is a vX.Y.Z
+# tag, made by hand (see doc/releasing.md).
 #
 # Usage:
 #   version.sh [check]
-#       Show the current version, the last release (its "Release vX.Y.Z" commit), the
-#       commits since and the suggested next version, with the reason.
+#       Show the current version, the last release (its vX.Y.Z tag), the commits since
+#       and the suggested next version, with the reason.
 #   version.sh bump VERSION|major|minor|patch [--sdk VERSION|major|minor|patch]
 #       Set the app version (major, minor and patch count from the current one), and the
-#       plugin SDK version with --sdk, and commit it as "Bump version to X.Y.Z". Not a
-#       release: the next suggestion still counts from the last release.
-#   version.sh release [VERSION|major|minor|patch] [--sdk VERSION|major|minor|patch]
-#       Release a version: the one given, or else the one Cargo.toml was bumped to since
-#       the last release, or else the suggested one. Sets it, moves the "Unreleased"
-#       section of CHANGELOG.md (if there is one) under it and commits it as
-#       "Release vX.Y.Z".
-#   Both ask before committing. No tag is made and nothing is pushed.
+#       plugin SDK version with --sdk, and commit it as "Bump version to X.Y.Z". Asks
+#       before committing; no tag is made and nothing is pushed.
 #
 # Only commits that change what is shipped count: the paths in APP_PATHS (the app code,
 # translations, templates, plugin SDK and dependencies). Commits that only touch tooling,
@@ -30,9 +24,7 @@
 #     "support" -> minor;
 #   - anything else -> patch.
 # A version Cargo.toml was already bumped to is suggested when it is that far. With no
-# release yet, the current version is suggested as the first release. Releases made
-# before the script stopped tagging are found by their vX.Y.Z tag when no release commit
-# is.
+# release yet, the current version is suggested as the first release.
 set -e
 
 cd "$(git rev-parse --show-toplevel)"
@@ -40,7 +32,6 @@ cd "$(git rev-parse --show-toplevel)"
 APP_TOML=Cargo.toml
 SDK_TOML=plugin-sdk/Cargo.toml
 ABI_FILE=plugin-sdk/src/abi.rs
-CHANGELOG=CHANGELOG.md
 APP_PATHS='src locales templates plugin-sdk Cargo.toml Cargo.lock'
 FEATURE_WORDS='add|added|adds|adding|new|feat|feature|features|implement|implemented|support|supports'
 
@@ -83,18 +74,9 @@ resolve() {
     esac
 }
 
-RELEASE_SUBJECT='^Release v[0-9]+\.[0-9]+\.[0-9]+'
-
-# Sets $base (the last release's commit), $released (its version) and $tag (its name,
-# "vX.Y.Z (abc1234)"): the last "Release vX.Y.Z" commit, or else the last vX.Y.Z tag; all
-# empty without one.
+# Sets $base and $tag (the last vX.Y.Z tag reachable from HEAD) and $released (its
+# version); all empty without one.
 last_release() {
-    base=$(git log -1 -E --grep="$RELEASE_SUBJECT" --format=%H 2>/dev/null || true)
-    if [ -n "$base" ]; then
-        released=$(git log -1 --format=%s "$base" | sed -E 's/^Release v([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
-        tag="v$released ($(git rev-parse --short "$base"))"
-        return
-    fi
     tag=$(git describe --tags --abbrev=0 --match 'v[0-9]*' 2>/dev/null || true)
     base=$tag
     released=${tag#v}
@@ -215,15 +197,16 @@ cmd_check() {
     sdk_status
     if [ -n "$next" ]; then
         echo
-        echo "Release it with: make version-release (version-release-patch|minor|major or V=X.Y.Z picks another)"
-        [ "$next" != "$current" ] && echo "or set it without releasing: make version-bump V=$next"
+        if [ "$next" = "$current" ]; then
+            echo "Cargo.toml is at it: tag v$next to release it (see doc/releasing.md)"
+        else
+            echo "Set it with: make version-bump V=$next"
+        fi
     fi
 }
 
-# cmd_set bump|release [VERSION|major|minor|patch] [--sdk VERSION|major|minor|patch]
-cmd_set() {
-    kind=$1
-    shift
+# cmd_bump VERSION|major|minor|patch [--sdk VERSION|major|minor|patch]
+cmd_bump() {
     want=
     sdk_want=
     while [ $# -gt 0 ]; do
@@ -243,31 +226,17 @@ cmd_set() {
     done
 
     [ -z "$(git status --porcelain)" ] || die "the working tree has changes; commit or stash them first"
+    [ -n "$want" ] || die "give the version: make version-bump-patch|minor|major, or make version-bump V=X.Y.Z (make version-check suggests one)"
 
     analyze_bumped
-    if [ -n "$want" ]; then
-        new=$(resolve "$current" "$want")
-    elif [ "$kind" = bump ]; then
-        die "give the version: make version-bump-patch|minor|major, or V=X.Y.Z (make version-check suggests one)"
-    else
-        new=$(suggested_version)
-        [ -n "$new" ] || die "nothing to release ($reason)"
-    fi
+    new=$(resolve "$current" "$want")
+    git rev-parse -q --verify "refs/tags/v$new" >/dev/null && die "v$new was already released"
 
     sdk_old=$(toml_version "$SDK_TOML")
     sdk_new=
     [ -n "$sdk_want" ] && sdk_new=$(resolve "$sdk_old" "$sdk_want")
-
-    if [ "$kind" = bump ]; then
-        [ "$new" != "$current" ] || [ -n "$sdk_new" ] || die "the version is $current already"
-        subject="Bump version to $new"
-    else
-        if git log -E --grep="^Release v$new( |$)" --format=%s | grep -q . ||
-            git rev-parse -q --verify "refs/tags/v$new" >/dev/null; then
-            die "v$new was already released"
-        fi
-        subject="Release v$new"
-    fi
+    [ "$new" != "$current" ] || [ -n "$sdk_new" ] || die "the version is $current already"
+    subject="Bump version to $new"
     [ -n "$sdk_new" ] && subject="$subject (plugin SDK $sdk_new)"
 
     echo "Branch: $(git branch --show-current)"
@@ -278,7 +247,6 @@ cmd_set() {
     fi
     [ -n "$sdk_new" ] && echo "SDK:    $sdk_old -> $sdk_new"
     echo "Commit: $subject"
-    [ "$kind" = release ] && [ -z "$want" ] && echo "Reason: $reason"
     [ -z "$sdk_new" ] && sdk_status
     printf 'Commit? [y/N] '
     read -r answer
@@ -289,35 +257,26 @@ cmd_set() {
 
     [ "$new" != "$current" ] && set_toml_version "$APP_TOML" "$new"
     [ -n "$sdk_new" ] && [ "$sdk_new" != "$sdk_old" ] && set_toml_version "$SDK_TOML" "$sdk_new"
-    if [ -n "$(git status --porcelain -- "$APP_TOML" "$SDK_TOML")" ]; then
-        # Brings the workspace versions in Cargo.lock up to date.
-        cargo update --workspace --quiet
-    fi
-    if [ "$kind" = release ] && [ -f "$CHANGELOG" ] && grep -q '^## Unreleased' "$CHANGELOG"; then
-        sed -i "s/^## Unreleased.*/## $new - $(date +%Y-%m-%d)/" "$CHANGELOG"
-    fi
-
+    # Brings the workspace versions in Cargo.lock up to date.
+    cargo update --workspace --quiet
     git add -A "$APP_TOML" "$SDK_TOML" Cargo.lock
-    [ -f "$CHANGELOG" ] && git add "$CHANGELOG"
-    # A release is committed even with nothing changed (the version was bumped before):
-    # the commit marks it.
-    git commit -q --allow-empty -m "$subject"
+    git commit -q -m "$subject"
 
-    if [ "$kind" = bump ]; then
-        echo "Version set to $new (not released). Nothing is pushed."
-        return
-    fi
-    echo "Released v$new (no tag made). Publish it with:"
-    echo "  git push"
-    echo "The release packages are built by GitHub Actions when a v$new tag is pushed (for"
-    echo "example by publishing a GitHub Release for v$new), or by hand: Actions > Release."
+    echo "Version set to $new. Nothing is pushed. To release it, merge this commit into main"
+    echo "through a pull request, then tag the merged main and push the tag:"
+    echo "  git switch main && git pull"
+    echo "  git tag v$new"
+    echo "  git push origin v$new"
+    echo "GitHub Actions then builds the packages into a draft release to publish by hand;"
+    echo "don't create the release on GitHub (see doc/releasing.md)."
 }
 
 case "${1:-check}" in
     check) cmd_check ;;
-    bump | release)
-        cmd_set "$@"
+    bump)
+        shift
+        cmd_bump "$@"
         ;;
     -h | --help | help) sed -n '2,/^set -e/p' "$0" | sed '$d; s/^# \{0,1\}//' ;;
-    *) die "unknown command $1 (use check, bump or release)" ;;
+    *) die "unknown command $1 (use check or bump)" ;;
 esac

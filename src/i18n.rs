@@ -273,10 +273,37 @@ pub fn menu(ui: &mut egui::Ui, pref: &mut Preference) {
     }
 }
 
+/// How long ago `t` was, e.g. "5 minutes ago", "just now" under a minute.
+pub fn time_ago(t: std::time::SystemTime) -> String {
+    let secs = t.elapsed().map_or(0, |d| d.as_secs());
+    let (minutes, hours, days) = (secs / 60, secs / 3600, secs / 86400);
+    if minutes < 1 {
+        tr!("TIME_AGO_JUST_NOW").into()
+    } else if hours < 1 {
+        tr_n!("TIME_AGO_MINUTES", minutes)
+    } else if days < 1 {
+        tr_n!("TIME_AGO_HOURS", hours)
+    } else {
+        tr_n!("TIME_AGO_DAYS", days)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::collections::{BTreeMap, BTreeSet};
+
+    #[test]
+    fn times_ago_read_naturally() {
+        use std::time::{Duration, SystemTime};
+        set(Language::English);
+        let ago = |secs: u64| time_ago(SystemTime::now() - Duration::from_secs(secs));
+        assert_eq!(ago(0), "just now");
+        assert_eq!(ago(60), "1 minute ago");
+        assert_eq!(ago(5 * 60), "5 minutes ago");
+        assert_eq!(ago(3 * 3600), "3 hours ago");
+        assert_eq!(ago(2 * 86400), "2 days ago");
+    }
     use std::path::Path;
 
     #[test]

@@ -230,6 +230,17 @@ layers panel on the right](doc/capture.png)
   **File > Open Recent** lists the last 10 projects. With unsaved changes, **New**,
   **Open**, **Open Recent** and closing the window first ask whether to save them
   (Save, Don't save or Cancel).
+- **Autosave and crash recovery**: while a project has unsaved changes, a copy of it is
+  kept every 2 minutes (**File > Autosave**: off, or every 1 to 30 minutes) in the app's
+  data folder, never in your project file. If the app closes unexpectedly (a crash, a
+  plugin failing), the next start offers the copy back: **Recover** opens it as the
+  project it came from, with its changes unsaved; **Not now** asks again at the next
+  start; **Discard** deletes it. The copy is deleted once the project is saved, its
+  changes let go, or the app closed normally. Several windows of the app each keep
+  their own. The right end of the status bar shows when the project was last saved
+  ("Last saved 5 minutes ago") and, with unsaved changes, when their recovery copy was
+  made ("Recovery copy just now"): the project file itself is only written when you
+  save it.
 - **Movable panels**: Controller, Page, Template, Print, Variables, Colors in use,
   Layers and Properties are each a panel. Drag a panel by its title onto the left or right side of
   the window to dock it there, above or below the other panels of that side (a line shows

@@ -120,6 +120,18 @@ impl History {
     pub fn is_modified(&self) -> bool {
         self.current_key != self.saved_key
     }
+
+    /// What the project file holds of the document as of the last step: equal for equal
+    /// documents.
+    pub fn key(&self) -> &str {
+        &self.current_key
+    }
+
+    /// The document counts as unsaved, e.g. recovered after a crash: not what its file
+    /// holds.
+    pub fn mark_unsaved(&mut self) {
+        self.saved_key.clear();
+    }
 }
 
 #[cfg(test)]

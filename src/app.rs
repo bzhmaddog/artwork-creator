@@ -138,6 +138,13 @@ pub struct ArtworkApp {
     leave_after_save: Option<Leave>,
     /// Closing is agreed: let the next close request through.
     closing: bool,
+    /// Copies of the project with unsaved changes, for recovery after a crash.
+    autosave: crate::recovery::Autosave,
+    /// Copies left by runs that crashed, offered back one at a time.
+    orphans: Vec<crate::recovery::Orphan>,
+    /// When the project file was last written, for the status bar: by this run, or
+    /// before it was opened.
+    last_saved: Option<SystemTime>,
 }
 
 /// Labels of the rows of the Page, Template and Print panels: the first column of
@@ -180,6 +187,11 @@ fn panel_grid(ui: &egui::Ui, id: &str) -> egui::Grid {
 /// Where the print settings are kept with the app's preferences.
 const PRINT_SETTINGS_KEY: &str = "print_settings";
 
+/// When a file was last written, if it can be told.
+fn modified_time(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
 /// What ends the project in hand, once its unsaved changes are saved or let go.
 #[derive(Clone, Debug, PartialEq)]
 enum Leave {
@@ -191,6 +203,8 @@ enum Leave {
     Open,
     /// Opening this project, from Open Recent.
     OpenPath(PathBuf),
+    /// Recovering the first copy left by a crash.
+    Recover,
 }
 
 /// A save or export held until the user agrees to replace existing files.
@@ -407,6 +421,17 @@ impl ArtworkApp {
             about: false,
             leave_after_save: None,
             closing: false,
+            autosave: crate::recovery::Autosave::new(
+                crate::recovery::root(),
+                cc.storage
+                    .and_then(|s| eframe::get_value(s, crate::recovery::STORAGE_KEY))
+                    .unwrap_or(crate::recovery::DEFAULT_INTERVAL),
+            ),
+            orphans: crate::recovery::root()
+                .as_deref()
+                .map(crate::recovery::orphans)
+                .unwrap_or_default(),
+            last_saved: None,
         };
         log::info!("native file dialogs: {}", app.native_dialogs);
         if let Some(first) = app.templates.first().map(|t| t.id.clone()) {
@@ -962,6 +987,93 @@ impl ArtworkApp {
             Leave::New => self.new_project(),
             Leave::Open => self.open_project(ctx),
             Leave::OpenPath(path) => self.open_project_path(ctx, path),
+            Leave::Recover => self.recover(ctx),
+        }
+    }
+
+    /// Opens the first copy left by a crash, as the project it was made from with its
+    /// changes unsaved. A copy that can't be opened is kept, to be offered again at the
+    /// next start.
+    fn recover(&mut self, ctx: &egui::Context) {
+        if self.orphans.is_empty() {
+            return;
+        }
+        let orphan = self.orphans.remove(0);
+        let copy = orphan.copy_path();
+        self.open_project_path(ctx, copy.clone());
+        self.recent.remove(&copy);
+        if self.project_path.as_deref() != Some(copy.as_path()) {
+            return;
+        }
+        self.project_path = orphan.info.original.clone();
+        self.last_saved = self.project_path.as_deref().and_then(modified_time);
+        self.history.mark_unsaved();
+        self.dirty = true;
+        self.autosave
+            .adopt(orphan, self.history.key(), &self.export_settings);
+    }
+
+    /// The question asked at the start for each copy left by a crash: recover it, keep
+    /// it for later, or delete it.
+    fn recovery_modal(&mut self, ctx: &egui::Context) {
+        if self.confirm_leave.is_some() || self.leave_after_save.is_some() {
+            return;
+        }
+        let Some(orphan) = self.orphans.first() else {
+            return;
+        };
+        let (mut recover, mut later, mut discard) = (false, false, false);
+        let more = self.orphans.len() - 1;
+        let response = dialog(ctx, "recovery").show(ctx, |ui| {
+            ui.set_max_width(420.0);
+            ui.strong(tr!("RECOVERY_TITLE"));
+            ui.add_space(4.0);
+            ui.label(tr!(
+                "RECOVERY_TEXT",
+                name = orphan.info.name,
+                age = i18n::time_ago(orphan.info.saved_time())
+            ));
+            if let Some(path) = &orphan.info.original {
+                ui.weak(path.display().to_string());
+            }
+            if more > 0 {
+                ui.weak(tr_n!("RECOVERY_MORE", more));
+            }
+            ui.add_space(8.0);
+            dialog_button_row(ui, |ui| {
+                recover |= ui.button(tr!("RECOVER")).clicked();
+                later |= ui
+                    .button(tr!("RECOVER_LATER"))
+                    .on_hover_text(tr!("RECOVER_LATER_HINT"))
+                    .clicked();
+                at_left_edge(ui, |ui| {
+                    discard |= ui
+                        .button(tr!("DISCARD_RECOVERY"))
+                        .on_hover_text(tr!("DISCARD_RECOVERY_HINT"))
+                        .clicked();
+                });
+            });
+        });
+        later |= response.should_close();
+        if discard {
+            self.orphans.remove(0).discard();
+        } else if recover {
+            self.leave(ctx, Leave::Recover);
+        } else if later {
+            // Let go: offered again at the next start.
+            self.orphans.remove(0);
+        }
+    }
+
+    /// File > Autosave: how often a copy of unsaved changes is kept, or off.
+    fn autosave_menu(&mut self, ui: &mut egui::Ui) {
+        for minutes in crate::recovery::INTERVALS {
+            let label = if minutes == 0 {
+                tr!("AUTOSAVE_OFF").to_owned()
+            } else {
+                tr_n!("AUTOSAVE_EVERY", minutes)
+            };
+            ui.radio_value(&mut self.autosave.minutes, minutes, label);
         }
     }
 
@@ -979,6 +1091,7 @@ impl ArtworkApp {
             .with_choices_of(&ExportSettings::default());
         self.saved_export = self.export_settings.clone();
         self.dirty = false;
+        self.last_saved = None;
         self.applied.clear();
         self.history.reset(&self.doc);
     }
@@ -1039,6 +1152,7 @@ impl ArtworkApp {
                 self.select_template(template, false);
                 self.selected = None;
                 self.recent.add(&path);
+                self.last_saved = modified_time(&path);
                 self.project_path = Some(path);
                 self.canvas.fit_pending = true;
                 self.dirty = false;
@@ -1106,6 +1220,7 @@ impl ArtworkApp {
                 self.history.mark_saved(&self.doc);
                 self.saved_export = self.export_settings.clone();
                 self.dirty = false;
+                self.last_saved = Some(SystemTime::now());
             }
             Err(e) => self.messages.push(e),
         }
@@ -1297,6 +1412,9 @@ impl ArtworkApp {
                 if item(ui, tr!("SAVE_PROJECT_AS"), Command::SaveAs) {
                     self.save_project(&ctx, true);
                 }
+                ui.menu_button(tr!("MENU_AUTOSAVE"), |ui| self.autosave_menu(ui))
+                    .response
+                    .on_hover_text(tr!("AUTOSAVE_HINT"));
                 ui.separator();
                 if item(ui, tr!("EXPORT"), Command::Export) {
                     self.open_export();
@@ -1924,7 +2042,32 @@ impl ArtworkApp {
                 ui.separator();
                 ui.colored_label(ui.visuals().warn_fg_color, text);
             }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                self.save_status(ui)
+            });
         });
+    }
+
+    /// At the right of the status bar: when the project was last saved and, with
+    /// unsaved changes, when they were last autosaved. Kept up to date as time passes.
+    fn save_status(&self, ui: &mut egui::Ui) {
+        if self.dirty
+            && let Some(t) = self.autosave.last_copy
+        {
+            ui.weak(tr!("LAST_AUTOSAVED", age = i18n::time_ago(t)))
+                .on_hover_text(tr!("LAST_AUTOSAVED_HINT"));
+            ui.separator();
+        }
+        let saved = match self.last_saved {
+            Some(t) => tr!("LAST_SAVED", age = i18n::time_ago(t)),
+            None => tr!("NOT_SAVED_YET").to_owned(),
+        };
+        let label = ui.weak(saved);
+        if let Some(path) = &self.project_path {
+            label.on_hover_text(path.display().to_string());
+        }
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_secs(20));
     }
 
     /// Brings the layers' on-screen images up to date with their effects.
@@ -2897,6 +3040,16 @@ impl eframe::App for ArtworkApp {
         self.panels.save(storage);
         self.shortcuts.save(storage);
         self.save_settings(storage);
+        eframe::set_value(
+            storage,
+            crate::recovery::STORAGE_KEY,
+            &self.autosave.minutes,
+        );
+    }
+
+    /// Closing normally: nothing to recover, so the autosave copy goes.
+    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        self.autosave.end();
     }
 
     /// One frame: input, panels, canvas and dialogs, then an undo step if the project
@@ -3005,6 +3158,7 @@ impl eframe::App for ArtworkApp {
         self.message_modal(&ctx);
         self.about_modal(&ctx);
         self.close_modal(&ctx);
+        self.recovery_modal(&ctx);
         self.shortcuts_window(&ctx);
 
         // Record a step once the edit is over: no button held, no text being typed. A
@@ -3022,6 +3176,17 @@ impl eframe::App for ArtworkApp {
         self.history.update(&self.doc, finished);
         self.dirty = self.is_modified();
         self.update_title(&ctx);
+        let project = crate::recovery::Project {
+            doc: &self.doc,
+            key: self.history.key(),
+            export: &self.export_settings,
+            path: self.project_path.as_deref(),
+            name: self.project_name(),
+            modified: self.dirty,
+        };
+        if let Some(e) = self.autosave.tick(&ctx, project, !finished) {
+            self.messages.push(e);
+        }
     }
 }
 

@@ -25,6 +25,7 @@ mod print;
 mod printing;
 mod project;
 mod recent;
+mod recovery;
 mod render;
 mod shape;
 mod shortcuts;

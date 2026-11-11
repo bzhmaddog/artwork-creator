@@ -119,13 +119,18 @@ Planned:
 - **Rulers and guides** dragged from the rulers, with snapping.
 - **Eyedropper** to pick a color from the canvas.
 - **Copy and paste effects** from one layer to others.
-- **Per-button artwork**: fill or ring around a single button hole, and export of round
-  artwork for clear button caps.
 
 ### Files and safety
 
+Done:
+
+- **SVG export**, like the PDF (text, shapes, gradients and template lines as vectors,
+  images embedded), with the artwork, each template element's lines and the marks in
+  layers of their own; a file per sheet when the page is tiled.
+
+Planned:
+
 - **Autosave and crash recovery**, since a plugin crash closes the app.
-- **SVG export**.
 - **Template library**: browse and download templates shared by others.
 
 ### Plugins

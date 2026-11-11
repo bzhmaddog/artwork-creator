@@ -39,7 +39,7 @@ const IMAGE_FILTERS: &[Filter] = &[Filter::new(tr_noop!("FILTER_IMAGES"), IMAGE_
 /// SVG files, whose shapes are imported as path layers (see `svg`).
 const SVG_EXTENSIONS: &[&str] = &["svg", "svgz"];
 const SVG_FILTERS: &[Filter] = &[Filter::new(tr_noop!("FILTER_SVG"), SVG_EXTENSIONS)];
-const EXPORT_FILTERS: &[Filter] = &[Filter::new("PNG / PDF", &["png", "pdf"])];
+const EXPORT_FILTERS: &[Filter] = &[Filter::new("PNG / PDF / SVG", &["png", "pdf", "svg"])];
 /// Projects that can be opened: archives and linked JSON projects.
 const OPEN_PROJECT_FILTERS: &[Filter] = &[Filter::new(
     tr_noop!("FILTER_ARTWORK_PROJECT"),
@@ -2099,6 +2099,8 @@ impl ArtworkApp {
                 ui.label(tr!("EXPORT_FORMATS"));
                 ui.checkbox(&mut s.png, "PNG");
                 ui.checkbox(&mut s.pdf, "PDF");
+                ui.checkbox(&mut s.svg, "SVG")
+                    .on_hover_text(tr!("EXPORT_SVG_HINT"));
             });
         }
         let template = self.template.as_ref();
@@ -2372,7 +2374,7 @@ impl ArtworkApp {
                                 ));
                             }
                             ui.add_space(10.0);
-                            let can = (s.png || s.pdf) && self.export_job.is_none();
+                            let can = s.any_format() && self.export_job.is_none();
                             let (ok, cancel) = dialog_buttons(ui, tr!("START_EXPORT"), can);
                             go = ok;
                             close = cancel;

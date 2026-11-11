@@ -91,8 +91,15 @@ jobs:
       - name: Create the draft release
         env:
           GH_TOKEN: ${{ github.token }}
+        # A published release is immutable (repository setting): its assets can only be
+        # attached while it is a draft. So push the tag and let this job make the draft;
+        # don't publish a release for the tag on GitHub first.
         run: |
-          if gh release view "$GITHUB_REF_NAME" >/dev/null 2>&1; then
+          if draft=$(gh release view "$GITHUB_REF_NAME" --json isDraft -q .isDraft 2>/dev/null); then
+            if [ "$draft" != "true" ]; then
+              echo "::error::Release $GITHUB_REF_NAME is already published, so the binaries can't be attached. Publish only the draft this workflow creates."
+              exit 1
+            fi
             gh release upload "$GITHUB_REF_NAME" dist/* --clobber
           else
             gh release create "$GITHUB_REF_NAME" dist/* --draft --verify-tag \

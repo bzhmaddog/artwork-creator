@@ -657,8 +657,8 @@ impl ArtworkApp {
     }
 
     /// Adds a closed shape of `kind` to paint in, without fill or stroke, above the
-    /// selection, half the page's size (an ellipse: a circle half its shorter side
-    /// across) and centered like a new text (see `new_layer_center`), with the Select
+    /// selection, half the page's size (an ellipse, regular polygon or star: in a square
+    /// half its shorter side across) and centered like a new text (see `new_layer_center`), with the Select
     /// tool in hand. A polygon is drawn point by point on the canvas instead, as from
     /// the Shape menu.
     fn add_canvas(&mut self, ctx: &egui::Context, kind: ShapeKind) {
@@ -675,8 +675,12 @@ impl ArtworkApp {
         let id = self.doc.alloc_id();
         let c = self.new_layer_center();
         let [mut w, mut h] = self.doc.page_mm().map(|v| v * CANVAS_PAGE_FRACTION / 2.0);
-        if kind == ShapeKind::Ellipse {
-            // A circle, as from the Shape menu: its handles stretch it into an ellipse.
+        if matches!(
+            kind,
+            ShapeKind::Ellipse | ShapeKind::RegularPolygon | ShapeKind::Star
+        ) {
+            // In a square box, as from the Shape menu (a circle, an unsquished star or
+            // polygon): its handles stretch it.
             (w, h) = (w.min(h), w.min(h));
         }
         let layer = shape::new_canvas_layer(id, kind, [c[0] - w, c[1] - h], [c[0] + w, c[1] + h]);

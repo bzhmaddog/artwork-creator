@@ -1,10 +1,12 @@
 # Release builds for Linux and Windows, packaged like `make dist`: the executable with
 # its templates folder next to it.
 #
-# - Pushing a version tag (vX.Y.Z; `make version-release` makes none) builds both and attaches them
+# - Pushing a version tag (vX.Y.Z, made by hand) builds both and attaches them
 #   to a draft GitHub Release for that tag, to look over and publish by hand.
 # - Run by hand (Actions > Release > Run workflow), it only builds them: the packages are
 #   the run's artifacts, kept for a few days.
+#
+# The release steps: doc/releasing.md.
 name: Release
 
 on:
@@ -76,7 +78,7 @@ jobs:
       contents: write
     steps:
       - uses: actions/checkout@v4
-      # The tag must be the version in Cargo.toml, as `make version-release` sets it.
+      # The tag must be the version in Cargo.toml, as `make version-bump-*` sets it.
       - name: Check the version
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)

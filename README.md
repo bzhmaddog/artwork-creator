@@ -344,14 +344,27 @@ the text is for, in upper snake case: `ADD_TEXT_LAYER`, `EXPORT_CANCELED`.
 
 ### Releasing
 
-`make version` lists the commits since the last release tag and suggests the next version.
-Only commits that change the app count (`src`, `locales`, `templates`, `plugin-sdk`,
-`Cargo.toml` and `Cargo.lock`); tooling, CI, docs and tests never call for a release. It
-suggests minor when a commit message adds something ("Added...", "New...") or the plugin interface
-changed (major from 1.0.0 on), patch otherwise. `make release` sets that version in `Cargo.toml`, commits and tags
-it after asking; `make release V=0.3.0` (or `V=major|minor|patch`) picks the version, and
-`SDK=minor` releases the plugin SDK too. Nothing is pushed. See
-[`scripts/version.sh`](scripts/version.sh) for the details.
+`make version-check` lists the commits since the last release (its "Release vX.Y.Z"
+commit) and suggests the next version. Only commits that change the app count (`src`,
+`locales`, `templates`, `plugin-sdk`, `Cargo.toml` and `Cargo.lock`); tooling, CI, docs and
+tests never call for a release. It suggests minor when a commit message adds something
+("Added...", "New...") or the plugin interface changed (major from 1.0.0 on), patch
+otherwise, counting from the last release; a version `Cargo.toml` was already bumped to is
+suggested when it is that far.
+
+```sh
+make version-check            # what changed since the last release, and the next version
+make version-bump-minor       # set the version, commit "Bump version to X.Y.Z"
+                              # (also version-bump-patch, version-bump-major)
+make version-bump V=2.0.0     # an exact version
+make version-release          # commit "Release vX.Y.Z": the bumped or suggested version
+make version-release-patch    # or one picked: version-release-minor, -major, or V=X.Y.Z
+```
+
+Patch, minor and major count from the current version, and a bump is not a release. `SDK=...` sets the plugin SDK's version too, in either. Both ask before
+committing; neither makes a tag or pushes. The release packages are built by GitHub Actions
+when a `vX.Y.Z` tag is pushed (as publishing a GitHub Release does), or when run by hand
+from the Actions tab. See [`scripts/version.sh`](scripts/version.sh) for the details.
 
 ## Templates
 

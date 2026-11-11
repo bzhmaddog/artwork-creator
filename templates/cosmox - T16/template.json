@@ -1,5 +1,7 @@
 {
-  "name": "Cosmox T16",
+  "vendor": "Cosmox",
+  "name": "T16",
+  "version":"1.0",
   "elements": [
     {"kind":"outline","dxf":"outline.dxf", "name": "Outline"},
     {"kind":"buttons","dxf":"buttons.dxf", "name": "Action buttons"},
@@ -8,6 +10,7 @@
     {"kind":"anchors","dxf":"anchors.dxf","name":"Button centers"}
   ],
   "units": "inch",
+  "page": { "size": "A4", "orientation": "landscape" },
   "placement": {
     "rotation": 90,
     "flip_x": true,

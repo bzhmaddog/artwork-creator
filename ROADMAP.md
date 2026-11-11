@@ -13,8 +13,10 @@ work goes on.
   presets, with numeric position, spacing and alignment.
 - Cutouts and fastener holes, with the same tools.
 - Anchors generated from the button centers.
+- Placement on the page: rotation, flips and offset, saved in `template.json`.
 - Saves the DXF files and `template.json` into a new folder under `templates`.
 - Edit an existing template.
+- Publish template to a repository
 
 ## Further features
 
@@ -29,7 +31,6 @@ work goes on.
 - **Pattern fills** for shapes, text and the background.
 - **Background color** layer filling the whole outline.
 - **Flip** layers horizontally and vertically.
-- **Rulers and guides** dragged from the rulers, with snapping.
 - **Eyedropper** to pick a color from the canvas.
 - **Copy and paste effects** from one layer to others.
 

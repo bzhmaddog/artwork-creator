@@ -24,6 +24,8 @@ const STORAGE_KEY: &str = "panel_layout";
 const MIN_BODY: f32 = 60.0;
 /// Height of the line between two docked panels, dragged to resize them.
 const SPLITTER: f32 = 9.0;
+/// Room between a docked panel's title and its contents.
+const BODY_GAP: f32 = 6.0;
 /// Width of the zone at an empty side that a panel is dropped on to dock it there.
 const EDGE_ZONE: f32 = 48.0;
 /// Size of a panel floated for the first time.
@@ -32,22 +34,27 @@ const FLOAT_SIZE: Vec2 = vec2(320.0, 420.0);
 /// The panels, each with its title and contents.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PanelId {
-    Controller,
-    Page,
     Template,
+    Page,
+    View,
     Print,
     Variables,
     ColorsInUse,
     Layers,
     Properties,
+    /// A panel saved in the layout by an older version and since removed (the
+    /// Controller panel, whose template choice is now in the Template panel): its entry
+    /// is dropped when the layout is read.
+    #[serde(other)]
+    Removed,
 }
 
 impl PanelId {
     /// In the order of the default layout and of View > Panels.
     pub const ALL: [PanelId; 8] = [
-        PanelId::Controller,
-        PanelId::Page,
         PanelId::Template,
+        PanelId::Page,
+        PanelId::View,
         PanelId::Print,
         PanelId::Variables,
         PanelId::ColorsInUse,
@@ -57,14 +64,15 @@ impl PanelId {
 
     pub fn title(self) -> &'static str {
         translate(match self {
-            PanelId::Controller => tr_noop!("CONTROLLER"),
-            PanelId::Page => tr_noop!("PAGE_SECTION"),
             PanelId::Template => tr_noop!("TEMPLATE_SECTION"),
+            PanelId::Page => tr_noop!("PAGE_SECTION"),
+            PanelId::View => tr_noop!("VIEW_SECTION"),
             PanelId::Print => tr_noop!("PRINT_SECTION"),
             PanelId::Variables => tr_noop!("VARIABLES_SECTION"),
             PanelId::ColorsInUse => tr_noop!("COLORS_IN_USE_SECTION"),
             PanelId::Layers => tr_noop!("LAYERS_SECTION"),
             PanelId::Properties => tr_noop!("PROPERTIES_SECTION"),
+            PanelId::Removed => return "",
         })
     }
 
@@ -214,7 +222,7 @@ pub struct Layout {
 }
 
 impl Default for Layout {
-    /// Controller, Page, Template, Print, Variables and Colors in use on the left; Layers and
+    /// Template, Page, View, Print, Variables and Colors in use on the left; Layers and
     /// Properties on the right.
     fn default() -> Self {
         Self {
@@ -249,18 +257,30 @@ impl Layout {
         eframe::set_value(storage, STORAGE_KEY, self);
     }
 
-    /// Each panel once, those a newer version added in their default place.
+    /// Each panel once, those a newer version added in their default place, those it
+    /// removed left out.
     fn normalize(&mut self) {
         let mut seen = Vec::new();
         self.entries.retain(|e| {
-            let new = !seen.contains(&e.id);
+            let new = e.id != PanelId::Removed && !seen.contains(&e.id);
             seen.push(e.id);
             new
         });
-        for e in Layout::default().entries {
-            if !seen.contains(&e.id) {
-                self.entries.push(e);
+        for (k, e) in Layout::default().entries.into_iter().enumerate() {
+            if seen.contains(&e.id) {
+                continue;
             }
+            // Below the panel before it in the default layout, when that one is where the
+            // new one goes; otherwise last.
+            let at = k
+                .checked_sub(1)
+                .and_then(|p| {
+                    self.entries
+                        .iter()
+                        .position(|x| x.id == PanelId::ALL[p] && x.place == e.place)
+                })
+                .map_or(self.entries.len(), |i| i + 1);
+            self.entries.insert(at, e);
         }
     }
 
@@ -705,12 +725,6 @@ pub trait Contents {
     /// it would take without a limit.
     fn contents(&mut self, ui: &mut Ui, id: PanelId) -> Option<f32>;
 
-    /// Whether a docked panel is left out for now (the Template panel, until there is
-    /// a template).
-    fn skip_docked(&self, _id: PanelId) -> bool {
-        false
-    }
-
     /// Called on each frame of a panel's own window, e.g. for keyboard shortcuts.
     fn window_frame(&mut self, _ctx: &egui::Context) {}
 }
@@ -753,11 +767,7 @@ impl Layout {
     /// The panels docked on a side, top to bottom, sharing its height. Nothing when it
     /// has none.
     pub fn show_dock(&mut self, ui: &mut Ui, side: Side, app: &mut dyn Contents) {
-        let shown: Vec<PanelId> = self
-            .docked(side)
-            .into_iter()
-            .filter(|&id| !app.skip_docked(id))
-            .collect();
+        let shown = self.docked(side);
         if shown.is_empty() {
             return;
         }
@@ -787,6 +797,8 @@ impl Layout {
                         Rect::from_min_size(ui.cursor().min, vec2(ui.available_width(), 200.0));
                     self.header(ui, id, Header::Docked, guess);
                     if let Some(h) = height {
+                        // Counted with the titles, not the contents.
+                        ui.add_space(BODY_GAP);
                         let before = ui.cursor().top();
                         self.contents(ui, app, id, Some(h));
                         contents += ui.cursor().top() - before;
@@ -1067,9 +1079,9 @@ mod tests {
         assert_eq!(
             l.docked(Side::Left),
             [
-                PanelId::Controller,
-                PanelId::Page,
                 PanelId::Template,
+                PanelId::Page,
+                PanelId::View,
                 PanelId::Print,
                 PanelId::Variables,
                 PanelId::ColorsInUse
@@ -1093,14 +1105,14 @@ mod tests {
             [PanelId::Variables, PanelId::Layers, PanelId::Properties]
         );
         // Below the last one.
-        l.move_to(PanelId::Controller, Target::Dock(Side::Right, None));
+        l.move_to(PanelId::Template, Target::Dock(Side::Right, None));
         assert_eq!(
             l.docked(Side::Right),
             [
                 PanelId::Variables,
                 PanelId::Layers,
                 PanelId::Properties,
-                PanelId::Controller
+                PanelId::Template
             ]
         );
         // Within a side.
@@ -1114,14 +1126,14 @@ mod tests {
                 PanelId::Properties,
                 PanelId::Variables,
                 PanelId::Layers,
-                PanelId::Controller
+                PanelId::Template
             ]
         );
         assert_eq!(
             l.docked(Side::Left),
             [
                 PanelId::Page,
-                PanelId::Template,
+                PanelId::View,
                 PanelId::Print,
                 PanelId::ColorsInUse
             ]
@@ -1129,15 +1141,15 @@ mod tests {
         // The left side can be emptied, and docked onto again.
         for id in [
             PanelId::Page,
-            PanelId::Template,
+            PanelId::View,
             PanelId::Print,
             PanelId::ColorsInUse,
         ] {
             l.move_to(id, Target::Window);
         }
         assert!(l.docked(Side::Left).is_empty());
-        l.move_to(PanelId::Template, Target::Dock(Side::Left, None));
-        assert_eq!(l.docked(Side::Left), [PanelId::Template]);
+        l.move_to(PanelId::Page, Target::Dock(Side::Left, None));
+        assert_eq!(l.docked(Side::Left), [PanelId::Page]);
     }
 
     #[test]
@@ -1168,7 +1180,7 @@ mod tests {
         let mut l = Layout::default();
         l.move_to(
             PanelId::Properties,
-            Target::Dock(Side::Left, Some(PanelId::Controller)),
+            Target::Dock(Side::Left, Some(PanelId::Template)),
         );
         let json = serde_json::to_string(&l).unwrap();
         let mut back: Layout = serde_json::from_str(&json).unwrap();
@@ -1178,7 +1190,22 @@ mod tests {
         back.entries.retain(|e| e.id != PanelId::ColorsInUse);
         back.normalize();
         assert_eq!(back.entries.len(), PanelId::ALL.len());
+        // A panel since removed is left out, the others keep their places.
+        let old = json.replacen("\"Template\"", "\"Controller\"", 1);
+        let mut old: Layout = serde_json::from_str(&old).unwrap();
+        old.normalize();
+        assert!(old.entries.iter().all(|e| e.id != PanelId::Removed));
+        assert_eq!(old.docked(Side::Left)[0], PanelId::Properties);
+        assert_eq!(old.entries.len(), PanelId::ALL.len(), "Template added back");
         assert_eq!(back.place(PanelId::ColorsInUse), Place::Docked(Side::Left));
+        // A new panel goes below the one before it in the default layout.
+        let mut l = Layout::default();
+        l.entries.retain(|e| e.id != PanelId::View);
+        l.normalize();
+        assert_eq!(
+            l.docked(Side::Left)[..3],
+            [PanelId::Template, PanelId::Page, PanelId::View]
+        );
     }
 
     /// Labels standing for each panel's contents, many lines in Properties.
@@ -1301,11 +1328,11 @@ mod tests {
             "drawn on the right"
         );
 
-        // Controller, to the middle of the window: it floats where it was dropped.
-        let from = h.title(PanelId::Controller);
+        // Template, to the middle of the window: it floats where it was dropped.
+        let from = h.title(PanelId::Template);
         h.drag(from, pos2(450.0, 300.0));
-        assert_eq!(h.layout.place(PanelId::Controller), Place::Floating);
-        let title = h.title(PanelId::Controller);
+        assert_eq!(h.layout.place(PanelId::Template), Place::Floating);
+        let title = h.title(PanelId::Template);
         assert!(
             (title.y - 300.0).abs() < 20.0,
             "floats under the pointer: {title:?}"
@@ -1315,7 +1342,31 @@ mod tests {
         let left_dock = h.find("Page line 0").unwrap();
         // On Page's title, above its middle.
         h.drag(title, pos2(left_dock.center().x, left_dock.top() - 8.0));
-        assert_eq!(h.layout.docked(Side::Left)[0], PanelId::Controller);
+        assert_eq!(h.layout.docked(Side::Left)[0], PanelId::Template);
+    }
+
+    #[test]
+    fn dragging_a_title_up_or_down_reorders_its_side() {
+        use PanelId::*;
+        let mut h = Harness::new(Layout::default());
+        // Print, onto Page's title (the top half of Page): above it.
+        let (from, to) = (h.title(Print), h.title(Page));
+        h.drag(from, to);
+        assert_eq!(
+            h.layout.docked(Side::Left),
+            [Template, Print, Page, View, Variables, ColorsInUse]
+        );
+        // Template, below the last panel: at the bottom.
+        let (from, to) = (h.title(Template), h.title(ColorsInUse) + vec2(0.0, 30.0));
+        h.drag(from, to);
+        assert_eq!(
+            h.layout.docked(Side::Left),
+            [Print, Page, View, Variables, ColorsInUse, Template]
+        );
+        // Properties, onto Layers' title: above it.
+        let (from, to) = (h.title(Properties), h.title(Layers));
+        h.drag(from, to);
+        assert_eq!(h.layout.docked(Side::Right), [Properties, Layers]);
     }
 
     #[test]

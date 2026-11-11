@@ -1,7 +1,6 @@
-//! Project files, in two formats:
-//! - `.artwork`, the default: a zip archive holding `project.json` and every image and
-//!   font the project uses, so it can be moved, backed up or shared on its own;
-//! - `.json`, linked: the project alone, pointing to image files on disk.
+//! Project files: `.artwork` zip archives holding `project.json`, every image and font
+//! the project uses and its copy of its template, so a project can be moved, backed up or
+//! shared on its own.
 
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -24,22 +23,22 @@ const JSON_ENTRY: &str = "project.json";
 const IMAGE_DIR: &str = "images/";
 /// Folder of the text layers' fonts inside an archive.
 const FONT_DIR: &str = "fonts/";
+/// Folder of the project's copy of its template inside an archive.
+const TEMPLATE_DIR: &str = "template/";
 
-/// The file is a project archive (as opposed to a linked JSON project).
+/// The file has the project extension.
 pub fn is_archive(path: &Path) -> bool {
     path.extension()
         .is_some_and(|e| e.eq_ignore_ascii_case(EXTENSION))
 }
 
-/// Loads a project archive or a linked JSON project, with its export settings. Images
-/// from an archive come back in each layer's `data`, with `source` set to their name
-/// inside the archive; images of JSON projects are read from disk later.
+/// Loads a project archive, with its export settings. Images come back in each layer's
+/// `data`, with `source` set to their name inside the archive.
 pub fn load(path: &Path) -> Result<(Document, ExportSettings), String> {
     let bytes =
         std::fs::read(path).map_err(|e| tr!("CANNOT_READ_FILE", path = path.display(), e = e))?;
     if !bytes.starts_with(b"PK\x03\x04") {
-        let doc = Document::load(path)?;
-        return Ok((doc, export_of(&String::from_utf8_lossy(&bytes))));
+        return Err(tr!("NOT_A_PROJECT_ARCHIVE", path = path.display()));
     }
     let invalid =
         |e: &dyn std::fmt::Display| tr!("INVALID_PROJECT_FILE_AT", path = path.display(), e = e);
@@ -48,6 +47,22 @@ pub fn load(path: &Path) -> Result<(Document, ExportSettings), String> {
     let text = String::from_utf8(json).map_err(|e| invalid(&e))?;
     let mut doc = Document::from_json(&text)?;
     let export = export_of(&text);
+    // The template's files, those named by `template_copy`'s fingerprint: an archive
+    // saved before projects kept them has none, and the template installed is used.
+    if let Some(copy) = &mut doc.template_copy {
+        let names: Vec<String> = zip
+            .file_names()
+            .filter_map(|n| n.ok().map(|n| n.into_owned()))
+            .filter(|n| n.starts_with(TEMPLATE_DIR) && !n.ends_with('/'))
+            .collect();
+        let mut files = Vec::new();
+        for name in names {
+            let data = read_entry(&mut zip, &name).map_err(|e| invalid(&e))?;
+            files.push((name[TEMPLATE_DIR.len()..].to_owned(), Arc::new(data)));
+        }
+        files.sort_by(|a, b| a.0.cmp(&b.0));
+        copy.files = crate::template::TemplateFiles(files);
+    }
 
     // Each image is read once, even when several layers use it.
     let mut images: HashMap<String, Option<Arc<Vec<u8>>>> = HashMap::new();
@@ -160,69 +175,13 @@ pub fn save(doc: &Document, export: &ExportSettings, path: &Path) -> Result<Vec<
     });
     let json = serde_json::to_string(&doc).map_err(|e| e.to_string())?;
     let json = with_export(&json, export)?;
-    write_safely(path, |tmp| write_archive(tmp, &json, &images))?;
-    Ok(missing)
-}
-
-/// Saves the project as linked JSON. Images it only has in memory (from an archive)
-/// are written to an "<name> images" folder next to the project and linked from there.
-/// Returns the names of layers whose image is neither on disk nor in memory.
-pub fn save_json(
-    doc: &Document,
-    export: &ExportSettings,
-    path: &Path,
-) -> Result<Vec<String>, String> {
-    let base = path.parent().unwrap_or(Path::new(""));
-    let folder = base.join(format!("{} images", crate::recent::label(path)));
-    let mut doc = doc.clone();
-    let mut missing = Vec::new();
-    let mut error = None;
-    // Writes a file the project only has in memory into the folder; returns its path.
-    let mut write = |data: &Arc<Vec<u8>>, source: &Path, font: bool| -> Option<PathBuf> {
-        let name = entry_name(data, source, font);
-        let file = folder.join(
-            name.trim_start_matches(IMAGE_DIR)
-                .trim_start_matches(FONT_DIR),
-        );
-        // Identical files are shared, so an existing one is already right.
-        let written = file.is_file()
-            || std::fs::create_dir_all(&folder)
-                .and_then(|()| std::fs::write(&file, data.as_slice()))
-                .map_err(|e| {
-                    error.get_or_insert(tr!("CANNOT_WRITE_FILE", path = file.display(), e = e))
-                })
-                .is_ok();
-        written.then_some(file)
-    };
-    doc.for_each_layer_mut(|layer| {
-        for f in fallbacks_to_save(layer) {
-            if f.source.is_absolute() && f.source.is_file() {
-                continue;
-            }
-            if let Some(data) = &f.data
-                && let Some(file) = write(data, &f.source, true)
-            {
-                f.source = file;
-            }
-        }
-        if !font_to_save(layer) || (layer.source.is_absolute() && layer.source.is_file()) {
-            return;
-        }
-        let Some(data) = &layer.data else {
-            missing.push(layer.name.clone());
-            return;
-        };
-        if let Some(file) = write(data, &layer.source, layer.text.is_some()) {
-            layer.source = file;
-        }
-    });
-    if let Some(e) = error {
-        return Err(e);
-    }
-    let json = with_export(&doc.to_json_relative(base)?, export)?;
-    write_safely(path, |tmp| {
-        std::fs::write(tmp, &json).map_err(|e| e.to_string())
-    })?;
+    let template: Vec<(String, Arc<Vec<u8>>)> = doc
+        .template_copy
+        .iter()
+        .flat_map(|c| &c.files.0)
+        .map(|(name, data)| (format!("{TEMPLATE_DIR}{name}"), data.clone()))
+        .collect();
+    write_safely(path, |tmp| write_archive(tmp, &json, &images, &template))?;
     Ok(missing)
 }
 
@@ -243,7 +202,14 @@ fn write_safely(
     Ok(())
 }
 
-fn write_archive(path: &Path, json: &str, images: &[(String, Arc<Vec<u8>>)]) -> Result<(), String> {
+/// Writes an archive: the project's JSON, its images and fonts, and its template's files
+/// (compressed: DXF is text).
+fn write_archive(
+    path: &Path,
+    json: &str,
+    images: &[(String, Arc<Vec<u8>>)],
+    template: &[(String, Arc<Vec<u8>>)],
+) -> Result<(), String> {
     let file = std::fs::File::create(path).map_err(|e| e.to_string())?;
     let mut zip = ZipWriter::new(std::io::BufWriter::new(file));
     let deflated = SimpleFileOptions::default().compression_method(CompressionMethod::Deflated);
@@ -256,6 +222,10 @@ fn write_archive(path: &Path, json: &str, images: &[(String, Arc<Vec<u8>>)]) -> 
     zip.write_all(json.as_bytes()).map_err(|e| e.to_string())?;
     for (name, data) in images {
         zip.start_file(name, stored).map_err(|e| e.to_string())?;
+        zip.write_all(data).map_err(|e| e.to_string())?;
+    }
+    for (name, data) in template {
+        zip.start_file(name, deflated).map_err(|e| e.to_string())?;
         zip.write_all(data).map_err(|e| e.to_string())?;
     }
     let mut out = zip.finish().map_err(|e| e.to_string())?;
@@ -360,18 +330,13 @@ mod tests {
         l.shape.as_mut().unwrap().stroke_width = 2.0;
         let want = l.shape.clone();
         doc.layers.push(Node::Layer(Box::new(l)));
-        for path in [dir.join("s.artwork"), dir.join("s.json")] {
-            let missing = if path.extension().is_some_and(|e| e == "json") {
-                save_json(&doc, &ExportSettings::default(), &path).unwrap()
-            } else {
-                save(&doc, &ExportSettings::default(), &path).unwrap()
-            };
-            assert!(missing.is_empty(), "nothing reported missing");
-            let back = load(&path).unwrap().0;
-            let l = back.layer(1).unwrap();
-            assert_eq!(l.shape, want);
-            assert!(l.source.as_os_str().is_empty() && l.data.is_none());
-        }
+        let path = dir.join("s.artwork");
+        let missing = save(&doc, &ExportSettings::default(), &path).unwrap();
+        assert!(missing.is_empty(), "nothing reported missing");
+        let back = load(&path).unwrap().0;
+        let l = back.layer(1).unwrap();
+        assert_eq!(l.shape, want);
+        assert!(l.source.as_os_str().is_empty() && l.data.is_none());
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -432,17 +397,6 @@ mod tests {
         assert!(fb[1].data.is_none() && fb[1].source.as_os_str().is_empty());
         assert_eq!(fb[1].family, text::EMOJI_FAMILY);
 
-        // A linked project writes the archive's font next to it.
-        let json = dir.join("t.json");
-        save_json(&back, &ExportSettings::default(), &json).unwrap();
-        let linked = Document::load(&json).unwrap();
-        let src = &linked.layer(1).unwrap().source;
-        assert!(src.is_file() && src.extension().is_some_and(|e| e == "ttf"));
-        let fb = &linked.layer(2).unwrap().text.as_ref().unwrap().fallbacks[0];
-        assert_eq!(
-            &fb.source, src,
-            "fallback written next to it too, and linked"
-        );
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -504,46 +458,23 @@ mod tests {
     }
 
     #[test]
-    fn archive_project_saved_as_linked_json_writes_its_images_out() {
-        let dir = std::env::temp_dir().join(format!("artwork-tojson-{}", std::process::id()));
+    fn archive_keeps_the_template() {
+        let dir = std::env::temp_dir().join(format!("artwork-tpl-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let red = Arc::new(png([255, 0, 0]));
-        let on_disk = dir.join("disk.png");
-        std::fs::write(&on_disk, png([0, 255, 0])).unwrap();
-        let mut linked = Layer::new(3, "disk".into(), on_disk.clone());
-        linked.data = Some(Arc::new(std::fs::read(&on_disk).unwrap()));
+        let installed = crate::template::tests::fixture();
+        let copy = crate::document::TemplateCopy::of(&installed).unwrap();
         let doc = Document {
-            layers: vec![
-                // As loaded from an archive: the source is a name inside it.
-                {
-                    let mut l = Layer::new(1, "red".into(), "images/abc.png".into());
-                    l.data = Some(red.clone());
-                    Node::Layer(Box::new(l))
-                },
-                Node::Layer(Box::new(linked)),
-                layer(4, "lost", None),
-            ],
-            next_id: 5,
+            template: Some(installed.id.clone()),
+            template_copy: Some(copy.clone()),
             ..Default::default()
         };
-        let path = dir.join("My stick.json");
-        let missing = save_json(&doc, &ExportSettings::default(), &path).unwrap();
-        assert_eq!(missing, ["lost"]);
-
-        let back = load(&path).unwrap().0;
-        let red_file = &back.layer(1).unwrap().source;
-        assert!(
-            red_file.starts_with(dir.join("My stick images")),
-            "{red_file:?}"
-        );
-        assert_eq!(std::fs::read(red_file).unwrap(), *red);
-        assert_eq!(
-            back.layer(3).unwrap().source,
-            on_disk,
-            "files on disk stay linked"
-        );
-        let text = std::fs::read_to_string(&path).unwrap();
-        assert!(!text.contains(dir.to_str().unwrap()), "links are relative");
+        // An archive carries the files: the same fingerprint once read back.
+        let path = dir.join("p.artwork");
+        save(&doc, &ExportSettings::default(), &path).unwrap();
+        let back = load(&path).unwrap().0.template_copy.unwrap();
+        assert_eq!(back.fingerprint, copy.fingerprint);
+        assert_eq!(back.files.fingerprint(), copy.fingerprint);
+        assert_eq!(back.files.0.len(), copy.files.0.len());
         std::fs::remove_dir_all(&dir).ok();
     }
 
@@ -570,40 +501,26 @@ mod tests {
             ..choices.clone()
         };
         let doc = Document::default();
-        for path in [dir.join("e.artwork"), dir.join("e.json")] {
-            if path.extension().is_some_and(|e| e == "json") {
-                save_json(&doc, &export, &path).unwrap();
-            } else {
-                save(&doc, &export, &path).unwrap();
-            }
-            let (_, back) = load(&path).unwrap();
-            assert_eq!(back, choices, "{}", path.display());
-        }
+        let path = dir.join("e.artwork");
+        save(&doc, &export, &path).unwrap();
+        let (_, back) = load(&path).unwrap();
+        assert_eq!(back, choices);
         // Projects saved before export settings were get the defaults.
-        let old = dir.join("old.json");
-        std::fs::write(&old, r#"{"layers":[]}"#).unwrap();
-        assert_eq!(load(&old).unwrap().1, ExportSettings::default());
+        assert_eq!(export_of(r#"{"layers":[]}"#), ExportSettings::default());
         std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
-    fn older_json_projects_still_open() {
+    fn json_projects_are_refused() {
         let dir = std::env::temp_dir().join(format!("artwork-legacy-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("old.artwork.json");
-        std::fs::write(
-            &path,
-            r#"{"layers":[{"id":1,"name":"a","source":"img/a.png","size_px":[4,3],
-                "visible":true,"locked":false,"opacity":1.0,
-                "transform":{"center":[0,0],"scale":[1,1],"rotation_deg":0,
-                "flip_x":false,"flip_y":false}}]}"#,
-        )
-        .unwrap();
+        std::fs::write(&path, r#"{"layers":[]}"#).unwrap();
         assert!(!is_archive(&path));
-        let doc = load(&path).unwrap().0;
-        let l = doc.layer(1).unwrap();
-        assert_eq!(l.source, dir.join("img/a.png"), "relative to the project");
-        assert!(l.data.is_none(), "read from disk later");
+        let Err(err) = load(&path) else {
+            panic!("a linked JSON project should not load");
+        };
+        assert!(err.contains("not an Artwork Creator project"), "{err}");
         std::fs::remove_dir_all(&dir).ok();
     }
 

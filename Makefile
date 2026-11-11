@@ -128,6 +128,9 @@ dist-linux: linux
 	mkdir -p $(DIST)/$(APP)-linux
 	cp $(LINUX_BIN) $(DIST)/$(APP)-linux/
 	cp -r templates $(DIST)/$(APP)-linux/
+	# For desktop menus: see "Building" in README.md.
+	cp assets/icon/png/$(APP)-256.png $(DIST)/$(APP)-linux/$(APP).png
+	cp assets/$(APP).desktop $(DIST)/$(APP)-linux/
 	tar -czf $(DIST)/$(APP)-linux.tar.gz -C $(DIST) $(APP)-linux
 
 dist-windows: windows

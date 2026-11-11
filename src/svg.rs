@@ -72,10 +72,31 @@ pub fn import(
     if imported.nodes.is_empty() {
         return Err(tr!("SVG_HAS_NO_SHAPES", path = path.display()));
     }
+    let name = path
+        .file_stem()
+        .map_or_else(String::new, |s| s.to_string_lossy().into_owned());
+    imported.nodes = one_group(std::mem::take(&mut imported.nodes), name, new_id);
     for n in &mut imported.notices {
         *n = format!("{}: {n}", path.display());
     }
     Ok(imported)
+}
+
+/// Several shapes and groups with a group among them, all in one group named `name` (the
+/// file's), so that the project gets one group rather than many; others as they are.
+fn one_group(nodes: Vec<Node>, name: String, new_id: &mut dyn FnMut() -> u64) -> Vec<Node> {
+    if nodes.len() < 2 || !nodes.iter().any(|n| matches!(n, Node::Group(_))) {
+        return nodes;
+    }
+    vec![Node::Group(Group {
+        id: new_id(),
+        name,
+        visible: true,
+        locked: false,
+        opacity: 1.0,
+        expanded: false,
+        children: nodes,
+    })]
 }
 
 /// [`import`] from the file's contents.
@@ -689,6 +710,45 @@ mod tests {
         assert_eq!(line.cap, Cap::Round);
         assert_eq!(line.dash, DashStyle::Dashed);
         assert!((line.stroke_width - 4.0 / PX_PER_MM).abs() < 1e-3);
+    }
+
+    #[test]
+    fn several_groups_come_in_one_group_named_after_the_file() {
+        let svg = |body: &str| {
+            format!(
+                r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100">{body}</svg>"#
+            )
+        };
+        let rect = r#"<rect width="10" height="10"/>"#;
+        let mut id = 100;
+        let mut new_id = || {
+            id += 1;
+            id
+        };
+        let mut nodes = |body: &str| {
+            let out = import_bytes(
+                svg(body).as_bytes(),
+                [297.0, 210.0],
+                [148.5, 105.0],
+                &mut new_id,
+            )
+            .unwrap();
+            one_group(out.nodes, "logo".into(), &mut new_id)
+        };
+        // Two groups and a shape: one group around them all.
+        let both = nodes(&format!(
+            r#"<g id="a">{rect}</g><g id="b">{rect}</g>{rect}"#
+        ));
+        let [Node::Group(g)] = &both[..] else {
+            panic!("one group")
+        };
+        assert_eq!(g.name, "logo");
+        assert_eq!(g.children.len(), 3);
+        // One group alone, or shapes without groups: as they are.
+        assert!(
+            matches!(&nodes(&format!(r#"<g id="a">{rect}{rect}</g>"#))[..], [Node::Group(g)] if g.name == "a")
+        );
+        assert_eq!(nodes(&format!("{rect}{rect}")).len(), 2);
     }
 
     /// Imports the SVG file named by `SVG_FILE` into a page and renders it as an export

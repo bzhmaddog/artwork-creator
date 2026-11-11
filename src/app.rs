@@ -8,7 +8,7 @@ use egui::{Color32, ColorImage, Key, TextureFilter, TextureOptions};
 
 use crate::canvas_points;
 use crate::clipboard::Clipboard;
-use crate::document::{self, Document, Layer, Node, Orientation, P2, PageSize};
+use crate::document::{self, Document, Layer, Node, Orientation, P2, PageSize, TemplateCopy};
 use crate::effects::cache::EffectCache;
 use crate::export::{self, ExportSettings};
 use crate::file_dialog::{self, FileBrowser, Filter, Purpose, Request};
@@ -40,19 +40,11 @@ const IMAGE_FILTERS: &[Filter] = &[Filter::new(tr_noop!("FILTER_IMAGES"), IMAGE_
 const SVG_EXTENSIONS: &[&str] = &["svg", "svgz"];
 const SVG_FILTERS: &[Filter] = &[Filter::new(tr_noop!("FILTER_SVG"), SVG_EXTENSIONS)];
 const EXPORT_FILTERS: &[Filter] = &[Filter::new("PNG / PDF / SVG", &["png", "pdf", "svg"])];
-/// Projects that can be opened: archives and linked JSON projects.
-const OPEN_PROJECT_FILTERS: &[Filter] = &[Filter::new(
+/// Project files, to open and save.
+const PROJECT_FILTERS: &[Filter] = &[Filter::new(
     tr_noop!("FILTER_ARTWORK_PROJECT"),
-    &[project::EXTENSION, "json"],
+    &[project::EXTENSION],
 )];
-/// The two formats a project can be saved in, the default first.
-const SAVE_PROJECT_FILTERS: &[Filter] = &[
-    Filter::new(
-        tr_noop!("FILTER_ARTWORK_PROJECT_EMBEDDED"),
-        &[project::EXTENSION],
-    ),
-    Filter::new(tr_noop!("FILTER_LINKED_JSON_PROJECT"), &["json"]),
-];
 
 /// Background export thread; yields the written files or an error.
 type ExportJob = JoinHandle<Result<Vec<PathBuf>, String>>;
@@ -62,7 +54,19 @@ pub struct ArtworkApp {
     doc: Document,
     templates: Vec<TemplateEntry>,
     templates_dir: Option<PathBuf>,
+    /// The template in use, loaded from the project's copy of it.
     template: Option<Template>,
+    /// That copy, unpacked and read as an installed template is.
+    template_entry: Option<TemplateEntry>,
+    /// The fingerprint of the installed template of the same name, when there is one.
+    installed_fingerprint: Option<String>,
+    /// An installed version the user chose not to use: it is not offered again.
+    kept_fingerprint: Option<String>,
+    /// An installed version the user will decide about later: no popup for it, only a
+    /// note in the Template panel.
+    postponed_fingerprint: Option<String>,
+    /// The installed template, loaded to compare it with the project's copy on the canvas.
+    comparing: Option<(TemplateEntry, Template)>,
     canvas: CanvasState,
     layers_panel: LayersPanel,
     selected: Option<u64>,
@@ -117,7 +121,7 @@ pub struct ArtworkApp {
     browser: FileBrowser,
     /// A save or export waiting for the user to agree to replace existing files.
     overwrite: Option<Overwrite>,
-    /// Modification times of the current template's files, to reload on change.
+    /// Modification times of the installed template's files, to notice a change.
     template_stamp: Vec<Option<SystemTime>>,
     last_template_check: Instant,
     /// Interface language: the system's or a chosen one.
@@ -165,6 +169,199 @@ const PANEL_LABELS: [&str; 13] = [
     tr_noop!("EXPORT_TILE_OVERLAP"),
     tr_noop!("EXPORT_TILE_POSITION"),
 ];
+
+/// The field picking a template, showing `current`: a list of `templates` by vendor, only
+/// as wide as its longest choice. Returns the folder of the one picked, or `chosen` as it
+/// was, and the field.
+fn template_selector(
+    ui: &mut egui::Ui,
+    current: &str,
+    templates: &[TemplateEntry],
+    chosen: &Option<String>,
+) -> (Option<String>, egui::Response) {
+    let mut choice = chosen.clone();
+    // A field as wide as the panel, like a combo box, opening a list only as wide as
+    // its longest choice.
+    let arrow = egui::Atom::paint(egui::Vec2::splat(ui.spacing().icon_width), |ui, args| {
+        let r = args.rect;
+        let (w, h) = (r.width() * 0.7, r.height() * 0.45);
+        let c = r.center();
+        ui.painter().add(egui::Shape::convex_polygon(
+            vec![
+                c + egui::vec2(-w / 2.0, -h / 2.0),
+                c + egui::vec2(w / 2.0, -h / 2.0),
+                c + egui::vec2(0.0, h / 2.0),
+            ],
+            ui.visuals().widgets.inactive.fg_stroke.color,
+            egui::Stroke::NONE,
+        ));
+    });
+    let field = ui.add(
+        egui::Button::new((egui::RichText::new(current), egui::Atom::grow(), arrow))
+            .truncate()
+            .min_size(egui::vec2(ui.available_width(), 0.0)),
+    );
+    // Wide enough for the longest choice, its version and the space between them.
+    let list_width = {
+        let font = egui::TextStyle::Button.resolve(ui.style());
+        let width = |text: &str| {
+            ui.painter()
+                .layout_no_wrap(text.to_owned(), font.clone(), egui::Color32::WHITE)
+                .size()
+                .x
+        };
+        let names = std::iter::once(width(tr!("NO_TEMPLATE"))).chain(templates.iter().map(|t| {
+            let indent = if t.vendor.is_some() {
+                ui.spacing().indent
+            } else {
+                0.0
+            };
+            let vendor = t.vendor.as_deref().map_or(0.0, width);
+            (indent + width(&t.name)).max(vendor)
+        }));
+        let versions = templates
+            .iter()
+            .filter_map(|t| t.version.as_deref())
+            .map(width)
+            .fold(0.0, f32::max);
+        names.fold(0.0, f32::max)
+            + versions
+            + 2.0 * ui.spacing().button_padding.x
+            + 3.0 * ui.spacing().item_spacing.x
+    };
+    egui::Popup::menu(&field)
+        .width(list_width.min(field.rect.width()))
+        .show(|ui| {
+            ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Extend);
+            // Each choice as wide as the list, all of it clickable; `indent` sets its
+            // text in, inside the row; its version, if any, at its right end.
+            let mut row = |ui: &mut egui::Ui,
+                           id: Option<String>,
+                           text: &str,
+                           version: Option<&str>,
+                           indent: f32| {
+                let gap = egui::Atom::paint(egui::vec2(indent, 0.0), |_, _| {});
+                let version = egui::RichText::new(version.unwrap_or_default()).weak();
+                let button = egui::Button::selectable(
+                    choice == id,
+                    (gap, text, egui::Atom::grow(), version),
+                )
+                .min_size(egui::vec2(ui.available_width(), 0.0));
+                if ui.add(button).clicked() {
+                    choice = id;
+                }
+            };
+            row(ui, None, tr!("NO_TEMPLATE"), None, 0.0);
+            // Listed by vendor (see `template::scan`): each vendor's name over its
+            // models, set in a little.
+            let mut vendor: Option<String> = None;
+            for t in templates {
+                let key = t.vendor.as_ref().map(|v| v.to_lowercase());
+                if key.is_some() && key != vendor {
+                    ui.add_space(2.0);
+                    ui.weak(t.vendor.as_deref().unwrap_or_default());
+                }
+                vendor = key;
+                let indent = if t.vendor.is_some() {
+                    ui.spacing().indent
+                } else {
+                    0.0
+                };
+                row(
+                    ui,
+                    Some(t.id.clone()),
+                    &t.name,
+                    t.version.as_deref(),
+                    indent,
+                );
+            }
+        });
+    (choice, field)
+}
+
+/// The bar under the canvas while comparing templates: two large buttons, Use installed
+/// (the main one, in the accent color) right of Keep project's, in a frame outlined in
+/// the accent color. Returns which was clicked: (keep, use installed).
+fn compare_bar_body(ui: &mut egui::Ui) -> (bool, bool) {
+    let accent = ui.visuals().selection.bg_fill;
+    let frame = egui::Frame::popup(ui.style())
+        .inner_margin(egui::Margin::same(10))
+        .stroke(egui::Stroke::new(1.5, accent))
+        .shadow(egui::Shadow {
+            offset: [0, 4],
+            blur: 16,
+            spread: 2,
+            color: egui::Color32::from_black_alpha(110),
+        });
+    frame
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 10.0;
+                ui.spacing_mut().button_padding = egui::vec2(16.0, 8.0);
+                let text = |key: &str| egui::RichText::new(i18n::translate(key)).size(16.0);
+                let keep = ui
+                    .button(text(tr_noop!("KEEP_PROJECT_TEMPLATE")))
+                    .on_hover_text(tr!("KEEP_PROJECT_TEMPLATE_HINT"))
+                    .clicked();
+                let use_installed = ui
+                    .add(
+                        egui::Button::new(
+                            text(tr_noop!("USE_INSTALLED_TEMPLATE"))
+                                .color(ui.visuals().selection.stroke.color),
+                        )
+                        .fill(accent),
+                    )
+                    .on_hover_text(tr!("USE_INSTALLED_TEMPLATE_HINT"))
+                    .clicked();
+                (keep, use_installed)
+            })
+            .inner
+        })
+        .inner
+}
+
+/// The popup asking what to do with a changed installed template: what changed, both
+/// versions, and the buttons. Returns which was clicked: (compare, keep the project's,
+/// use the installed one).
+fn template_differs_body(
+    ui: &mut egui::Ui,
+    name: &str,
+    project: &str,
+    installed: &str,
+) -> (bool, bool, bool) {
+    let (mut compare, mut keep, mut use_installed) = (false, false, false);
+    ui.set_width(420.0);
+    ui.strong(tr!("TEMPLATE_DIFFERS_TITLE"));
+    ui.add_space(4.0);
+    ui.label(tr!("TEMPLATE_DIFFERS_TEXT", name = name));
+    ui.add_space(4.0);
+    egui::Grid::new("template_versions").show(ui, |ui| {
+        ui.label(tr!("TEMPLATE_PROJECT_VERSION"));
+        ui.strong(project);
+        ui.end_row();
+        ui.label(tr!("TEMPLATE_INSTALLED_VERSION"));
+        ui.strong(installed);
+        ui.end_row();
+    });
+    ui.add_space(8.0);
+    dialog_button_row(ui, |ui| {
+        use_installed = ui
+            .button(tr!("USE_INSTALLED_TEMPLATE"))
+            .on_hover_text(tr!("USE_INSTALLED_TEMPLATE_HINT"))
+            .clicked();
+        keep = ui
+            .button(tr!("KEEP_PROJECT_TEMPLATE"))
+            .on_hover_text(tr!("KEEP_PROJECT_TEMPLATE_HINT"))
+            .clicked();
+        at_left_edge(ui, |ui| {
+            compare = ui
+                .button(tr!("COMPARE_TEMPLATES"))
+                .on_hover_text(tr!("COMPARE_TEMPLATES_HINT"))
+                .clicked();
+        });
+    });
+    (compare, keep, use_installed)
+}
 
 /// A two-column grid of labels and fields in the Page, Template or Print panel, its
 /// labels' column as wide as the widest of `PANEL_LABELS`.
@@ -216,13 +413,9 @@ struct Overwrite {
     existing: Vec<PathBuf>,
 }
 
-/// The file a project is saved to: the extension picks the format; without one of the
-/// project extensions, it's an archive.
+/// The file a project is saved to: with the project extension added if it lacks it.
 fn project_save_path(path: PathBuf) -> PathBuf {
-    let json = path
-        .extension()
-        .is_some_and(|e| e.eq_ignore_ascii_case("json"));
-    if json || project::is_archive(&path) {
+    if project::is_archive(&path) {
         return path;
     }
     let mut name = path.into_os_string();
@@ -280,26 +473,6 @@ fn menu_entry<'a>(label: &'a str, shortcut: Option<&String>) -> egui::Button<'a>
         Some(s) => b.shortcut_text(s.as_str()),
         None => b,
     }
-}
-
-/// A menu checkbox, with its command's shortcut at the right as entries show theirs.
-fn menu_checkbox(
-    ui: &mut egui::Ui,
-    enabled: bool,
-    value: &mut bool,
-    label: &str,
-    shortcut: Option<&String>,
-) -> egui::Response {
-    ui.horizontal(|ui| {
-        let r = ui.add_enabled(enabled, egui::Checkbox::new(value, label));
-        if let Some(s) = shortcut {
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.weak(s.as_str())
-            });
-        }
-        r
-    })
-    .inner
 }
 
 /// A modal dialog, framed like a window but with more room: egui frames modals like
@@ -376,6 +549,11 @@ impl ArtworkApp {
             templates,
             templates_dir,
             template: None,
+            template_entry: None,
+            installed_fingerprint: None,
+            kept_fingerprint: None,
+            postponed_fingerprint: None,
+            comparing: None,
             canvas: CanvasState::load(cc.storage),
             layers_panel: LayersPanel::default(),
             selected: None,
@@ -434,10 +612,6 @@ impl ArtworkApp {
             last_saved: None,
         };
         log::info!("native file dialogs: {}", app.native_dialogs);
-        if let Some(first) = app.templates.first().map(|t| t.id.clone()) {
-            app.select_template(Some(first), true);
-            app.dirty = false;
-        }
         app.history.reset(&app.doc);
         if let Some(path) = project {
             app.open_project_path(&cc.egui_ctx, path);
@@ -463,20 +637,35 @@ impl ArtworkApp {
         }
     }
 
-    /// Template id and page size before an undo or redo, so `after_restore` knows what to
-    /// refresh.
-    fn snapshot_info(&self) -> (Option<String>, P2) {
-        (self.doc.template.clone(), self.doc.page_mm())
+    /// Template id, its copy's fingerprint and page size before an undo or redo, so
+    /// `after_restore` knows what to refresh.
+    fn snapshot_info(&self) -> (Option<String>, Option<String>, P2) {
+        (
+            self.doc.template.clone(),
+            self.copy_fingerprint(),
+            self.doc.page_mm(),
+        )
+    }
+
+    /// The fingerprint of the project's copy of its template.
+    fn copy_fingerprint(&self) -> Option<String> {
+        self.doc
+            .template_copy
+            .as_ref()
+            .map(|c| c.fingerprint.clone())
     }
 
     /// Brings the rest of the app in line with a document restored by undo or redo.
-    fn after_restore(&mut self, (template, page): (Option<String>, P2)) {
+    fn after_restore(
+        &mut self,
+        (template, fingerprint, page): (Option<String>, Option<String>, P2),
+    ) {
         // The restored fields were not changed by hand.
         self.applied.clear();
-        if self.doc.template != template {
+        if self.doc.template != template || self.copy_fingerprint() != fingerprint {
             // Keep the restored placement rather than the template's defaults.
             let placement = self.doc.template_placement;
-            self.select_template(self.doc.template.clone(), false);
+            self.load_template(false);
             self.doc.template_placement = placement;
         }
         if self.doc.page_mm() != page {
@@ -498,26 +687,77 @@ impl ArtworkApp {
 
     // ---- Templates ----
 
-    /// Selects a template by folder id. With `apply_defaults`, its configured
-    /// (or automatic) placement replaces the current one.
+    /// Picks an installed template by folder id: the project gets its own copy of it, then
+    /// uses it. With `apply_defaults`, the template's placement replaces the current one.
     fn select_template(&mut self, id: Option<String>, apply_defaults: bool) {
-        self.template = None;
         self.doc.template = id.clone();
-        let Some(id) = id else { return };
-        let Some(entry) = self.templates.iter().find(|t| t.id == id) else {
+        self.doc.template_copy = None;
+        if let Some(id) = &id {
+            match self.installed(id).map(TemplateCopy::of) {
+                Some(Ok(copy)) => self.doc.template_copy = Some(copy),
+                Some(Err(e)) => self.messages.push(e),
+                None => self.messages.push(tr!("TEMPLATE_NOT_INSTALLED", id = id)),
+            }
+        }
+        self.load_template(apply_defaults);
+    }
+
+    /// Loads the project's copy of its template. A project saved before projects kept
+    /// their template gets a copy of the installed one, kept from then on. With `apply_defaults`, the template's
+    /// placement replaces the current one.
+    fn load_template(&mut self, apply_defaults: bool) {
+        self.template = None;
+        self.template_entry = None;
+        self.comparing = None;
+        self.installed_fingerprint = None;
+        self.template_stamp = Vec::new();
+        self.dirty = true;
+        let Some(id) = self.doc.template.clone() else {
+            return;
+        };
+        self.refresh_installed();
+        if self
+            .doc
+            .template_copy
+            .as_ref()
+            .is_none_or(|c| c.files.is_empty())
+        {
+            let Some(installed) = self.installed(&id) else {
+                self.messages.push(tr!("TEMPLATE_NOT_INSTALLED", id = id));
+                return;
+            };
+            let fresh = match TemplateCopy::of(installed) {
+                Ok(fresh) => fresh,
+                Err(e) => {
+                    self.messages.push(e);
+                    return;
+                }
+            };
+            self.doc.template_copy = Some(fresh);
+        }
+        let Some(copy) = &self.doc.template_copy else {
+            return;
+        };
+        let entry = match copy.files.unpack(&id) {
+            Ok(dir) => template::read_entry(&dir),
+            Err(e) => {
+                self.messages.push(e);
+                return;
+            }
+        };
+        let Some(entry) = entry else {
             self.messages.push(tr!("TEMPLATE_NOT_INSTALLED", id = id));
             return;
         };
         if let Some(e) = &entry.config_error {
             self.messages.push(tr!("INVALID_TEMPLATE_CONFIG", e = e));
         }
-        match template::load(entry) {
+        match template::load(&entry) {
             Ok(t) => {
                 if apply_defaults {
                     self.doc.template_placement =
                         entry.default_placement(t.size_mm, self.doc.page_mm());
                 }
-                self.template_stamp = entry.stamp();
                 // Line colors set in template.json.
                 for e in &t.elements {
                     if let Some([r, g, b]) = e.color {
@@ -525,40 +765,257 @@ impl ArtworkApp {
                     }
                 }
                 self.template = Some(t);
+                self.template_entry = Some(entry);
             }
             Err(e) => self.messages.push(e),
         }
+    }
+
+    /// The installed template of folder `id`.
+    fn installed(&self, id: &str) -> Option<&TemplateEntry> {
+        self.templates.iter().find(|t| t.id == id)
+    }
+
+    /// The installed template differs from the project's copy (and was not set aside):
+    /// its fingerprint.
+    fn installed_differs(&self) -> Option<String> {
+        let fp = self.installed_fingerprint.clone()?;
+        (Some(&fp) != self.copy_fingerprint().as_ref()
+            && self.kept_fingerprint.as_ref() != Some(&fp))
+        .then_some(fp)
+    }
+
+    /// Replaces the project's copy of its template with the installed one, placed as it
+    /// says. Undo brings the copy back.
+    fn use_installed_template(&mut self) {
+        let Some(id) = self.doc.template.clone() else {
+            return;
+        };
+        match self.installed(&id).map(TemplateCopy::of) {
+            Some(Ok(copy)) => {
+                self.doc.template_copy = Some(copy);
+                self.load_template(true);
+            }
+            Some(Err(e)) => self.messages.push(e),
+            None => {}
+        }
+    }
+
+    /// Starts comparing the installed template with the project's copy on the canvas.
+    fn compare_installed_template(&mut self) {
+        let Some(entry) = self
+            .doc
+            .template
+            .as_deref()
+            .and_then(|id| self.installed(id))
+        else {
+            return;
+        };
+        match template::load(entry) {
+            Ok(t) => self.comparing = Some((entry.clone(), t)),
+            Err(e) => self.messages.push(e),
+        }
+    }
+
+    /// In the Template panel, after the user put off deciding about the installed
+    /// template: a reminder, and a button to open the popup again.
+    fn template_differs_note(&mut self, ui: &mut egui::Ui) {
+        let Some(fp) = self.installed_differs() else {
+            self.comparing = None;
+            return;
+        };
+        if self.postponed_fingerprint.as_ref() != Some(&fp) || self.comparing.is_some() {
+            return;
+        }
+        ui.add_space(4.0);
+        crate::callout::callout_small(
+            ui,
+            crate::callout::Tone::Info,
+            tr!("TEMPLATE_DIFFERS_TITLE"),
+        );
+        if ui.button(tr!("REVIEW_TEMPLATE_CHANGE")).clicked() {
+            self.postponed_fingerprint = None;
+        }
+    }
+
+    /// The popup asking what to do when the installed template differs from the
+    /// project's copy: compare them on the canvas, keep the project's, or use the
+    /// installed one. Esc puts it off (see `template_differs_note`).
+    fn template_differs_modal(&mut self, ctx: &egui::Context) {
+        let Some(fp) = self.installed_differs() else {
+            return;
+        };
+        if self.comparing.is_some()
+            || self.postponed_fingerprint.as_ref() == Some(&fp)
+            || !self.messages.is_empty()
+            || !self.orphans.is_empty()
+            || self.confirm_leave.is_some()
+        {
+            return;
+        }
+        let (project, installed) = self.template_versions();
+        let name = self
+            .current_entry()
+            .map(TemplateEntry::full_name)
+            .unwrap_or_default();
+        let response = dialog(ctx, "template_differs").show(ctx, |ui| {
+            template_differs_body(ui, &name, &project, &installed)
+        });
+        let (compare, keep, use_installed) = response.inner;
+        self.template_choice(compare, keep, use_installed, fp.clone());
+        if response.should_close() && !(compare || keep || use_installed) {
+            self.postponed_fingerprint = Some(fp);
+        }
+    }
+
+    /// While comparing the templates: a bar at the bottom of the canvas with the popup's
+    /// choices (the labels at the top of the canvas say which side is which).
+    fn compare_bar(&mut self, ctx: &egui::Context) {
+        let Some(fp) = self
+            .installed_differs()
+            .filter(|_| self.comparing.is_some())
+        else {
+            return;
+        };
+        let rect = self.canvas.rect;
+        let (mut keep, mut use_installed) = (false, false);
+        egui::Area::new(egui::Id::unique("compare_bar"))
+            .pivot(egui::Align2::CENTER_BOTTOM)
+            .fixed_pos(rect.center_bottom() - egui::vec2(0.0, 16.0))
+            .order(egui::Order::Middle)
+            .show(ctx, |ui| (keep, use_installed) = compare_bar_body(ui));
+        self.template_choice(false, keep, use_installed, fp);
+    }
+
+    /// Carries out a choice about the installed template of fingerprint `fp`.
+    fn template_choice(&mut self, compare: bool, keep: bool, use_installed: bool, fp: String) {
+        if compare {
+            self.compare_installed_template();
+        }
+        if keep {
+            self.kept_fingerprint = Some(fp);
+            self.comparing = None;
+        }
+        if use_installed {
+            self.use_installed_template();
+        }
+    }
+
+    /// The versions of the project's copy of its template and of the installed one, as
+    /// shown to the user.
+    fn template_versions(&self) -> (String, String) {
+        let shown = |v: Option<&String>| {
+            v.cloned()
+                .unwrap_or_else(|| tr!("TEMPLATE_VERSION_UNKNOWN").to_owned())
+        };
+        let project = self
+            .doc
+            .template_copy
+            .as_ref()
+            .and_then(|c| c.version.as_ref());
+        let installed = self
+            .doc
+            .template
+            .as_deref()
+            .and_then(|id| self.installed(id))
+            .and_then(|e| e.version.as_ref());
+        (shown(project), shown(installed))
+    }
+
+    /// While comparing: the installed template's elements, placed on the page as it says.
+    fn compared_elements(&self) -> Option<Vec<PlacedElement>> {
+        let (entry, t) = self.comparing.as_ref()?;
+        let page = Document {
+            page: self.doc.page,
+            custom_page_mm: self.doc.custom_page_mm,
+            orientation: self.doc.orientation,
+            template_placement: entry.default_placement(t.size_mm, self.doc.page_mm()),
+            ..Default::default()
+        };
+        Some(render::placed_elements(&page, t))
+    }
+
+    /// Sets the page the current template asks for in its `template.json` (what it
+    /// leaves out stays), then places the template on it. Done when a template is picked
+    /// or a project started, not when one is opened: a project keeps its page.
+    fn use_template_page(&mut self) {
+        let Some(entry) = self.current_entry() else {
+            return;
+        };
+        let setup = entry.page;
+        if setup == template::PageSetup::default() {
+            return;
+        }
+        if let Some(size) = setup.size {
+            self.doc.page = size;
+        }
+        if let Some(mm) = setup.custom_mm {
+            self.doc.custom_page_mm = mm;
+        }
+        if let Some(o) = setup.orientation {
+            self.doc.orientation = o;
+        }
+        if let (Some(t), Some(entry)) = (&self.template, self.current_entry()) {
+            self.doc.template_placement = entry.default_placement(t.size_mm, self.doc.page_mm());
+        }
+        self.canvas.fit_pending = true;
         self.dirty = true;
     }
 
-    /// The installed template the project uses, if any.
+    /// The template the project uses, as read from its copy.
     fn current_entry(&self) -> Option<&TemplateEntry> {
-        let id = self.doc.template.as_ref()?;
-        self.templates.iter().find(|t| &t.id == id)
+        self.template_entry.as_ref()
     }
 
-    /// Reloads the current template when its DXF or `template.json` changes on disk.
+    /// Notices when the installed template of the project's changes on disk (its
+    /// version is then compared with the project's copy, see `installed_differs`).
     fn watch_template(&mut self, ctx: &egui::Context) {
         ctx.request_repaint_after(Duration::from_secs(1));
         if self.last_template_check.elapsed() < Duration::from_secs(1) {
             return;
         }
         self.last_template_check = Instant::now();
-        let Some(entry) = self.current_entry() else {
+        let Some(entry) = self
+            .doc
+            .template
+            .as_deref()
+            .and_then(|id| self.installed(id))
+        else {
             return;
         };
         if entry.stamp() == self.template_stamp {
             return;
         }
         let folder = entry.folder.clone();
+        log::info!("installed template files changed: {}", folder.display());
         if let Some(fresh) = template::read_entry(&folder)
             && let Some(slot) = self.templates.iter_mut().find(|t| t.id == fresh.id)
         {
             *slot = fresh;
         }
-        log::info!("template files changed, reloading {}", folder.display());
-        let id = self.doc.template.clone();
-        self.select_template(id, true);
+        self.refresh_installed();
+    }
+
+    /// Reads again the installed template of the project's: its stamp, its fingerprint,
+    /// and what is compared with it.
+    fn refresh_installed(&mut self) {
+        let installed = self
+            .doc
+            .template
+            .as_deref()
+            .and_then(|id| self.installed(id));
+        let stamp = installed.map(TemplateEntry::stamp).unwrap_or_default();
+        let fingerprint = installed
+            .and_then(|e| template::TemplateFiles::read(e).ok())
+            .map(|f| f.fingerprint());
+        self.template_stamp = stamp;
+        self.installed_fingerprint = fingerprint;
+        if self.comparing.is_some() {
+            self.comparing = None;
+            if self.installed_differs().is_some() {
+                self.compare_installed_template();
+            }
+        }
     }
 
     /// The template's elements placed on the page.
@@ -647,12 +1104,9 @@ impl ArtworkApp {
     fn add_text(&mut self, ctx: &egui::Context) {
         let id = self.doc.alloc_id();
         let center = self.new_layer_center();
-        let layer = text::new_layer(
-            id,
-            tr!("DEFAULT_TEXT_LAYER_NAME"),
-            self.fonts.default_family(),
-            center,
-        );
+        // A random word to type over, which names it until it is renamed.
+        let word = layers_ui::random_name(&self.doc);
+        let layer = text::new_layer(id, &word, self.fonts.default_family(), center);
         let at = layers_ui::insertion_path(&mut self.doc, self.selected);
         self.doc.insert(&at, Node::Layer(Box::new(layer)));
         self.selected = Some(id);
@@ -682,7 +1136,8 @@ impl ArtworkApp {
         }
         let id = self.doc.alloc_id();
         let center = self.new_layer_center();
-        let layer = shape::new_layer(id, kind, center);
+        let mut layer = shape::new_layer(id, kind, center);
+        layer.name = layers_ui::random_name(&self.doc);
         let at = layers_ui::insertion_path(&mut self.doc, self.selected);
         self.doc.insert(&at, Node::Layer(Box::new(layer)));
         self.selected = Some(id);
@@ -716,7 +1171,9 @@ impl ArtworkApp {
             // polygon): its handles stretch it.
             (w, h) = (w.min(h), w.min(h));
         }
-        let layer = shape::new_canvas_layer(id, kind, [c[0] - w, c[1] - h], [c[0] + w, c[1] + h]);
+        let mut layer =
+            shape::new_canvas_layer(id, kind, [c[0] - w, c[1] - h], [c[0] + w, c[1] + h]);
+        layer.name = layers_ui::random_name(&self.doc);
         let at = layers_ui::insertion_path(&mut self.doc, self.selected);
         self.doc.insert(&at, Node::Layer(Box::new(layer)));
         self.selected = Some(id);
@@ -958,7 +1415,7 @@ impl ArtworkApp {
     }
 
     /// Stores the app's own settings that are not the project's: the Print panel's and
-    /// the Page panel's display settings.
+    /// the View panel's display settings.
     fn save_settings(&self, storage: &mut dyn eframe::Storage) {
         // Without the project's choices of what to export, which aren't the app's.
         let print = self
@@ -1084,6 +1541,7 @@ impl ArtworkApp {
         self.selected = None;
         self.project_path = None;
         self.select_template(template, true);
+        self.use_template_page();
         self.canvas.fit_pending = true;
         // The print settings stay: they are the app's.
         self.export_settings = self
@@ -1105,7 +1563,7 @@ impl ArtworkApp {
                 title: tr!("OPEN_PROJECT_DIALOG_TITLE"),
                 save: false,
                 multiple: false,
-                filters: OPEN_PROJECT_FILTERS,
+                filters: PROJECT_FILTERS,
                 default_name: String::new(),
             },
         );
@@ -1148,8 +1606,10 @@ impl ArtworkApp {
                     self.messages
                         .push(tr!("FONTS_NOT_INSTALLED", fonts = fonts.join("\n")));
                 }
-                let template = self.doc.template.clone();
-                self.select_template(template, false);
+                // Its own copy of its template, placed as that says.
+                self.kept_fingerprint = None;
+                self.postponed_fingerprint = None;
+                self.load_template(true);
                 self.selected = None;
                 self.recent.add(&path);
                 self.last_saved = modified_time(&path);
@@ -1167,8 +1627,7 @@ impl ArtworkApp {
         }
     }
 
-    /// Saves to the current file in its format, or asks for a file and format (always
-    /// with `save_as`).
+    /// Saves to the current file, or asks for one (always with `save_as`).
     fn save_project(&mut self, ctx: &egui::Context, save_as: bool) {
         match (&self.project_path, save_as) {
             (Some(p), false) => self.save_to(p.clone()),
@@ -1179,35 +1638,16 @@ impl ArtworkApp {
                     title: tr!("SAVE_PROJECT_DIALOG_TITLE"),
                     save: true,
                     multiple: false,
-                    filters: SAVE_PROJECT_FILTERS,
-                    // Suggests the current format.
-                    default_name: format!(
-                        "{}.{}",
-                        self.project_name(),
-                        if self
-                            .project_path
-                            .as_deref()
-                            .is_some_and(|p| !project::is_archive(p))
-                        {
-                            "json"
-                        } else {
-                            project::EXTENSION
-                        }
-                    ),
+                    filters: PROJECT_FILTERS,
+                    default_name: format!("{}.{}", self.project_name(), project::EXTENSION),
                 },
             ),
         }
     }
 
-    /// Writes the project to `path`, as an archive or as linked JSON depending on its
-    /// extension, and marks it as saved.
+    /// Writes the project to `path` and marks it as saved.
     fn save_to(&mut self, path: PathBuf) {
-        let saved = if project::is_archive(&path) {
-            project::save(&self.doc, &self.export_settings, &path)
-        } else {
-            project::save_json(&self.doc, &self.export_settings, &path)
-        };
-        match saved {
+        match project::save(&self.doc, &self.export_settings, &path) {
             Ok(missing) => {
                 if !missing.is_empty() {
                     self.messages.push(tr!(
@@ -1361,15 +1801,15 @@ impl ArtworkApp {
     /// drive) stay listed but grayed out.
     fn recent_menu(&mut self, ui: &mut egui::Ui) {
         let mut open = None;
-        for path in self.recent.paths() {
+        // Projects of the linked JSON format, no longer read, are left out.
+        for path in self
+            .recent
+            .paths()
+            .iter()
+            .filter(|p| project::is_archive(p))
+        {
             let exists = path.is_file();
-            // The format, shown on the right like a shortcut.
-            let kind = if project::is_archive(path) {
-                tr!("RECENT_FORMAT_ARTWORK")
-            } else {
-                tr!("RECENT_FORMAT_LINKED_JSON")
-            };
-            let button = egui::Button::new(recent::label(path)).shortcut_text(kind);
+            let button = egui::Button::new(recent::label(path));
             let r = ui
                 .add_enabled(exists, button)
                 .on_hover_text(path.display().to_string())
@@ -1474,74 +1914,6 @@ impl ArtworkApp {
             });
             ui.menu_button(tr!("MENU_VIEW"), |ui| {
                 let keys = self.shortcuts.texts(ui.ctx());
-                if ui
-                    .add(menu_entry(
-                        tr!("FIT_PAGE_IN_VIEW"),
-                        keys.get(&Command::FitPage),
-                    ))
-                    .clicked()
-                {
-                    self.canvas.fit_pending = true;
-                }
-                if ui
-                    .add(menu_entry(
-                        tr!("ZOOM_REAL_SIZE"),
-                        keys.get(&Command::RealSize),
-                    ))
-                    .clicked()
-                {
-                    self.canvas.set_zoom(REAL_SIZE_ZOOM);
-                }
-                menu_checkbox(
-                    ui,
-                    true,
-                    &mut self.canvas.show_template,
-                    tr!("SHOW_TEMPLATE_LINES"),
-                    keys.get(&Command::ShowTemplate),
-                );
-                menu_checkbox(
-                    ui,
-                    true,
-                    &mut self.canvas.preview_cuts,
-                    tr!("PREVIEW_CUTS"),
-                    keys.get(&Command::PreviewCuts),
-                );
-                let cuts = self.canvas.preview_cuts;
-                menu_checkbox(
-                    ui,
-                    cuts,
-                    &mut self.canvas.preview_bleed,
-                    tr!("PREVIEW_BLEED"),
-                    keys.get(&Command::PreviewBleed),
-                )
-                .on_hover_text(tr!("PREVIEW_BLEED_HINT"));
-                menu_checkbox(
-                    ui,
-                    true,
-                    &mut self.canvas.preview_safe_area,
-                    tr!("PREVIEW_SAFE_AREA"),
-                    keys.get(&Command::PreviewSafeArea),
-                )
-                .on_hover_text(tr!("PREVIEW_SAFE_AREA_HINT"));
-                let has_anchors = self.has_anchors();
-                menu_checkbox(
-                    ui,
-                    has_anchors,
-                    &mut self.canvas.snap_to_anchors,
-                    tr!("SNAP_TO_ANCHORS"),
-                    keys.get(&Command::SnapToAnchors),
-                )
-                .on_hover_text(tr!("SNAP_TO_ANCHORS_HINT"))
-                .on_disabled_hover_text(tr!("TEMPLATE_HAS_NO_ANCHORS"));
-                menu_checkbox(
-                    ui,
-                    true,
-                    &mut self.canvas.snap_to_edges,
-                    tr!("SNAP_TO_EDGES"),
-                    keys.get(&Command::SnapToEdges),
-                )
-                .on_hover_text(tr!("SNAP_TO_EDGES_HINT"));
-                ui.separator();
                 ui.menu_button(tr!("MENU_PANELS"), |ui| self.panels_menu(ui));
                 ui.menu_button(tr!("MENU_THEME"), crate::theme::menu);
                 ui.menu_button(tr!("MENU_LANGUAGE"), |ui| {
@@ -1556,43 +1928,6 @@ impl ArtworkApp {
                 }
             });
             ui.menu_button(tr!("MENU_TOOLS"), |ui| {
-                // The canvas' tools, as on its tool bar.
-                let keys = self.shortcuts.texts(ui.ctx());
-                let ctx = ui.ctx().clone();
-                // Painting needs a closed shape selected.
-                let paint = view::can_paint(&self.doc, self.selected);
-                for (c, tool) in crate::view::TOOLS {
-                    let on =
-                        view::active_tool(&self.doc, self.selected, &self.canvas.brushes) == tool;
-                    let entry = menu_entry(c.label(), keys.get(&c)).selected(on);
-                    if ui.add_enabled(paint || tool.is_none(), entry).clicked() {
-                        self.run_command(&ctx, c);
-                    }
-                }
-                // The brush's kinds, as on the tool bar: picking one takes the brush.
-                ui.add_enabled_ui(paint, |ui| {
-                    ui.menu_button(tr!("MENU_BRUSH_KIND"), |ui| {
-                        for kind in crate::paint::BrushKind::ALL {
-                            let on = self.canvas.brushes.brush == kind;
-                            let entry = egui::Button::new(crate::i18n::translate(kind.name_key()))
-                                .selected(on);
-                            if ui.add(entry).clicked() {
-                                self.canvas.brushes.brush = kind;
-                                self.run_command(&ctx, Command::BrushTool);
-                                ui.close();
-                            }
-                        }
-                    });
-                });
-                let c = Command::ClearPaint;
-                let clear = view::has_paint(&self.doc, self.selected);
-                if ui
-                    .add_enabled(clear, menu_entry(c.label(), keys.get(&c)))
-                    .clicked()
-                {
-                    self.run_command(&ctx, c);
-                }
-                ui.separator();
                 ui.menu_button(tr!("MENU_TEMPLATES"), |ui| {
                     if ui
                         .button(tr!("RESCAN_TEMPLATES"))
@@ -1621,28 +1956,10 @@ impl ArtworkApp {
             .as_deref()
             .map(template::scan)
             .unwrap_or_default();
-        let id = self.doc.template.clone();
-        self.select_template(id, true);
-    }
-
-    /// The Controller panel: the template to work on.
-    fn controller_panel(&mut self, ui: &mut egui::Ui) {
-        let current = self
-            .current_entry()
-            .map(|t| t.name.clone())
-            .unwrap_or_else(|| tr!("NO_TEMPLATE").into());
-        let mut choice = self.doc.template.clone();
-        egui::ComboBox::from_id_salt("template")
-            .width(ui.available_width())
-            .selected_text(current)
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut choice, None, tr!("NO_TEMPLATE"));
-                for t in &self.templates {
-                    ui.selectable_value(&mut choice, Some(t.id.clone()), &t.name);
-                }
-            });
-        if choice != self.doc.template {
-            self.select_template(choice, true);
+        self.refresh_installed();
+        // A project whose template could not be found may find it now.
+        if self.template.is_none() {
+            self.load_template(true);
         }
     }
 
@@ -1734,28 +2051,49 @@ impl ArtworkApp {
         changed |= crate::gradient_ui::rows(ui, "background", &mut fill);
         doc.background = [color[0], color[1], color[2]];
         self.dirty |= changed;
-        // How the canvas shows what is cut out of the panel: neither the template nor the
-        // export changes with it. The slider sets how much it covers.
-        ui.add_space(4.0);
+    }
+
+    /// The View panel: how the canvas shows the template and what is cut out of the
+    /// panel, what layers snap to, and the rulers and guides. Kept with the app's
+    /// preferences, not the project.
+    fn view_panel(&mut self, ui: &mut egui::Ui) {
+        // Neither the template nor the export changes with the previews. The slider sets
+        // how much the cut preview covers.
+        let keys = self.shortcuts.texts(ui.ctx());
+        let tip =
+            |hint: &str, command: Command| crate::shortcuts::with_key(hint, keys.get(&command));
+        ui.checkbox(&mut self.canvas.show_template, tr!("SHOW_TEMPLATE_LINES"))
+            .on_hover_text(tip(tr!("SHOW_TEMPLATE_LINES_HINT"), Command::ShowTemplate));
         ui.horizontal(|ui| {
             ui.checkbox(&mut self.canvas.preview_cuts, tr!("PREVIEW_CUTS"))
-                .on_hover_text(tr!("PREVIEW_CUTS_HINT"));
-            ui.add_enabled(
-                self.canvas.preview_cuts,
-                egui::Slider::new(&mut self.canvas.cut_opacity, 0.0..=1.0).fixed_decimals(2),
-            )
-            .on_hover_text(tr!("CUT_PREVIEW_OPACITY_HINT"));
+                .on_hover_text(tip(tr!("PREVIEW_CUTS_HINT"), Command::PreviewCuts));
+            // In percent, the value shown only in its tooltip.
+            let mut percent = (self.canvas.cut_opacity * 100.0).round();
+            let r = ui
+                .add_enabled(
+                    self.canvas.preview_cuts,
+                    egui::Slider::new(&mut percent, 0.0..=100.0)
+                        .step_by(1.0)
+                        .show_value(false),
+                )
+                .on_hover_text(tr!(
+                    "CUT_PREVIEW_OPACITY_HINT",
+                    percent = format!("{percent:.0}")
+                ));
+            if r.changed() {
+                self.canvas.cut_opacity = percent / 100.0;
+            }
         });
         ui.add_enabled(
             self.canvas.preview_cuts,
             egui::Checkbox::new(&mut self.canvas.preview_bleed, tr!("PREVIEW_BLEED")),
         )
-        .on_hover_text(tr!("PREVIEW_BLEED_HINT"));
+        .on_hover_text(tip(tr!("PREVIEW_BLEED_HINT"), Command::PreviewBleed));
         // A guide inside the cut lines, never printed, and how far inside: kept with the
         // app's preferences, like the previews above.
         ui.horizontal(|ui| {
             ui.checkbox(&mut self.canvas.preview_safe_area, tr!("PREVIEW_SAFE_AREA"))
-                .on_hover_text(tr!("PREVIEW_SAFE_AREA_HINT"));
+                .on_hover_text(tip(tr!("PREVIEW_SAFE_AREA_HINT"), Command::PreviewSafeArea));
             ui.add_enabled(
                 self.canvas.preview_safe_area,
                 egui::DragValue::new(&mut self.canvas.safe_margin_mm)
@@ -1766,18 +2104,71 @@ impl ArtworkApp {
             .on_hover_text(tr!("SAFE_MARGIN_HINT"));
             crate::layers_ui::unit(ui, "mm");
         });
+
+        // What layers snap to while dragged.
+        let has_anchors = self.has_anchors();
+        let canvas = &mut self.canvas;
+        crate::layers_ui::section(
+            ui,
+            "page_snapping",
+            egui::RichText::new(tr!("SNAPPING_SECTION")),
+            |_| false,
+            |ui| {
+                ui.add_enabled(
+                    has_anchors,
+                    egui::Checkbox::new(&mut canvas.snap_to_anchors, tr!("SNAP_TO_ANCHORS")),
+                )
+                .on_hover_text(tip(tr!("SNAP_TO_ANCHORS_HINT"), Command::SnapToAnchors))
+                .on_disabled_hover_text(tr!("TEMPLATE_HAS_NO_ANCHORS"));
+                ui.checkbox(&mut canvas.snap_to_edges, tr!("SNAP_TO_EDGES"))
+                    .on_hover_text(tip(tr!("SNAP_TO_EDGES_HINT"), Command::SnapToEdges));
+                ui.checkbox(&mut canvas.snap_to_guides, tr!("SNAP_TO_GUIDES"))
+                    .on_hover_text(tip(tr!("SNAP_TO_GUIDES_HINT"), Command::SnapToGuides));
+            },
+        );
+
+        // The rulers, and the guides dragged out of them.
+        let doc = &mut self.doc;
+        let mut cleared = false;
+        crate::layers_ui::section(
+            ui,
+            "page_rulers",
+            egui::RichText::new(tr!("RULERS_AND_GUIDES_SECTION")),
+            |_| false,
+            |ui| {
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut canvas.show_rulers, tr!("SHOW_RULERS"))
+                        .on_hover_text(tip(tr!("SHOW_RULERS_HINT"), Command::ShowRulers));
+                    ui.checkbox(&mut canvas.show_guides, tr!("SHOW_GUIDES"))
+                        .on_hover_text(tip(tr!("SHOW_GUIDES_HINT"), Command::ShowGuides));
+                });
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut canvas.lock_guides, tr!("LOCK_GUIDES"))
+                        .on_hover_text(tip(tr!("LOCK_GUIDES_HINT"), Command::LockGuides));
+                    if ui
+                        .add_enabled(
+                            !doc.guides.is_empty(),
+                            egui::Button::new(tr!("CLEAR_GUIDES")),
+                        )
+                        .on_hover_text(tip(tr!("CLEAR_GUIDES_HINT"), Command::ClearGuides))
+                        .clicked()
+                    {
+                        cleared = view::clear_guides(doc);
+                    }
+                });
+            },
+        );
+        self.dirty |= cleared;
     }
 
     /// A panel's contents; the Layers panel returns the height it would take.
     fn panel_body(&mut self, ui: &mut egui::Ui, id: PanelId) -> Option<f32> {
         match id {
-            PanelId::Controller => self.controller_panel(ui),
+            PanelId::Template => self.template_panel(ui),
             PanelId::Page => self.page_panel(ui),
+            PanelId::View => self.view_panel(ui),
             PanelId::Print => self.print_panel(ui),
-            PanelId::Template if self.template.is_some() => self.template_settings(ui),
-            PanelId::Template => {
-                crate::callout::callout(ui, crate::callout::Tone::Info, tr!("NO_TEMPLATE_CHOSEN"));
-            }
+            PanelId::Removed => {}
             PanelId::Variables => self.dirty |= variables::variables_ui(ui, &mut self.doc),
             PanelId::ColorsInUse => self.dirty |= crate::colors::in_use_ui(ui, &mut self.doc),
             PanelId::Layers => {
@@ -1843,62 +2234,27 @@ impl ArtworkApp {
         }
     }
 
-    /// Body of the Template section: placement, elements and default placement.
-    fn template_settings(&mut self, ui: &mut egui::Ui) {
-        // Taken out while shown, so the rest of `self` can change; put back at the end.
-        let Some(t) = self.template.take() else {
+    /// The Template panel: the template to work on, and its elements' lines on the
+    /// canvas. How it sits on the page comes from the template itself.
+    fn template_panel(&mut self, ui: &mut egui::Ui) {
+        // The template in use, with its version: the project's copy's.
+        let current = self
+            .current_entry()
+            .map(|t| match &t.version {
+                Some(v) => tr!("TEMPLATE_WITH_VERSION", name = t.full_name(), version = v),
+                None => t.full_name(),
+            })
+            .unwrap_or_else(|| tr!("NO_TEMPLATE").into());
+        let (choice, _) = template_selector(ui, &current, &self.templates, &self.doc.template);
+        if choice != self.doc.template {
+            self.select_template(choice, true);
+            self.use_template_page();
+        }
+        self.template_differs_note(ui);
+        let Some(t) = &self.template else {
             return;
         };
-        let size = t.size_mm;
-        ui.weak(format!("{:.1} x {:.1} mm", size[0], size[1]));
-        let before = self.doc.template_placement;
-        let p = &mut self.doc.template_placement;
-        panel_grid(ui, "template-placement").show(ui, |ui| {
-            ui.label(tr!("TEMPLATE_ROTATION"));
-            ui.horizontal(|ui| {
-                for deg in [0, 90, 180, 270] {
-                    if ui
-                        .selectable_label(p.rotation == deg, format!("{deg}°"))
-                        .clicked()
-                    {
-                        p.rotation = deg;
-                    }
-                }
-            });
-            ui.end_row();
-            ui.label(tr!("TEMPLATE_FLIP"));
-            ui.horizontal(|ui| {
-                ui.checkbox(&mut p.flip_x, tr!("TEMPLATE_FLIP_HORIZONTAL"));
-                ui.checkbox(&mut p.flip_y, tr!("TEMPLATE_FLIP_VERTICAL"));
-            });
-            ui.end_row();
-            ui.label(tr!("TEMPLATE_OFFSET"));
-            ui.horizontal(|ui| {
-                ui.add(
-                    egui::DragValue::new(&mut p.offset_mm[0])
-                        .speed(0.2)
-                        .fixed_decimals(1)
-                        .prefix("x "),
-                );
-                ui.add(
-                    egui::DragValue::new(&mut p.offset_mm[1])
-                        .speed(0.2)
-                        .fixed_decimals(1)
-                        .prefix("y "),
-                );
-                crate::layers_ui::unit(ui, "mm");
-            });
-            ui.end_row();
-            // Under the offset it resets.
-            ui.label("");
-            if ui.small_button(tr!("CENTER_TEMPLATE_ON_PAGE")).clicked() {
-                p.offset_mm = [0.0, 0.0];
-            }
-            ui.end_row();
-        });
-
         ui.add_space(4.0);
-        ui.strong(tr!("TEMPLATE_ELEMENTS"));
         for e in &t.elements {
             let k = e.kind.index();
             ui.horizontal(|ui| {
@@ -1916,56 +2272,6 @@ impl ArtworkApp {
                 });
             });
         }
-
-        ui.add_space(4.0);
-        let page = self.doc.page_mm();
-        let current = self.doc.template_placement;
-        let default = self
-            .current_entry()
-            .map(|e| e.default_placement(size, page));
-        ui.horizontal_wrapped(|ui| {
-            if ui
-                .add_enabled(
-                    default.is_some_and(|d| d != current),
-                    egui::Button::new(tr!("RESET_TEMPLATE_PLACEMENT")).small(),
-                )
-                .on_hover_text(tr!("RESET_TEMPLATE_PLACEMENT_HINT"))
-                .clicked()
-                && let Some(d) = default
-            {
-                self.doc.template_placement = d;
-            }
-            if ui
-                .add_enabled(
-                    default.is_some_and(|d| d != current),
-                    egui::Button::new(tr!("SAVE_TEMPLATE_PLACEMENT")).small(),
-                )
-                .on_hover_text(tr!("SAVE_TEMPLATE_PLACEMENT_HINT"))
-                .clicked()
-            {
-                let id = self.doc.template.clone();
-                if let Some(entry) = self
-                    .templates
-                    .iter_mut()
-                    .find(|t| Some(&t.id) == id.as_ref())
-                {
-                    match entry.save_placement(current) {
-                        Ok(()) => self.template_stamp = entry.stamp(),
-                        Err(e) => self.messages.push(e),
-                    }
-                }
-            }
-        });
-        if let Some(e) = self.current_entry() {
-            ui.weak(tr!(
-                "TEMPLATE_CONFIG_PATH",
-                path = e.config_path().display()
-            ));
-        }
-        if self.doc.template_placement != before {
-            self.dirty = true;
-        }
-        self.template = Some(t);
     }
 
     /// Bottom bar: zoom, page size, cursor position and warnings.
@@ -1997,7 +2303,10 @@ impl ArtworkApp {
             }
             if ui
                 .small_button("100%")
-                .on_hover_text(tr!("ZOOM_REAL_SIZE_HINT"))
+                .on_hover_text(crate::shortcuts::with_key(
+                    tr!("ZOOM_REAL_SIZE_HINT"),
+                    self.shortcuts.text(ui.ctx(), Command::RealSize).as_ref(),
+                ))
                 .clicked()
             {
                 self.canvas.set_zoom(REAL_SIZE_ZOOM);
@@ -2894,6 +3203,11 @@ impl ArtworkApp {
                 }
             }
             Command::SnapToEdges => self.canvas.snap_to_edges ^= true,
+            Command::SnapToGuides => self.canvas.snap_to_guides ^= true,
+            Command::ShowRulers => self.canvas.show_rulers ^= true,
+            Command::ShowGuides => self.canvas.show_guides ^= true,
+            Command::LockGuides => self.canvas.lock_guides ^= true,
+            Command::ClearGuides => self.dirty |= view::clear_guides(&mut self.doc),
             Command::KeyboardShortcuts => self.open_shortcuts(),
             Command::About => self.about = true,
             Command::SelectTool => self.canvas.brushes.tool = None,
@@ -3021,11 +3335,6 @@ impl crate::panels::Contents for ArtworkApp {
         self.panel_body(ui, id)
     }
 
-    /// As before panels could move, the Template panel shows once there is a template.
-    fn skip_docked(&self, id: PanelId) -> bool {
-        id == PanelId::Template && self.template.is_none()
-    }
-
     /// Shortcuts work while a panel's own window has the focus too.
     fn window_frame(&mut self, ctx: &egui::Context) {
         self.shortcuts(ctx);
@@ -3126,6 +3435,17 @@ impl eframe::App for ArtworkApp {
         if panel_points != self.canvas.points.as_ref().map(|e| e.layer) {
             self.canvas.points = panel_points.map(view::PointEdit::new);
         }
+        // While comparing, the installed template left of the divider.
+        self.canvas.compare = self.compared_elements().map(|elements| {
+            let (project, installed) = self.template_versions();
+            view::Compare {
+                elements,
+                labels: [
+                    tr!("COMPARE_INSTALLED_LABEL", version = installed),
+                    tr!("COMPARE_PROJECT_LABEL", version = project),
+                ],
+            }
+        });
         egui::CentralPanel::no_frame().show(ui, |ui| {
             self.dirty |= view::show(
                 ui,
@@ -3157,6 +3477,8 @@ impl eframe::App for ArtworkApp {
         self.overwrite_modal(&ctx);
         self.message_modal(&ctx);
         self.about_modal(&ctx);
+        self.template_differs_modal(&ctx);
+        self.compare_bar(&ctx);
         self.close_modal(&ctx);
         self.recovery_modal(&ctx);
         self.shortcuts_window(&ctx);
@@ -3193,6 +3515,58 @@ impl eframe::App for ArtworkApp {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Draws the template selector with its list open, to look at it:
+    /// `TEMPLATE_SELECTOR_PREVIEW=out.png cargo test template_selector_preview -- --ignored`.
+    #[test]
+    #[ignore]
+    fn template_selector_preview() {
+        let Ok(path) = std::env::var("TEMPLATE_SELECTOR_PREVIEW") else {
+            return;
+        };
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("templates");
+        let templates = template::scan(&dir);
+        let chosen = templates.first().map(|t| t.id.clone());
+        crate::preview::render(&path, egui::vec2(320.0, 200.0), |ui| {
+            ui.set_width(300.0);
+            let (_, field) = template_selector(ui, "Cosmox - T16 (1.0)", &templates, &chosen);
+            egui::Popup::open_id(ui.ctx(), egui::Popup::default_response_id(&field));
+        });
+    }
+
+    /// Draws the bar shown while comparing templates, to look at it:
+    /// `COMPARE_BAR_PREVIEW=out.png cargo test compare_bar_preview -- --ignored`.
+    #[test]
+    #[ignore]
+    fn compare_bar_preview() {
+        let Ok(path) = std::env::var("COMPARE_BAR_PREVIEW") else {
+            return;
+        };
+        crate::preview::render(&path, egui::vec2(520.0, 110.0), |ui| {
+            ui.add_space(20.0);
+            ui.horizontal(|ui| {
+                ui.add_space(20.0);
+                compare_bar_body(ui);
+            });
+        });
+    }
+
+    /// Draws the popup about a changed installed template, to look at it:
+    /// `TEMPLATE_DIFFERS_PREVIEW=out.png cargo test template_differs_preview -- --ignored`.
+    #[test]
+    #[ignore]
+    fn template_differs_preview() {
+        let Ok(path) = std::env::var("TEMPLATE_DIFFERS_PREVIEW") else {
+            return;
+        };
+        crate::preview::render(&path, egui::vec2(520.0, 260.0), |ui| {
+            egui::Frame::window(ui.style())
+                .inner_margin(egui::Margin::same(DIALOG_MARGIN))
+                .show(ui, |ui| {
+                    template_differs_body(ui, "Cosmox - T16", "1.0", "1.1")
+                });
+        });
+    }
 
     #[test]
     fn dialog_buttons_sit_right_without_widening_the_window() {
@@ -3292,8 +3666,13 @@ mod tests {
     #[test]
     fn project_save_path_adds_archive_extension() {
         let p = |s: &str| project_save_path(PathBuf::from(s));
-        assert_eq!(p("/a/stick.json"), PathBuf::from("/a/stick.json"));
-        assert_eq!(p("/a/stick.JSON"), PathBuf::from("/a/stick.JSON"));
+        let ours = format!("/a/stick.{}", project::EXTENSION);
+        assert_eq!(p(&ours), PathBuf::from(&ours));
+        // A .json file is no longer a project: saved as an archive beside it.
+        assert_eq!(
+            p("/a/stick.json"),
+            PathBuf::from(format!("/a/stick.json.{}", project::EXTENSION))
+        );
         assert_eq!(
             p("/a/stick"),
             PathBuf::from(format!("/a/stick.{}", project::EXTENSION))

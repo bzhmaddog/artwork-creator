@@ -386,6 +386,7 @@ pub fn draw_input(
                 if d.canvas {
                     shape::make_canvas(&mut l);
                 }
+                l.name = layers_ui::random_name(doc);
                 doc.insert(&at_path, Node::Layer(Box::new(l)));
                 *selected = Some(id);
                 d.layer = Some(id);

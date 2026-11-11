@@ -1,7 +1,7 @@
 //! Document model. All geometry is in page millimeters: origin at the
 //! top-left corner of the page, x to the right, y down.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -542,15 +542,6 @@ impl Layer {
         self.text.is_some() || self.shape.is_some()
     }
 
-    /// The files the layer uses: its image or font, then a text's fallback fonts.
-    pub fn sources_mut(&mut self) -> impl Iterator<Item = &mut PathBuf> {
-        std::iter::once(&mut self.source).chain(
-            self.text
-                .iter_mut()
-                .flat_map(|t| t.fallbacks.iter_mut().map(|f| &mut f.source)),
-        )
-    }
-
     /// Image pixels to page mm, including the perspective distortion.
     pub fn homography(&self) -> Homography {
         self.transform.to_homography(self.size_px)
@@ -746,6 +737,42 @@ pub struct Leaf<'a> {
     pub locked: bool,
 }
 
+/// The project's own copy of its template. Its version and fingerprint are saved in the
+/// project's JSON; its files in a project archive, beside it (see `project`), and only
+/// kept in memory here.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct TemplateCopy {
+    /// The version `template.json` gives, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// Of its files (see `TemplateFiles::fingerprint`): tells it from another version.
+    pub fingerprint: String,
+    /// Its files; empty for a project saved before projects kept their template.
+    #[serde(skip)]
+    pub files: crate::template::TemplateFiles,
+}
+
+impl TemplateCopy {
+    /// A copy of an installed template.
+    pub fn of(entry: &crate::template::TemplateEntry) -> Result<Self, String> {
+        let files = crate::template::TemplateFiles::read(entry)?;
+        Ok(Self {
+            version: entry.version.clone(),
+            fingerprint: files.fingerprint(),
+            files,
+        })
+    }
+}
+
+/// A guide line across the page, which layers snap to (see `view`).
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Guide {
+    /// A vertical line at x = `at`, or a horizontal one at y = `at`.
+    pub vertical: bool,
+    /// Its distance from the page's left or top edge, in mm.
+    pub at: f32,
+}
+
 /// How a template outline sits on the page. Rotation is applied first, then the
 /// flips, which therefore mirror the outline as seen on screen.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -786,6 +813,9 @@ pub struct Document {
     pub template: Option<String>,
     /// How the template sits on the page.
     pub template_placement: TemplatePlacement,
+    /// The template as the project was made with it, kept with the project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub template_copy: Option<TemplateCopy>,
     /// Page color (RGB), printed under the layers.
     pub background: [u8; 3],
     /// Name of the color variable the background is linked to (see `colors`).
@@ -805,6 +835,9 @@ pub struct Document {
     /// to (see `variables`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub variables: Vec<crate::variables::Variable>,
+    /// Guide lines dragged out of the canvas' rulers, for lining things up; not printed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub guides: Vec<Guide>,
     /// Next id for a new layer or group.
     pub next_id: u64,
 }
@@ -817,12 +850,14 @@ impl Default for Document {
             orientation: Orientation::Landscape,
             template: None,
             template_placement: TemplatePlacement::default(),
+            template_copy: None,
             background: [255, 255, 255],
             background_link: None,
             background_gradient: None,
             layers: Vec::new(),
             old_palette: Vec::new(),
             variables: Vec::new(),
+            guides: Vec::new(),
             next_id: 1,
         }
     }
@@ -1037,42 +1072,6 @@ impl Document {
             ))
     }
 
-    /// The project as JSON for the linked format. Image paths under `base` (the project
-    /// file's folder) are written relative, with forward slashes, so the project and its
-    /// images can move together and open on both Windows and Linux.
-    pub fn to_json_relative(&self, base: &Path) -> Result<String, String> {
-        let mut doc = self.clone();
-        doc.for_each_layer_mut(|layer| {
-            for source in layer.sources_mut() {
-                if let Ok(rel) = source.strip_prefix(base) {
-                    let parts: Vec<String> = rel
-                        .components()
-                        .map(|c| c.as_os_str().to_string_lossy().into_owned())
-                        .collect();
-                    *source = PathBuf::from(parts.join("/"));
-                }
-            }
-        });
-        serde_json::to_string_pretty(&doc).map_err(|e| e.to_string())
-    }
-
-    /// Reads a linked JSON project. Image paths come back absolute; images are not
-    /// loaded yet.
-    pub fn load(path: &Path) -> Result<Self, String> {
-        let text = std::fs::read_to_string(path)
-            .map_err(|e| tr!("CANNOT_READ_FILE", path = path.display(), e = e))?;
-        let mut doc = Self::from_json(&text)?;
-        let base = path.parent().unwrap_or(Path::new(""));
-        doc.for_each_layer_mut(|layer| {
-            for source in layer.sources_mut() {
-                if source.is_relative() && !source.as_os_str().is_empty() {
-                    *source = base.join(&*source);
-                }
-            }
-        });
-        Ok(doc)
-    }
-
     /// Parses a project description, making sure new ids won't clash with saved ones.
     pub fn from_json(text: &str) -> Result<Self, String> {
         let mut doc: Document =
@@ -1246,10 +1245,8 @@ mod tests {
     }
 
     #[test]
-    fn project_roundtrip_with_relative_paths() {
-        let dir = std::env::temp_dir().join(format!("artwork-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let project = dir.join("p.artwork.json");
+    fn project_roundtrip() {
+        let dir = std::path::PathBuf::from("/x");
         let mut d = Document::default();
         let id = d.alloc_id();
         d.template = Some("cosmox - T16".into());
@@ -1268,13 +1265,7 @@ mod tests {
             expanded: true,
             children: vec![Node::Layer(Box::new(inner))],
         }));
-        std::fs::write(&project, d.to_json_relative(&dir).unwrap()).unwrap();
-        let text = std::fs::read_to_string(&project).unwrap();
-        assert!(
-            !text.contains(dir.to_str().unwrap()),
-            "path should be stored relative"
-        );
-        let back = Document::load(&project).unwrap();
+        let back = Document::from_json(&serde_json::to_string(&d).unwrap()).unwrap();
         let bg = back.layers[0].as_layer().unwrap();
         assert_eq!(bg.source, dir.join("img").join("bg.png"));
         assert_eq!(bg.opacity, 0.5);
@@ -1284,7 +1275,6 @@ mod tests {
         assert_eq!(inner.source, dir.join("inner.png"));
         assert_eq!(back.template.as_deref(), Some("cosmox - T16"));
         assert!(back.next_id > inner.id);
-        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

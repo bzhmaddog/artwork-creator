@@ -11,7 +11,7 @@ use dxf::entities::EntityType;
 use dxf::enums::Units;
 use serde::{Deserialize, Serialize};
 
-use crate::document::{P2, TemplatePlacement};
+use crate::document::{CUSTOM_PAGE_RANGE_MM, Orientation, P2, PageSize, TemplatePlacement};
 use crate::i18n::{tr, tr_noop};
 
 /// Name of the optional per-template configuration file.
@@ -95,7 +95,14 @@ pub struct ElementConfig {
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TemplateConfig {
-    /// Display name. Defaults to the folder name.
+    /// Who makes the controller ("Cosmox"): the templates are listed by vendor.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vendor: Option<String>,
+    /// Which version of the template this is ("1.2"), shown to tell copies apart.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
+    /// Display name, the model's when there is a vendor ("T16"). Defaults to the folder
+    /// name.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     /// The template's elements. When empty, a single DXF (`dxf`, or else the first
@@ -111,6 +118,80 @@ pub struct TemplateConfig {
     /// Default placement on the page. Rotation is chosen automatically when absent.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub placement: Option<TemplatePlacement>,
+    /// The page the template is made for, set when it is picked.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub page: Option<PageConfig>,
+}
+
+/// The page a template is made for, in `template.json`: `{ "size": "A4", "orientation":
+/// "landscape" }`, or a size in mm, `{ "size": [250, 400] }`. Either may be left out.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct PageConfig {
+    /// A paper's name, or its width and height in mm.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size: Option<PageSizeConfig>,
+    /// "landscape" or "portrait".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub orientation: Option<String>,
+}
+
+/// A page size in `template.json`.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PageSizeConfig {
+    /// "A5", "A4", "A3", "A2", "Letter", "Legal" or "Tabloid", in any case.
+    Named(String),
+    /// Width and height in mm.
+    Mm([f32; 2]),
+}
+
+/// The page setup a template asks for: what it leaves out stays as it is.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct PageSetup {
+    pub size: Option<PageSize>,
+    /// For a custom size: width and height in portrait orientation, in mm.
+    pub custom_mm: Option<P2>,
+    pub orientation: Option<Orientation>,
+}
+
+impl PageConfig {
+    /// The setup it asks for, or the value it doesn't understand.
+    pub fn setup(&self) -> Result<PageSetup, String> {
+        let mut setup = PageSetup::default();
+        match &self.size {
+            Some(PageSizeConfig::Named(name)) => {
+                setup.size = Some(
+                    PageSize::ALL
+                        .into_iter()
+                        .filter(|&p| p != PageSize::Custom)
+                        .find(|p| format!("{p:?}").eq_ignore_ascii_case(name.trim()))
+                        .ok_or_else(|| name.clone())?,
+                );
+            }
+            Some(PageSizeConfig::Mm([w, h])) => {
+                if !CUSTOM_PAGE_RANGE_MM.contains(w) || !CUSTOM_PAGE_RANGE_MM.contains(h) {
+                    return Err(format!("[{w}, {h}]"));
+                }
+                setup.size = Some(PageSize::Custom);
+                setup.custom_mm = Some([w.min(*h), w.max(*h)]);
+                // As given, unless the orientation says otherwise.
+                setup.orientation = Some(if w > h {
+                    Orientation::Landscape
+                } else {
+                    Orientation::Portrait
+                });
+            }
+            None => {}
+        }
+        match self.orientation.as_deref().map(|o| o.trim().to_lowercase()) {
+            Some(o) if o == "landscape" => setup.orientation = Some(Orientation::Landscape),
+            Some(o) if o == "portrait" => setup.orientation = Some(Orientation::Portrait),
+            Some(o) => return Err(o),
+            None => {}
+        }
+        Ok(setup)
+    }
 }
 
 /// An element's DXF file, resolved from the config.
@@ -131,8 +212,14 @@ pub struct ElementSource {
 pub struct TemplateEntry {
     /// Folder name; this is what projects store.
     pub id: String,
-    /// Shown to the user.
+    /// Shown to the user: the model's name when there is a vendor.
     pub name: String,
+    /// Who makes the controller, if `template.json` says.
+    pub vendor: Option<String>,
+    /// Its version, if `template.json` says.
+    pub version: Option<String>,
+    /// The page it is made for, from `template.json`.
+    pub page: PageSetup,
     /// The template's folder.
     pub folder: PathBuf,
     /// Its elements' DXF files.
@@ -144,6 +231,14 @@ pub struct TemplateEntry {
 }
 
 impl TemplateEntry {
+    /// Its vendor and name ("Cosmox - T16"), or its name alone.
+    pub fn full_name(&self) -> String {
+        match &self.vendor {
+            Some(v) => format!("{v} - {}", self.name),
+            None => self.name.clone(),
+        }
+    }
+
     /// Path of the folder's `template.json`.
     pub fn config_path(&self) -> PathBuf {
         self.folder.join(CONFIG_FILE)
@@ -166,12 +261,112 @@ impl TemplateEntry {
     }
 
     /// Writes `placement` into `template.json`, keeping the other settings.
+    // For the template editor (see ROADMAP): the drawing no longer changes the placement.
+    #[allow(dead_code)]
     pub fn save_placement(&mut self, placement: TemplatePlacement) -> Result<(), String> {
         self.config.placement = Some(placement);
         let json = serde_json::to_string_pretty(&self.config).map_err(|e| e.to_string())?;
         let path = self.config_path();
         std::fs::write(&path, json + "\n")
             .map_err(|e| tr!("CANNOT_WRITE_FILE", path = path.display(), e = e))
+    }
+}
+
+/// A template's files, as a project keeps them: `template.json` and the DXF files it
+/// uses, each by its path in the template's folder ("/"-separated).
+#[derive(Clone, Debug, Default)]
+pub struct TemplateFiles(pub Vec<(String, std::sync::Arc<Vec<u8>>)>);
+
+impl TemplateFiles {
+    /// The files of an installed template.
+    pub fn read(entry: &TemplateEntry) -> Result<Self, String> {
+        let config = entry.folder.join(CONFIG_FILE);
+        let paths = config
+            .is_file()
+            .then_some(config)
+            .into_iter()
+            .chain(entry.sources.iter().map(|s| s.path.clone()));
+        let mut files: Vec<(String, std::sync::Arc<Vec<u8>>)> = Vec::new();
+        for path in paths {
+            let name = path
+                .strip_prefix(&entry.folder)
+                .unwrap_or(&path)
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+            if files.iter().any(|(n, _)| *n == name) {
+                continue;
+            }
+            let data = std::fs::read(&path)
+                .map_err(|e| tr!("CANNOT_READ_FILE", path = path.display(), e = e))?;
+            files.push((name, std::sync::Arc::new(data)));
+        }
+        files.sort_by(|a, b| a.0.cmp(&b.0));
+        Ok(Self(files))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    /// A fingerprint of the files' names and contents: the same for the same files, on
+    /// any computer and in any version of the app (64-bit FNV-1a, in hex).
+    pub fn fingerprint(&self) -> String {
+        let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+        let mut eat = |bytes: &[u8]| {
+            for &b in bytes {
+                h ^= u64::from(b);
+                h = h.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        };
+        let mut files: Vec<_> = self.0.iter().collect();
+        files.sort_by(|a, b| a.0.cmp(&b.0));
+        for (name, data) in files {
+            eat(name.as_bytes());
+            eat(&[0]);
+            eat(&(data.len() as u64).to_le_bytes());
+            eat(data);
+        }
+        format!("{h:016x}")
+    }
+
+    /// Writes the files into a folder named `id` of their own (under the system's
+    /// temporary folder, once for each fingerprint) and returns it, to be read as an
+    /// installed template is. Names that would lead out of the folder are refused.
+    pub fn unpack(&self, id: &str) -> Result<PathBuf, String> {
+        let normal = |name: &str| {
+            let p = Path::new(name);
+            (!name.is_empty()
+                && p.components()
+                    .all(|c| matches!(c, std::path::Component::Normal(_))))
+            .then(|| p.to_path_buf())
+        };
+        let id = normal(id)
+            .filter(|p| p.components().count() == 1)
+            .unwrap_or_else(|| PathBuf::from("template"));
+        let dir = std::env::temp_dir()
+            .join("artwork-creator-templates")
+            .join(self.fingerprint())
+            .join(id);
+        let done = dir.join(".complete");
+        if done.is_file() {
+            return Ok(dir);
+        }
+        let cannot =
+            |path: &Path, e: std::io::Error| tr!("CANNOT_WRITE_FILE", path = path.display(), e = e);
+        for (name, data) in &self.0 {
+            let Some(rel) = normal(name) else {
+                return Err(tr!("TEMPLATE_FILE_NAME_REFUSED", name = name));
+            };
+            let path = dir.join(rel);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).map_err(|e| cannot(parent, e))?;
+            }
+            std::fs::write(&path, data.as_slice()).map_err(|e| cannot(&path, e))?;
+        }
+        std::fs::write(&done, b"").map_err(|e| cannot(&done, e))?;
+        Ok(dir)
     }
 }
 
@@ -241,8 +436,30 @@ pub fn read_entry(folder: &Path) -> Option<TemplateEntry> {
             color: None,
         });
     }
+    let page = match config.page.as_ref().map(PageConfig::setup) {
+        Some(Ok(setup)) => setup,
+        Some(Err(value)) => {
+            let e = tr!("TEMPLATE_PAGE_NOT_UNDERSTOOD", value = value);
+            config_error.get_or_insert(format!("{}: {e}", folder.join(CONFIG_FILE).display()));
+            PageSetup::default()
+        }
+        None => PageSetup::default(),
+    };
     Some(TemplateEntry {
+        page,
         name: config.name.clone().unwrap_or_else(|| id.clone()),
+        version: config
+            .version
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_owned),
+        vendor: config
+            .vendor
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .map(str::to_owned),
         id,
         folder: folder.to_path_buf(),
         sources,
@@ -317,7 +534,13 @@ pub fn scan(dir: &Path) -> Vec<TemplateEntry> {
         .filter(|p| p.is_dir())
         .filter_map(|p| read_entry(&p))
         .collect();
-    out.sort_by_key(|t| t.name.to_lowercase());
+    // Those without a vendor first, then by vendor; by name within.
+    out.sort_by_key(|t| {
+        (
+            t.vendor.as_ref().map(|v| v.to_lowercase()),
+            t.name.to_lowercase(),
+        )
+    });
     out
 }
 
@@ -761,6 +984,103 @@ pub(crate) mod tests {
         assert_eq!(back.config.units.as_deref(), Some("inch"));
         assert_eq!(back.name, "My stick");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn templates_are_listed_by_vendor_then_name() {
+        let dir = std::env::temp_dir().join(format!("artwork-vendors-{}", std::process::id()));
+        let dxf = &fixture().sources[0].path;
+        for (folder, json) in [
+            ("b", r#"{ "vendor": "Zeta", "name": "A1" }"#),
+            ("c", r#"{ "vendor": "Cosmox", "name": "T16" }"#),
+            ("d", r#"{ "vendor": " cosmox ", "name": "M8" }"#),
+            ("e", r#"{ "name": "Blank" }"#),
+        ] {
+            let f = dir.join(folder);
+            std::fs::create_dir_all(&f).unwrap();
+            std::fs::copy(dxf, f.join("a.dxf")).unwrap();
+            std::fs::write(f.join(CONFIG_FILE), json).unwrap();
+        }
+        let list: Vec<String> = scan(&dir).iter().map(TemplateEntry::full_name).collect();
+        // The vendor's case doesn't matter, nor spaces around it.
+        assert_eq!(list, ["Blank", "cosmox - M8", "Cosmox - T16", "Zeta - A1"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn template_files_are_kept_fingerprinted_and_unpacked() {
+        let installed = fixture();
+        let files = TemplateFiles::read(&installed).unwrap();
+        assert!(files.0.iter().any(|(n, _)| n == CONFIG_FILE));
+        assert_eq!(files.0.len(), installed.sources.len() + 1);
+        let fp = files.fingerprint();
+        assert_eq!(fp.len(), 16);
+        assert_eq!(fp, TemplateFiles::read(&installed).unwrap().fingerprint());
+        // Unpacked, it reads and loads as the installed one.
+        let dir = files.unpack(&installed.id).unwrap();
+        let copy = read_entry(&dir).unwrap();
+        assert_eq!(copy.id, installed.id);
+        assert_eq!(
+            load(&copy).unwrap().size_mm,
+            load(&installed).unwrap().size_mm
+        );
+        assert_eq!(TemplateFiles::read(&copy).unwrap().fingerprint(), fp);
+        // One byte changed: another fingerprint.
+        let mut changed = files.clone();
+        let mut data = (*changed.0[0].1).clone();
+        data.push(b' ');
+        changed.0[0].1 = std::sync::Arc::new(data);
+        assert_ne!(changed.fingerprint(), fp);
+        // Names leading out of the folder are refused.
+        let evil = TemplateFiles(vec![("../evil.dxf".into(), std::sync::Arc::new(vec![]))]);
+        assert!(evil.unpack("x").is_err());
+    }
+
+    #[test]
+    fn templates_set_their_page() {
+        let setup = |json: &str| serde_json::from_str::<PageConfig>(json).unwrap().setup();
+        let a3 = setup(r#"{ "size": "a3", "orientation": "Portrait" }"#).unwrap();
+        assert_eq!(a3.size, Some(PageSize::A3));
+        assert_eq!(a3.orientation, Some(Orientation::Portrait));
+        let custom = setup(r#"{ "size": [400, 250] }"#).unwrap();
+        assert_eq!(custom.size, Some(PageSize::Custom));
+        assert_eq!(custom.custom_mm, Some([250.0, 400.0]));
+        assert_eq!(custom.orientation, Some(Orientation::Landscape));
+        let only = setup(r#"{ "orientation": "landscape" }"#).unwrap();
+        assert_eq!(
+            (only.size, only.orientation),
+            (None, Some(Orientation::Landscape))
+        );
+        assert_eq!(setup(r#"{ "size": "B5" }"#), Err("B5".into()));
+        assert_eq!(
+            setup(r#"{ "orientation": "sideways" }"#),
+            Err("sideways".into())
+        );
+        assert!(setup(r#"{ "size": [5, 300] }"#).is_err(), "too small");
+    }
+
+    #[test]
+    fn bundled_templates_load() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("templates");
+        for folder in std::fs::read_dir(&dir).unwrap().flatten() {
+            let entry = read_entry(&folder.path()).expect("a template");
+            assert!(entry.config_error.is_none(), "{:?}", entry.config_error);
+            let t = load(&entry).unwrap();
+            assert!(t.elements.iter().any(|e| e.kind == ElementKind::Outline));
+            assert!(entry.page.size.is_some(), "{} sets its page", entry.id);
+            if entry.id == "blank - A4 landscape" {
+                let [w, h] = t.size_mm;
+                assert!(
+                    (w - 297.0).abs() < 0.01 && (h - 210.0).abs() < 0.01,
+                    "{w} x {h}"
+                );
+                let outline = &t.elements[0].polylines;
+                assert!(
+                    outline.len() == 1 && outline[0].closed,
+                    "one closed rectangle"
+                );
+            }
+        }
     }
 
     /// Writes a DXF in mm with the given closed polygons and circles (center, radius).

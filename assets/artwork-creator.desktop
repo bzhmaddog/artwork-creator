@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Artwork Creator
+Comment=Design artwork for controller panel templates and export it print-ready
+Exec=artwork-creator %f
+Icon=artwork-creator
+Terminal=false
+Categories=Graphics;
+StartupWMClass=artwork-creator

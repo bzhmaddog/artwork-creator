@@ -640,6 +640,10 @@ pub struct Group {
     pub expanded: bool,
     /// Bottom of the stack first.
     pub children: Vec<Node>,
+    /// In the template editor: the template element this group is, its shapes the
+    /// element's.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub element: Option<crate::template::ElementTag>,
 }
 
 /// An entry in the layer stack. Untagged so that projects written before groups existed
@@ -773,32 +777,6 @@ pub struct Guide {
     pub at: f32,
 }
 
-/// How a template outline sits on the page. Rotation is applied first, then the
-/// flips, which therefore mirror the outline as seen on screen.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
-pub struct TemplatePlacement {
-    /// Clockwise rotation in degrees: 0, 90, 180 or 270.
-    pub rotation: u32,
-    /// Mirror left/right.
-    pub flip_x: bool,
-    /// Mirror top/bottom.
-    pub flip_y: bool,
-    /// Offset of the template center from the page center, in mm.
-    pub offset_mm: P2,
-}
-
-impl TemplatePlacement {
-    /// Rotation that matches the template's long side to the page's long side.
-    pub fn auto(tpl_size: P2, page: P2) -> Self {
-        let same = (tpl_size[0] >= tpl_size[1]) == (page[0] >= page[1]);
-        Self {
-            rotation: if same { 0 } else { 90 },
-            ..Self::default()
-        }
-    }
-}
-
 /// A project: page setup, template choice and the layer tree. Saved as JSON.
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -811,11 +789,13 @@ pub struct Document {
     pub orientation: Orientation,
     /// Name of the template folder, e.g. "cosmox - T16".
     pub template: Option<String>,
-    /// How the template sits on the page.
-    pub template_placement: TemplatePlacement,
     /// The template as the project was made with it, kept with the project.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template_copy: Option<TemplateCopy>,
+    /// Only in the template editor's document: the template's settings, kept here so
+    /// that Undo covers them (see `template_edit`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub edited_template: Option<Box<crate::template_edit::EditedTemplate>>,
     /// Page color (RGB), printed under the layers.
     pub background: [u8; 3],
     /// Name of the color variable the background is linked to (see `colors`).
@@ -835,6 +815,11 @@ pub struct Document {
     /// to (see `variables`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub variables: Vec<crate::variables::Variable>,
+    /// The variables of the project's template (its `template.json`), which layer fields
+    /// can be linked to as well; read-only, taken from the template each time it is
+    /// loaded, never saved with the project.
+    #[serde(skip)]
+    pub template_variables: Vec<crate::variables::Variable>,
     /// Guide lines dragged out of the canvas' rulers, for lining things up; not printed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub guides: Vec<Guide>,
@@ -849,14 +834,15 @@ impl Default for Document {
             custom_page_mm: [210.0, 297.0],
             orientation: Orientation::Landscape,
             template: None,
-            template_placement: TemplatePlacement::default(),
             template_copy: None,
+            edited_template: None,
             background: [255, 255, 255],
             background_link: None,
             background_gradient: None,
             layers: Vec::new(),
             old_palette: Vec::new(),
             variables: Vec::new(),
+            template_variables: Vec::new(),
             guides: Vec::new(),
             next_id: 1,
         }
@@ -864,6 +850,19 @@ impl Default for Document {
 }
 
 impl Document {
+    /// Every variable formulas can use: the project's, then its template's (those a
+    /// project variable doesn't already name).
+    pub fn all_variables(&self) -> Vec<crate::variables::Variable> {
+        let mut vars = self.variables.clone();
+        vars.extend(
+            self.template_variables
+                .iter()
+                .filter(|t| self.variables.iter().all(|v| v.name != t.name))
+                .cloned(),
+        );
+        vars
+    }
+
     /// Page width and height in mm, orientation applied.
     pub fn page_mm(&self) -> P2 {
         let [w, h] = self.page.portrait_mm().unwrap_or(self.custom_page_mm);
@@ -1057,19 +1056,11 @@ impl Document {
         }
     }
 
-    /// Maps template mm (origin at its top-left, size `tpl_size`) to page mm.
+    /// Maps template mm (origin at its top-left, size `tpl_size`) to page mm: the
+    /// template centered on the page, as drawn.
     pub fn template_affine(&self, tpl_size: P2) -> Affine {
         let c = self.page_center();
-        let t = &self.template_placement;
-        let fx = if t.flip_x { -1.0 } else { 1.0 };
-        let fy = if t.flip_y { -1.0 } else { 1.0 };
-        Affine::translate(-tpl_size[0] / 2.0, -tpl_size[1] / 2.0)
-            .then(Affine::rotate((t.rotation as f32).to_radians()))
-            .then(Affine::scale(fx, fy))
-            .then(Affine::translate(
-                c[0] + t.offset_mm[0],
-                c[1] + t.offset_mm[1],
-            ))
+        Affine::translate(c[0] - tpl_size[0] / 2.0, c[1] - tpl_size[1] / 2.0)
     }
 
     /// Parses a project description, making sure new ids won't clash with saved ones.
@@ -1218,30 +1209,19 @@ mod tests {
     }
 
     #[test]
-    fn auto_rotate_portrait_template_on_landscape_page() {
-        let mut d = Document::default();
-        d.template_placement = TemplatePlacement::auto([196.0, 296.0], d.page_mm());
-        assert_eq!(d.template_placement.rotation, 90);
+    fn template_is_centered_on_the_page() {
+        let d = Document::default();
         let m = d.template_affine([196.0, 296.0]);
-        // The template center maps to the page center.
         assert!(close(m.apply([98.0, 148.0]), d.page_center()));
+        // Not turned: its width stays across.
+        let (a, b) = (m.apply([0.0, 0.0]), m.apply([196.0, 0.0]));
+        assert!(close([b[0] - a[0], b[1] - a[1]], [196.0, 0.0]));
     }
 
     #[test]
-    fn flip_y_mirrors_on_screen_after_rotation() {
-        let mut d = Document::default();
-        let size = [196.0, 296.0];
-        d.template_placement = TemplatePlacement {
-            rotation: 90,
-            ..Default::default()
-        };
-        let plain = d.template_affine(size).apply([0.0, 0.0]);
-        d.template_placement.flip_y = true;
-        let flipped = d.template_affine(size).apply([0.0, 0.0]);
-        let c = d.page_center();
-        // Same x, y mirrored around the page center.
-        assert!((plain[0] - flipped[0]).abs() < 1e-3);
-        assert!((plain[1] - c[1] + (flipped[1] - c[1])).abs() < 1e-3);
+    fn a_project_saved_with_a_template_placement_still_opens() {
+        let json = r#"{ "template_placement": { "rotation": 90, "flip_y": true } }"#;
+        assert!(Document::from_json(json).is_ok());
     }
 
     #[test]
@@ -1264,6 +1244,7 @@ mod tests {
             opacity: 0.25,
             expanded: true,
             children: vec![Node::Layer(Box::new(inner))],
+            element: None,
         }));
         let back = Document::from_json(&serde_json::to_string(&d).unwrap()).unwrap();
         let bg = back.layers[0].as_layer().unwrap();
@@ -1317,6 +1298,7 @@ mod tests {
             opacity: 1.0,
             expanded: true,
             children: vec![Node::Layer(Box::new(b))],
+            element: None,
         }));
         assert_eq!(d.path_of(2), Some(vec![1, 0]));
         assert!(d.is_within(2, 3) && !d.is_within(1, 3));

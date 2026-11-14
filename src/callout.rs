@@ -117,22 +117,45 @@ fn paint_icon(painter: &Painter, rect: Rect, tone: Tone, color: Color32, visuals
             // A glint on the glass.
             painter.circle_filled(bulb + vec2(-s * 0.1, -s * 0.08), s * 0.06, cut);
         }
-        Tone::Warning => {
-            let top = pos2(c.x, rect.top() + s * 0.04);
-            let left = pos2(rect.left(), rect.bottom() - s * 0.06);
-            let right = pos2(rect.right(), rect.bottom() - s * 0.06);
-            painter.add(Shape::convex_polygon(
-                vec![top, right, left],
-                color,
-                Stroke::NONE,
-            ));
-            painter.line_segment(
-                [c + vec2(0.0, -s * 0.12), c + vec2(0.0, s * 0.16)],
-                Stroke::new(s * 0.12, cut),
-            );
-            painter.circle_filled(c + vec2(0.0, s * 0.3), s * 0.07, cut);
-        }
+        Tone::Warning => paint_warning(painter, rect, color, cut),
     }
+}
+
+/// Draws the warning triangle in `rect`, in `color`, its "!" cut out in `cut`.
+fn paint_warning(painter: &Painter, rect: Rect, color: Color32, cut: Color32) {
+    let c = rect.center();
+    let s = rect.width();
+    let top = pos2(c.x, rect.top() + s * 0.04);
+    let left = pos2(rect.left(), rect.bottom() - s * 0.06);
+    let right = pos2(rect.right(), rect.bottom() - s * 0.06);
+    painter.add(Shape::convex_polygon(
+        vec![top, right, left],
+        color,
+        Stroke::NONE,
+    ));
+    painter.line_segment(
+        [c + vec2(0.0, -s * 0.12), c + vec2(0.0, s * 0.16)],
+        Stroke::new(s * 0.12, cut),
+    );
+    painter.circle_filled(c + vec2(0.0, s * 0.3), s * 0.07, cut);
+}
+
+/// A warning triangle in `color` at the cursor, as tall as a line of text: drawn, so it
+/// shows whatever the font has.
+pub fn warning_icon(ui: &mut Ui, color: Color32) -> Response {
+    let (rect, response) = ui.allocate_exact_size(vec2(14.0, 16.0), Sense::hover());
+    let rect = Rect::from_center_size(rect.center(), egui::Vec2::splat(13.0));
+    paint_warning(ui.painter(), rect, color, ui.visuals().panel_fill);
+    response
+}
+
+/// A warning triangle in `color`, as tall as a line of text, to put in a row or a
+/// button: drawn, so it shows whatever the font has.
+pub fn warning_mark(color: Color32) -> egui::Atom<'static> {
+    egui::Atom::paint(egui::Vec2::splat(14.0), move |ui, args| {
+        let rect = Rect::from_center_size(args.rect.center(), egui::Vec2::splat(13.0));
+        paint_warning(ui.painter(), rect, color, ui.visuals().panel_fill);
+    })
 }
 
 #[cfg(test)]

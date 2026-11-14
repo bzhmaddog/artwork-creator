@@ -96,6 +96,7 @@ fn one_group(nodes: Vec<Node>, name: String, new_id: &mut dyn FnMut() -> u64) ->
         opacity: 1.0,
         expanded: false,
         children: nodes,
+        element: None,
     })]
 }
 
@@ -235,6 +236,7 @@ impl Walk<'_> {
                         opacity,
                         expanded: false,
                         children,
+                        element: None,
                     }));
                 }
                 usvg::Node::Path(p) => {

@@ -56,7 +56,7 @@ pub enum Command {
     PreviewCuts,
     PreviewBleed,
     PreviewSafeArea,
-    SnapToAnchors,
+    SnapToCenters,
     SnapToEdges,
     SnapToGuides,
     ShowRulers,
@@ -64,6 +64,12 @@ pub enum Command {
     LockGuides,
     ClearGuides,
     KeyboardShortcuts,
+    NewTemplate,
+    EditTemplate,
+    DeleteTemplate,
+    OpenTemplateFolder,
+    CheckTemplate,
+    CompareTemplateSource,
     SelectTool,
     PencilTool,
     BrushTool,
@@ -81,16 +87,19 @@ enum Group {
     /// The View panel, the zoom buttons in the status bar and the View menu's Keyboard
     /// shortcuts.
     View,
+    /// Tools > Templates and the Template panel.
+    Templates,
     Tools,
     Help,
 }
 
 impl Group {
-    const ALL: [Group; 6] = [
+    const ALL: [Group; 7] = [
         Group::File,
         Group::Edit,
         Group::Layers,
         Group::View,
+        Group::Templates,
         Group::Tools,
         Group::Help,
     ];
@@ -101,6 +110,7 @@ impl Group {
             Group::Edit => tr_noop!("MENU_EDIT"),
             Group::Layers => tr_noop!("LAYERS_SECTION"),
             Group::View => tr_noop!("MENU_VIEW"),
+            Group::Templates => tr_noop!("MENU_TEMPLATES"),
             Group::Tools => tr_noop!("MENU_TOOLS"),
             Group::Help => tr_noop!("MENU_HELP"),
         })
@@ -117,7 +127,7 @@ const NONE: Modifiers = Modifiers::NONE;
 
 impl Command {
     /// In the order of the window.
-    pub const ALL: [Command; 41] = [
+    pub const ALL: [Command; 47] = [
         Command::NewProject,
         Command::OpenProject,
         Command::Save,
@@ -145,7 +155,7 @@ impl Command {
         Command::PreviewCuts,
         Command::PreviewBleed,
         Command::PreviewSafeArea,
-        Command::SnapToAnchors,
+        Command::SnapToCenters,
         Command::SnapToEdges,
         Command::SnapToGuides,
         Command::ShowRulers,
@@ -153,6 +163,12 @@ impl Command {
         Command::LockGuides,
         Command::ClearGuides,
         Command::KeyboardShortcuts,
+        Command::NewTemplate,
+        Command::EditTemplate,
+        Command::DeleteTemplate,
+        Command::OpenTemplateFolder,
+        Command::CheckTemplate,
+        Command::CompareTemplateSource,
         Command::SelectTool,
         Command::PencilTool,
         Command::BrushTool,
@@ -191,7 +207,7 @@ impl Command {
             Command::PreviewCuts => tr_noop!("PREVIEW_CUTS"),
             Command::PreviewBleed => tr_noop!("PREVIEW_BLEED"),
             Command::PreviewSafeArea => tr_noop!("PREVIEW_SAFE_AREA"),
-            Command::SnapToAnchors => tr_noop!("SNAP_TO_ANCHORS"),
+            Command::SnapToCenters => tr_noop!("SNAP_TO_CENTERS"),
             Command::SnapToEdges => tr_noop!("SNAP_TO_EDGES"),
             Command::SnapToGuides => tr_noop!("SNAP_TO_GUIDES"),
             Command::ShowRulers => tr_noop!("SHOW_RULERS"),
@@ -199,6 +215,12 @@ impl Command {
             Command::LockGuides => tr_noop!("LOCK_GUIDES"),
             Command::ClearGuides => tr_noop!("CLEAR_GUIDES"),
             Command::KeyboardShortcuts => tr_noop!("MENU_KEYBOARD_SHORTCUTS"),
+            Command::NewTemplate => tr_noop!("NEW_TEMPLATE"),
+            Command::EditTemplate => tr_noop!("EDIT_TEMPLATE"),
+            Command::DeleteTemplate => tr_noop!("DELETE_TEMPLATE"),
+            Command::OpenTemplateFolder => tr_noop!("OPEN_TEMPLATE_FOLDER"),
+            Command::CheckTemplate => tr_noop!("CHECK_TEMPLATE"),
+            Command::CompareTemplateSource => tr_noop!("COMPARE_TEMPLATE_SOURCE"),
             Command::SelectTool => tr_noop!("TOOL_SELECT"),
             Command::PencilTool => tr_noop!("TOOL_PENCIL"),
             Command::BrushTool => tr_noop!("TOOL_BRUSH"),
@@ -237,7 +259,7 @@ impl Command {
             | Command::PreviewCuts
             | Command::PreviewBleed
             | Command::PreviewSafeArea
-            | Command::SnapToAnchors
+            | Command::SnapToCenters
             | Command::SnapToEdges
             | Command::SnapToGuides
             | Command::ShowRulers
@@ -245,6 +267,12 @@ impl Command {
             | Command::LockGuides
             | Command::ClearGuides
             | Command::KeyboardShortcuts => Group::View,
+            Command::NewTemplate
+            | Command::EditTemplate
+            | Command::DeleteTemplate
+            | Command::OpenTemplateFolder
+            | Command::CheckTemplate
+            | Command::CompareTemplateSource => Group::Templates,
             Command::SelectTool
             | Command::PencilTool
             | Command::BrushTool
@@ -325,7 +353,8 @@ impl Command {
             Command::PreviewCuts => "preview_cuts",
             Command::PreviewBleed => "preview_bleed",
             Command::PreviewSafeArea => "preview_safe_area",
-            Command::SnapToAnchors => "snap_to_anchors",
+            // Its name when centers were anchors: keys set then still apply.
+            Command::SnapToCenters => "snap_to_anchors",
             Command::SnapToEdges => "snap_to_edges",
             Command::SnapToGuides => "snap_to_guides",
             Command::ShowRulers => "show_rulers",
@@ -333,6 +362,12 @@ impl Command {
             Command::LockGuides => "lock_guides",
             Command::ClearGuides => "clear_guides",
             Command::KeyboardShortcuts => "keyboard_shortcuts",
+            Command::NewTemplate => "new_template",
+            Command::EditTemplate => "edit_template",
+            Command::DeleteTemplate => "delete_template",
+            Command::OpenTemplateFolder => "open_template_folder",
+            Command::CheckTemplate => "check_template",
+            Command::CompareTemplateSource => "compare_template_source",
             Command::SelectTool => "select_tool",
             Command::PencilTool => "pencil_tool",
             Command::BrushTool => "brush_tool",

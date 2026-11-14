@@ -1473,7 +1473,7 @@ fn hash_of(v: &impl Serialize) -> u64 {
 /// Brings the layer's box up to date with its shape, keeping the shape in place on the
 /// page. With `settle`, a scale the layer was given (by its handles) goes into its
 /// geometry first.
-fn layout(layer: &mut Layer, settle: bool) {
+pub(crate) fn layout(layer: &mut Layer, settle: bool) {
     lay_out_box(layer, settle);
     // Where the frame is on the page once settled, for paint that doesn't stretch.
     if !is_scaled(layer) {

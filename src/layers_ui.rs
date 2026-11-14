@@ -14,6 +14,7 @@ use crate::effects_ui;
 use crate::i18n::{tr, tr_noop, translate};
 use crate::shape::{self, Cap, DashStyle, Join, ShapeKind};
 use crate::shortcuts::Command;
+use crate::template::ElementKind;
 use crate::text::{self, FontLibrary, PathKind, TextAlign};
 use crate::variables::{self, Field};
 
@@ -49,6 +50,8 @@ pub struct LayersPanel {
     pub can_paste: bool,
     /// Each command's shortcut as text, for tooltips and menus; set by the app.
     pub keys: HashMap<Command, String>,
+    /// A template is edited: only shapes are added, into its elements.
+    pub template_mode: bool,
 }
 
 impl LayersPanel {
@@ -115,6 +118,8 @@ pub struct LayersOutput {
     pub add_canvas: Option<ShapeKind>,
     /// Cut, Copy or Paste was picked in a row's menu, that row now selected.
     pub edit: Option<Edit>,
+    /// A kind was picked from the Element button's menu: add a template element.
+    pub add_element: Option<ElementKind>,
     /// The height the layer list and its toolbar would take without a limit.
     pub natural_height: f32,
 }
@@ -426,6 +431,7 @@ pub fn group(doc: &mut Document, selected: &mut Option<u64>) -> bool {
         opacity: 1.0,
         expanded: true,
         children: Vec::new(),
+        element: None,
     };
     let path = match selected.and_then(|s| doc.remove(s)) {
         Some((path, node)) => {
@@ -562,6 +568,23 @@ pub fn drop_node(doc: &mut Document, id: u64, target: DropTarget) -> bool {
     true
 }
 
+/// Whether a drag-and-drop move is allowed. In a template (`template_mode`), elements
+/// stay at the top of the list and everything else inside an element: a shape goes from
+/// an element to another, never out of them.
+pub fn drop_allowed(doc: &Document, id: u64, target: DropTarget, template_mode: bool) -> bool {
+    if !template_mode {
+        return true;
+    }
+    let parent = match target {
+        DropTarget::Above(t) | DropTarget::Below(t) => doc.path_of(t).map(|mut p| {
+            p.pop();
+            p
+        }),
+        DropTarget::Into(t) => doc.path_of(t),
+    };
+    parent.is_some_and(|p| crate::template_edit::fits_in(doc, id, &p))
+}
+
 // ---- Icons ----
 
 /// Color of a toggle icon: follows hover, faded when off, dimmer when `dim`.
@@ -648,6 +671,29 @@ fn paint_lock(p: &egui::Painter, rect: Rect, locked: bool, c: Color32) {
     shackle.extend(pts.iter().copied());
     shackle.push(pts[10] + vec2(0.0, 1.0 + lift * 0.3));
     p.add(Shape::line(shackle, Stroke::new(1.3, c)));
+}
+
+/// An error mark: a red disc with a white exclamation point, as tall as the row.
+fn error_mark(ui: &mut Ui, tip: &str) -> Response {
+    // As tall as the row, to be seen at once.
+    let size = ui.spacing().interact_size.y.max(ICON);
+    let (rect, r) = ui.allocate_exact_size(vec2(size, size), Sense::hover());
+    let c = ui.visuals().error_fg_color;
+    let p = ui.painter();
+    let center = rect.center();
+    let radius = size / 2.0 - 0.5;
+    p.circle_filled(center, radius, c);
+    let ink = Color32::WHITE;
+    let stroke = Stroke::new(radius * 0.26, ink);
+    p.line_segment(
+        [
+            center + vec2(0.0, -radius * 0.58),
+            center + vec2(0.0, radius * 0.18),
+        ],
+        stroke,
+    );
+    p.circle_filled(center + vec2(0.0, radius * 0.52), radius * 0.15, ink);
+    r.on_hover_text(tip)
 }
 
 /// Padlock button keeping a layer's width and height in proportion.
@@ -738,6 +784,8 @@ fn expander(ui: &mut Ui, expanded: &mut bool) {
 #[derive(Clone, Copy)]
 pub enum Tool {
     Add,
+    /// A template element: an outline with a button in it, and a plus.
+    AddElement,
     AddImage,
     AddText,
     AddShape,
@@ -886,6 +934,19 @@ pub fn draw_tool(p: &egui::Painter, rect: Rect, tool: Tool, c: Color32, back: Co
         Tool::Add => {
             p.line_segment([at(-6.0, 0.0), at(6.0, 0.0)], s);
             p.line_segment([at(0.0, -6.0), at(0.0, 6.0)], s);
+        }
+        Tool::AddElement => {
+            // A rounded outline with a button in it, and a plus at its corner.
+            p.rect_stroke(
+                Rect::from_min_size(at(-8.0, -7.0), vec2(13.0, 11.0)),
+                3.0,
+                s,
+                StrokeKind::Inside,
+            );
+            p.circle_stroke(at(-1.5, -1.5), 2.5, s);
+            p.circle_filled(at(5.0, 4.5), 5.0, back);
+            p.line_segment([at(1.5, 4.5), at(8.5, 4.5)], s);
+            p.line_segment([at(5.0, 1.0), at(5.0, 8.0)], s);
         }
         Tool::AddImage => {
             // A framed picture: hills under a sun.
@@ -1399,19 +1460,51 @@ pub fn show(
         ui.spacing_mut().item_spacing.x = 2.0;
         let id = sel.unwrap_or(0);
         // One button per kind of layer, so each says what it adds.
-        let hint = state.hint(tr!("ADD_IMAGE_LAYERS"), Command::AddImages);
-        if tool_button(ui, Tool::AddImage, true, &hint) {
-            out.add_images = true;
-        }
-        let hint = state.hint(tr!("ADD_TEXT_LAYER"), Command::AddText);
-        if tool_button(ui, Tool::AddText, true, &hint) {
-            out.add_text = true;
+        // A template is made of shapes, in its elements.
+        if state.template_mode {
+            let button = tool_icon(ui, Tool::AddElement, true, tr!("ADD_ELEMENT_HINT"));
+            // A template has one outline.
+            let has_outline = doc.layers.iter().any(|n| {
+                n.as_group()
+                    .and_then(|g| g.element)
+                    .is_some_and(|t| t.kind == ElementKind::Outline)
+            });
+            egui::Popup::menu(&button).show(|ui| {
+                for kind in ElementKind::ALL {
+                    let taken = kind == ElementKind::Outline && has_outline;
+                    let r = ui
+                        .add_enabled(!taken, egui::Button::new(translate(kind.label())))
+                        .on_disabled_hover_text(tr!("TEMPLATE_HAS_OUTLINE"));
+                    if r.clicked() {
+                        out.add_element = Some(kind);
+                        ui.close();
+                    }
+                }
+            });
+        } else {
+            let hint = state.hint(tr!("ADD_IMAGE_LAYERS"), Command::AddImages);
+            if tool_button(ui, Tool::AddImage, true, &hint) {
+                out.add_images = true;
+            }
+            let hint = state.hint(tr!("ADD_TEXT_LAYER"), Command::AddText);
+            if tool_button(ui, Tool::AddText, true, &hint) {
+                out.add_text = true;
+            }
         }
         let hint = match state.keys.get(&Command::AddShape) {
             Some(s) => tr!("ADD_SHAPE_LAYER_WITH_SHORTCUT", shortcut = s),
             None => tr!("ADD_SHAPE_LAYER").to_owned(),
         };
-        let button = tool_icon(ui, Tool::AddShape, true, &hint);
+        // In a template, shapes go into an element: one must be selected (or a shape of
+        // it).
+        let can_add_shape = !state.template_mode
+            || sel.is_some_and(|id| crate::template_edit::element_of(doc, id).is_some());
+        let hint = if can_add_shape {
+            hint
+        } else {
+            tr!("ADD_SHAPE_SELECT_ELEMENT").to_owned()
+        };
+        let button = tool_icon(ui, Tool::AddShape, can_add_shape, &hint);
         egui::Popup::menu(&button).show(|ui| {
             for kind in ShapeKind::ALL {
                 let mut b = Button::new(translate(kind.name_key()));
@@ -1443,61 +1536,65 @@ pub fn show(
                 ui.close();
             }
         });
-        let hint = match state.keys.get(&Command::AddCanvas) {
-            Some(s) => tr!("ADD_CANVAS_LAYER_WITH_SHORTCUT", shortcut = s),
-            None => tr!("ADD_CANVAS_LAYER").to_owned(),
-        };
-        let button = tool_icon(ui, Tool::AddCanvas, true, &hint);
-        egui::Popup::menu(&button).show(|ui| {
-            // Only a closed shape has an inside to paint in.
-            for kind in ShapeKind::ALL.into_iter().filter(|k| k.closed()) {
-                let mut b = Button::new(translate(kind.name_key()));
-                if kind == state.canvas_kind
-                    && let Some(s) = state.keys.get(&Command::AddCanvas)
-                {
-                    b = b.shortcut_text(s.as_str());
+        // A template has no canvases, groups or stacking order: only shapes in its
+        // elements.
+        if !state.template_mode {
+            let hint = match state.keys.get(&Command::AddCanvas) {
+                Some(s) => tr!("ADD_CANVAS_LAYER_WITH_SHORTCUT", shortcut = s),
+                None => tr!("ADD_CANVAS_LAYER").to_owned(),
+            };
+            let button = tool_icon(ui, Tool::AddCanvas, true, &hint);
+            egui::Popup::menu(&button).show(|ui| {
+                // Only a closed shape has an inside to paint in.
+                for kind in ShapeKind::ALL.into_iter().filter(|k| k.closed()) {
+                    let mut b = Button::new(translate(kind.name_key()));
+                    if kind == state.canvas_kind
+                        && let Some(s) = state.keys.get(&Command::AddCanvas)
+                    {
+                        b = b.shortcut_text(s.as_str());
+                    }
+                    if ui.add(b).clicked() {
+                        out.add_canvas = Some(kind);
+                        ui.close();
+                    }
                 }
-                if ui.add(b).clicked() {
-                    out.add_canvas = Some(kind);
-                    ui.close();
-                }
+            });
+            ui.add_space(6.0);
+            let hint = state.hint(tr!("GROUP_LAYERS"), Command::Group);
+            if tool_button(ui, Tool::Group, true, &hint) {
+                out.changed |= group(doc, selected);
             }
-        });
-        ui.add_space(6.0);
-        let hint = state.hint(tr!("GROUP_LAYERS"), Command::Group);
-        if tool_button(ui, Tool::Group, true, &hint) {
-            out.changed |= group(doc, selected);
-        }
-        let hint = state.hint(tr!("UNGROUP_LAYERS"), Command::Ungroup);
-        if tool_button(ui, Tool::Ungroup, is_group, &hint) {
-            out.changed |= ungroup(doc, selected);
-        }
-        let hint = state.hint(tr!("DUPLICATE_LAYER"), Command::Duplicate);
-        if tool_button(ui, Tool::Duplicate, has, &hint) {
-            out.changed |= duplicate(doc, selected);
-        }
-        ui.add_space(6.0);
-        if tool_button(ui, Tool::Top, has, tr!("MOVE_LAYER_TO_TOP")) {
-            out.changed |= move_to_end(doc, id, true);
-        }
-        if tool_button(
-            ui,
-            Tool::Up,
-            has && can_step(doc, id, true),
-            tr!("MOVE_LAYER_UP"),
-        ) {
-            out.changed |= move_step(doc, id, true);
-        }
-        if tool_button(
-            ui,
-            Tool::Down,
-            has && can_step(doc, id, false),
-            tr!("MOVE_LAYER_DOWN"),
-        ) {
-            out.changed |= move_step(doc, id, false);
-        }
-        if tool_button(ui, Tool::Bottom, has, tr!("MOVE_LAYER_TO_BOTTOM")) {
-            out.changed |= move_to_end(doc, id, false);
+            let hint = state.hint(tr!("UNGROUP_LAYERS"), Command::Ungroup);
+            if tool_button(ui, Tool::Ungroup, is_group, &hint) {
+                out.changed |= ungroup(doc, selected);
+            }
+            let hint = state.hint(tr!("DUPLICATE_LAYER"), Command::Duplicate);
+            if tool_button(ui, Tool::Duplicate, has, &hint) {
+                out.changed |= duplicate(doc, selected);
+            }
+            ui.add_space(6.0);
+            if tool_button(ui, Tool::Top, has, tr!("MOVE_LAYER_TO_TOP")) {
+                out.changed |= move_to_end(doc, id, true);
+            }
+            if tool_button(
+                ui,
+                Tool::Up,
+                has && can_step(doc, id, true),
+                tr!("MOVE_LAYER_UP"),
+            ) {
+                out.changed |= move_step(doc, id, true);
+            }
+            if tool_button(
+                ui,
+                Tool::Down,
+                has && can_step(doc, id, false),
+                tr!("MOVE_LAYER_DOWN"),
+            ) {
+                out.changed |= move_step(doc, id, false);
+            }
+            if tool_button(ui, Tool::Bottom, has, tr!("MOVE_LAYER_TO_BOTTOM")) {
+                out.changed |= move_to_end(doc, id, false);
+            }
         }
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             let hint = state.hint(tr!("DELETE_LAYER"), Command::Delete);
@@ -1544,6 +1641,16 @@ pub fn show(
                     };
                     out.changed |= eye_toggle(ui, visible, row.parent_hidden).changed();
                     out.changed |= lock_toggle(ui, locked, row.parent_locked).changed();
+                    // In a template, a shape in no element: an error, until moved into one.
+                    let orphan = state.template_mode
+                        && row.depth == 0
+                        && match &*node {
+                            Node::Group(g) => g.element.is_none(),
+                            Node::Layer(_) => true,
+                        };
+                    if orphan {
+                        error_mark(ui, tr!("TEMPLATE_ORPHAN_SHAPE"));
+                    }
                     match &*node {
                         Node::Group(_) => folder_icon(ui),
                         Node::Layer(l) => {
@@ -1570,7 +1677,7 @@ pub fn show(
                     let name = name_mut(node);
                     {
                         let mut text = RichText::new(name.as_str());
-                        if missing.is_some() {
+                        if missing.is_some() || orphan {
                             text = text.color(ui.visuals().error_fg_color);
                         }
                         if row.parent_hidden {
@@ -1701,24 +1808,28 @@ pub fn show(
                         _ if t < 0.5 => DropTarget::Above(row.id),
                         _ => DropTarget::Below(row.id),
                     };
+                    // Nowhere to go: no mark, nothing dropped.
+                    let target = Some(target)
+                        .filter(|&t| drop_allowed(doc, dragged.0, t, state.template_mode));
                     let accent = ui.visuals().selection.stroke.color;
                     let stroke = Stroke::new(2.0, accent);
                     let left = rect.left() + row.depth as f32 * INDENT;
                     let painter = ui.painter();
                     match target {
-                        DropTarget::Above(_) => {
+                        Some(DropTarget::Above(_)) => {
                             painter.hline(left..=rect.right(), rect.top(), stroke);
                         }
-                        DropTarget::Below(_) => {
+                        Some(DropTarget::Below(_)) => {
                             painter.hline(left..=rect.right(), rect.bottom(), stroke);
                         }
-                        DropTarget::Into(_) => {
+                        Some(DropTarget::Into(_)) => {
                             painter.rect_stroke(rect, 2.0, stroke, StrokeKind::Inside);
                         }
+                        None => {}
                     }
                     if ui.input(|i| i.pointer.any_released()) {
                         DragAndDrop::clear_payload(ui.ctx());
-                        pending_drop = Some((dragged.0, target));
+                        pending_drop = target.map(|t| (dragged.0, t));
                     }
                 }
             }
@@ -2235,6 +2346,7 @@ fn shape_section(
     locked: bool,
     edit_points: &mut Option<u64>,
     delete_key: &str,
+    plain: bool,
 ) -> bool {
     let id = layer.id;
     let mut changed = false;
@@ -2342,6 +2454,10 @@ fn shape_section(
                     _ => {}
                 }
 
+                // A template's shapes are lines of their element's color.
+                if plain {
+                    return;
+                }
                 if s.kind.can_fill() {
                     ui.label(tr!("SHAPE_FILL"));
                     let mut link = layer.color_links.remove(&ColorField::Fill);
@@ -2606,6 +2722,9 @@ fn properties(
         .filter(|l| l.layer.shape.is_some())
         .map(|l| (l.layer.id, l.layer.name.clone()))
         .collect();
+    // In the template editor: the element the selection is in.
+    // A template's shapes, in an element or not, are plain lines.
+    let plain = state.template_mode || crate::template_edit::element_of(doc, id).is_some();
     match doc.node_mut(id) {
         Some(Node::Group(g)) => {
             // A group has only the properties all layers have.
@@ -2619,6 +2738,23 @@ fn properties(
                         ui.label(tr!("LAYER_NAME"));
                         out.changed |= ui.text_edit_singleline(&mut g.name).changed();
                         ui.end_row();
+
+                        // A template element: its kind and line color.
+                        if let Some(tag) = &mut g.element {
+                            ui.label(tr!("ELEMENT_KIND"));
+                            ui.label(translate(tag.kind.label()));
+                            ui.end_row();
+                            ui.label(tr!("ELEMENT_COLOR"));
+                            out.changed |= ui
+                                .color_edit_button_srgb(&mut tag.color)
+                                .on_hover_text(tr!("ELEMENT_LINE_COLOR"))
+                                .changed();
+                            ui.end_row();
+                            return;
+                        }
+                        if plain {
+                            return;
+                        }
 
                         ui.label(tr!("OPACITY"));
                         out.changed |= ui
@@ -2644,11 +2780,13 @@ fn properties(
                         out.changed |= ui.text_edit_singleline(&mut layer.name).changed();
                         ui.end_row();
 
-                        ui.label(tr!("OPACITY"));
-                        out.changed |= ui
-                            .add(Slider::new(&mut layer.opacity, 0.0..=1.0).fixed_decimals(2))
-                            .changed();
-                        ui.end_row();
+                        if !plain {
+                            ui.label(tr!("OPACITY"));
+                            out.changed |= ui
+                                .add(Slider::new(&mut layer.opacity, 0.0..=1.0).fixed_decimals(2))
+                                .changed();
+                            ui.end_row();
+                        }
 
                         ui.add_enabled_ui(!locked, |ui| ui.label(tr!("LAYER_POSITION")));
                         ui.add_enabled_ui(!locked, |ui| {
@@ -2824,8 +2962,14 @@ fn properties(
                             .get(&Command::Delete)
                             .cloned()
                             .unwrap_or_else(|| tr!("DELETE_LAYER").to_owned());
-                        out.changed |=
-                            shape_section(ui, layer, locked, &mut state.edit_points, &delete);
+                        out.changed |= shape_section(
+                            ui,
+                            layer,
+                            locked,
+                            &mut state.edit_points,
+                            &delete,
+                            plain,
+                        );
                     } else {
                         image_section(ui, layer, state.min_dpi);
                     }
@@ -2840,7 +2984,9 @@ fn properties(
             } else {
                 None
             };
-            out.changed |= effects_ui::show(ui, layer.id, &mut layer.effects, px_mm);
+            if !plain {
+                out.changed |= effects_ui::show(ui, layer.id, &mut layer.effects, px_mm);
+            }
         }
         None => {}
     }
@@ -3653,6 +3799,7 @@ mod tests {
                     opacity: 1.0,
                     expanded: false,
                     children: vec![Node::Layer(Box::new(inner))],
+                    element: None,
                 }),
                 Node::Layer(Box::new(gone)),
                 Node::Layer(Box::new(fine)),

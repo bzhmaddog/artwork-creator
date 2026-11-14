@@ -5,7 +5,7 @@
 
 A desktop app for designing printed artwork for arcade controllers and fightsticks.
 
-Load a controller template made of DXF files (outline, buttons, cutouts), arrange your
+Load a controller template drawn in SVG (outline, buttons, cutouts), arrange your
 images on top, and export print-ready PNG, PDF or SVG at true size. The artwork is clipped to the
 panel outline and left blank in the button and cutout holes. Runs on Windows and Linux.
 Built in Rust with [egui](https://github.com/emilk/egui).
@@ -43,7 +43,7 @@ layers panel on the right](doc/capture.png)
   those whose license forbids embedding them), so a shared project looks the same
   elsewhere.
 - **Text along a path**: bent into an arc, set around a circle (the layer centered on
-  it, so its center snaps to a button's anchor), or following the outline of a shape
+  it, so its center snaps to a button's center), or following the outline of a shape
   layer, curves included. The text's position along the path, the side it stands on and
   its distance from the path can be set; each letter stays upright on the path. A text
   following a shape moves with it. Text on a path is typed in Properties.
@@ -52,7 +52,7 @@ layers panel on the right](doc/capture.png)
   joins) and, for closed shapes, a fill. Lines, polylines and polygons are drawn by
   clicking their points on the canvas, their segments straight or Bezier curves, and
   their points and curve handles can be moved, added and removed afterwards; points snap
-  to the template's anchors. Resizing a shape keeps its stroke
+  to the centers of the template's shapes. Resizing a shape keeps its stroke
   width in mm; a shape keeps the kind it was made as. Shapes move, rotate, distort and take effects like
   images, and are drawn at the export resolution.
 - **SVG import**: an SVG file picked from **Path...** in the Shape menu or dropped on the
@@ -114,7 +114,22 @@ layers panel on the right](doc/capture.png)
   of a kind: a length in mm (`button = 30`), an angle in degrees, a text size in pt, a
   number without a unit (`count = 3`), a color or a text. **Add a
   variable** asks for the kind; the panel lists the variables grouped by kind, each
-  behind its kind's icon, with its unit after its value.
+  behind its kind's icon, with its unit after its value. A name starts with a lowercase
+  letter or `_` (not a capital or a digit), then letters, digits or `_`; its field turns
+  red otherwise.
+  - The project's template brings its own variables (set in the template editor): the
+    panel then has two sections, **Template** first, in tinted read-only rows, then
+    **Project**, the project's own. Formulas use the template's like the others
+    (`actionButtonDiameter + 2`). They come from the project's copy of its
+    template, not saved with the project's variables; a project variable can't take one
+    of their names (one that already does is used instead).
+  - A project length, angle, text size or number can inherit from the template's
+    variables: type a formula such as `templateVar + 2` in its value, or use its **fx**
+    button (as in a layer's fields, below; it lists the template's variables only). It
+    then follows the template's variables, and the layers using it follow too. If the
+    template no longer has a variable the formula uses (the template replaced), the
+    variable's name turns red, a warning under it names the missing variable, and it
+    keeps its last value until the formula is changed or unlinked.
   - Type a variable's name, or a formula such as `button + 2` or
     `(panel - 2 * margin) / 3`, in a layer's width, height, x, y, stroke width or corner
     radius field (lengths), rotation field (angles) or text size field (text sizes) to
@@ -162,9 +177,10 @@ layers panel on the right](doc/capture.png)
     one.
     Layers pasted into another project bring their color variables along, unless that
     project gives the name to another variable.
-- **Snap to anchors**: the centers, corners and edge middles of images snap to points
-  defined by the template, such as the button centers. So do a shape's center, the
-  corners and side middles of its box, or its points (its stroke left out).
+- **Snap to centers**: the centers, corners and edge middles of images snap to the
+  center of each closed shape of the template (its buttons, cutouts and outline), drawn
+  as a small cross in the element's color. So do a shape's center, the corners and side
+  middles of its box, or its points (its stroke left out). Hold Alt to drag freely.
 - **Snap to page and outline**: while a layer or group is moved, its edges and middle snap
   to the page's edges and middle, and to the template's outline: the edges and middle of
   its bounds, its straight sides, and the bleed line when there is a bleed. An edge being
@@ -181,11 +197,58 @@ layers panel on the right](doc/capture.png)
   so they can't be moved by accident, and clears them all.
 - **Align** layers or groups to the page or to the template.
 - **Undo / redo** for every change to the project.
-- **Templates** made of several elements, each in its own DXF file, with its own color and
+- **Templates** made of several elements, each a layer of the template's SVG, with its own color and
   visibility. The **Template** panel picks the template and shows or hides each
-  element's lines, and sets their color. The template sits on the page as its
-  `template.json` says (see [Templates](#templates)), whatever the project was saved
-  with.
+  element's lines, and sets their color. The template is centered on the page, as it
+  is drawn (see [Templates](#templates)).
+- **Template editor**: **Edit...** next to the Template panel's template field or **Tools > Templates > Edit
+  template...** opens the project's template, **Tools > Templates > New template...** a
+  new one; the project is put aside and the template opens in the window, under a
+  colored bar saying which one, with **Back to project** (ends editing, asking to save
+  first). **File > Save** (Ctrl+S) saves the template. A copy is named "name copy", or
+  "name copy (2)" and so on when that name is taken. The **Template properties** panel
+  ends with **Open folder** (the template's folder in the file manager, also in **Tools >
+  Templates**; a new template has one once saved, the copy of a provided one shows the
+  provided folder until then) and, in red, **Delete...** (your templates only, after
+  confirming; editing ends; when the open project uses it, the dialog asks which
+  template it uses instead, None by default, and Undo goes back). The
+  template is shown centered on its page, as a project shows it; the **Template
+  properties** panel, shown only meanwhile, sets its name, vendor, version and page,
+  and the shapes move with a new page, kept in its middle (Undo goes back). A template
+  needs a name and a version (the vendor is optional); the version is two numbers, x.y
+  (a new template starts at 1.0): without one, or in another form, it is shown as a
+  warning and can't be saved. A copy shows its **Source**, the template it was copied
+  from ("Cosmox - T16 - v1.1"), and starts at its version. **Compare** (beside Source, or
+  **Tools > Templates > Compare with source**) shows that source on the canvas left of a
+  divider, the template being edited right of it, as a project compares an updated
+  template; it only shows them (**End comparison**, at the bottom of the canvas, or
+  Compare again, ends it). It is available when the source is installed. A template provided with the
+  app can't be changed: editing it first says so and asks (**Edit a copy** or Cancel),
+  then edits a copy, named "name copy", that saving puts into your templates, and the project uses the copy from then on. Each element is a group in the
+  Layers panel (Outline, Action buttons...), its shapes inside; the Element button (an
+  outline with a plus) adds one (Outline is grayed out once the template has one: a
+  template has a single outline), and the Shape button adds a shape into the element
+  selected (it waits for one). A group's Properties show its element's **Kind**. There are no canvases, groups or stacking order: Group,
+  Ungroup and the move buttons are left out. A click on the canvas selects the smallest
+  shape under it, so clicking inside a button or a cutout picks that hole rather than the
+  outline around it (the outline is picked from its own area or the list). Every shape belongs to an element: a shape
+  can be dragged from an element to another, never out of them, and pasted only into
+  one. Shapes the SVG draws in no element (drawn outside its layers in Inkscape, say)
+  are listed at the top in red, with an error mark (also on the canvas, in the middle of
+  one selected, as the padlock of a locked layer): drag them into an element or delete
+  them before saving.
+  Shapes are drawn, moved, resized and point-edited as usual, in their element's color,
+  with no fill, paint or effects; images, texts and canvases can't be added, and the
+  Template, Page, View, Print and Colors in use panels are hidden meanwhile. A
+  group's Properties set its element's color. The **Variables** panel stays: lengths,
+  angles and numbers that the shapes' sizes, positions and rotations link to, as in a
+  project (a changed variable moves or resizes every shape using it). They are saved in
+  `template.json`, with each shape's links (see below). Circles come in as circles (with their
+  size), rectangles as rectangles (rounded or not), other outlines as paths whose points
+  can be edited. Saving writes `template.svg` (in mm, a layer per element:
+  circles as circles, arcs as arcs, curves as Beziers) and `template.json`; an older
+  template's DXF files are replaced by it. A project that uses the template takes the saved version when editing
+  ends (Undo goes back).
 - **Export** PNG, PDF and/or SVG. The Export window only asks what to export: the formats
   and which template lines are printed, saved with the project. How it is printed is
   set once for all projects in the **Print** panel: the resolution (72 to 1200 DPI),
@@ -352,60 +415,113 @@ release to publish by hand. Don't create the release on GitHub: see
 
 ## Templates
 
-The app looks for a `templates` folder next to the executable, then in the current
-directory. Each subfolder holding DXF files is one template. A `template.json` file in it
-describes the elements:
+The app looks for the provided templates in a `templates` folder next to the executable,
+then in the current directory, and for your own in the `templates` folder of its data
+folder (`~/.local/share/artworkcreator/templates` on Linux,
+`%APPDATA%\Artwork Creator\data\templates` on Windows). The provided ones are never
+changed by the app, so an update can replace them: editing one (**Edit...** in the
+Template panel) edits a copy, saved into your templates under a new name, and the
+project uses the copy from then on. Only your templates are changed, from the template
+editor (its **Template properties** panel: name, vendor, version and page, written
+into their `template.json`) and deleted (projects that use one keep their own copy of it). One of yours named like a provided one
+(the same folder name) is used instead of it. Each subfolder holding a `template.svg`
+(or, for an older template, DXF files) is one template. The SVG draws every element, each
+in a group of its own (an Inkscape layer), and a `template.json` file next to it
+describes the elements, each by its group's `id` (the app always writes its fields in
+the order shown below):
 
 ```json
 {
-  "vendor": "Cosmox",
   "name": "T16",
-  "units": "inch",
-  "elements": [
-    { "kind": "outline", "dxf": "outline.dxf" },
-    { "kind": "buttons", "dxf": "buttons.dxf", "name": "Action buttons" },
-    { "kind": "buttons", "dxf": "menu.dxf", "name": "Menu buttons" },
-    { "kind": "cutouts", "dxf": "holes.dxf", "name": "Fastener holes", "color": "#ff8c00" },
-    { "kind": "anchors", "dxf": "anchors.dxf", "name": "Button centers" }
-  ],
+  "vendor": "Cosmox",
+  "version": "1.1",
   "page": { "size": "A4", "orientation": "landscape" },
-  "placement": { "rotation": 90, "flip_x": false, "flip_y": true, "offset_mm": [0, 0] }
+  "elements": [
+    { "kind": "outline", "id": "outline", "name": "Outline" },
+    { "kind": "buttons", "id": "action-buttons", "name": "Action buttons" },
+    { "kind": "buttons", "id": "menu-buttons", "name": "Menu buttons" },
+    { "kind": "cutouts", "id": "fastener-holes", "name": "Fastener holes", "color": "#ff8c00" }
+  ]
 }
 ```
 
-- `kind` is `outline`, `buttons`, `cutouts` or `anchors`. The outline clips the artwork;
+The SVG can be edited in Inkscape: its units are worked out (a file in mm keeps its
+size; one in `px` is read at 96 per inch), and so are transforms, styles and the basic
+shapes. Only outlines count: text, images and fills are ignored. Every shape must be in
+an element's group: shapes outside them (in a group named by no element, or in none)
+are ignored by projects, and shown as errors in the template editor. An element whose
+group is missing draws nothing.
+
+The template editor adds what a template is made from. A copy names its `source`
+(`{ "name": "T16", "vendor": "Cosmox", "version": "1.1" }`; its name and version are
+required, its vendor optional: a `source` lacking its name or version is ignored, and a
+copy of a template without a version gets none). `variables` lists the
+template's variables, as a project saves them, and `bindings` the formulas of each
+linked shape, by the `id` the editor gives that shape in `template.svg`; `bindings_origin`
+is where the SVG's top-left corner was on the editor's page, X and Y formulas being page
+positions (they are moved along when the template opens elsewhere on its page). Projects
+only use the shapes as drawn:
+
+```json
+{
+  "variables": [ { "name": "pitch", "kind": "length", "value": 24 } ],
+  "bindings": { "action-buttons-1": { "x": "pitch * 2", "width": "pitch - 6" } },
+  "bindings_origin": [20, 20]
+}
+```
+
+Every template is checked when the templates are listed. One with problems has a
+warning mark in the Template panel's list (red for errors, amber for warnings), and its
+tooltip lists them. While a template is edited, the **Template check** panel lists its
+problems as you work, errors first; click one about a shape to select it. **Check**, at
+the bottom of the panel, checks it again at once. **Tools > Templates > Check template**
+shows the panel again after it was closed. A template with errors can still be saved, but you are told it isn't valid (only a missing version, or one not of the form x.y, stops it).
+What is checked:
+
+- Files and settings: `template.json` can be read, its colors, page and units are
+  understood, it has a version of the form x.y, each element names a group that
+  `template.svg` has (or a DXF file that is there), no two elements name the same group,
+  and no shape is in no element. A shape linked to a variable the template doesn't have
+  is a warning. An element
+  with no shapes is a warning.
+- Outline: the template has one outline element (none or more than one is an error), made of one
+  closed shape (a warning otherwise), and it fits on the page `page` asks for.
+- Holes: buttons and cutouts lie inside the outline without crossing it, and don't
+  overlap each other.
+- Every shape, in any element, is closed.
+
+- `kind` is `outline`, `buttons` or `cutouts`. The outline clips the artwork;
   buttons and cutouts are holes, left blank in the export unless turned off in the Print
   panel. **Preview cuts** (View panel) covers all of them on the canvas, at the
   **Cut opacity** set there, and hatches them, whatever the export prints: the panel is
   cut there anyway.
-- `anchors` are points that images snap to on the canvas: while an image is moved, its
-  center, a corner or the middle of an edge lands on an anchor that comes near, and a corner being resized or
-  distorted does too. Hold Alt to drag freely, or turn it off with **Snap to
-  anchors** in the View panel. Anchors are drawn as small crosses and cut nothing; they are printed only when
-  ticked under **Print lines** in the Export window. They are read from the DXF's POINT
-  entities, usually all in one `anchors.dxf`. The center of each closed shape counts too,
-  so an anchors element can also point at a buttons DXF to get the button centers. They
-  don't change the template's size or placement.
-- All DXF files of a template must share the same coordinates, as when they are exported
-  from one drawing. Outlines drawn as separate lines and arcs are joined automatically.
-- `units` (`mm`, `cm` or `inch`) is used when the DXF files don't declare their units.
+- The center of each closed shape (of its box: a circle's center) is a point images snap
+  to on the canvas (**Snap to centers**, View panel), drawn as a small cross. Centers are
+  not printed. An `anchors` element from an older version is ignored: the centers of the
+  buttons replace it.
+- An older template draws each element in its own DXF file, named by `"dxf":
+  "outline.dxf"` instead of `id`; it is still read, and saving it from the template
+  editor turns it into a `template.svg`. Its DXF files must share the same coordinates,
+  as when they are exported from one drawing. The template is centered on the page as drawn, never turned or
+  mirrored: draw it the way it sits on its page. Outlines drawn as separate lines and arcs are joined automatically.
+- `units` (`mm`, `cm` or `inch`) is used when DXF files don't declare their units (the
+  SVG says its own).
 - `page` is the page the template is made for: `size` is `A5`, `A4`, `A3`, `A2`, `Letter`,
   `Legal` or `Tabloid`, or `[width, height]` in mm for a custom page; `orientation` is
   `landscape` or `portrait`. Picking the template, or starting a new project with it, sets
   them in the Page panel (what `page` leaves out stays as it was); a project that is
   opened keeps its own page. They can still be changed there afterwards.
-- `vendor`, `name`, `color` (`#rrggbb`), `page` and `placement` are optional. Templates are listed
+- `vendor`, `name`, `color` (`#rrggbb`) and `page` are optional. Templates are listed
   by `vendor` in the Template panel, each vendor's models under its name (`name` is then
   the model's, shown as "Cosmox - T16" once picked); those without one come first. `name`
-  defaults to the folder's name. `placement` turns the template
-  (`rotation` 0, 90, 180 or 270 degrees), mirrors it (`flip_x`, `flip_y`) and moves it from
-  the middle of the page (`offset_mm`). Without it, the template is centered on the page
-  and turned a quarter when that fits the page better. The app doesn't change it.
-- Without `elements`, the folder's single DXF file is used as the outline.
+  defaults to the folder's name. A `placement` left by an older version is ignored.
+- Without `elements`, the whole `template.svg` (or else the folder's single DXF file) is
+  used as the outline.
 - `version` (optional, such as `"1.2"`) tells versions of a template apart for people;
   the app tells them apart by their files' contents in any case.
 
-A project archive keeps its own copy of its template (`template.json` and the DXF files)
+A project archive keeps its own copy of its template (`template.json` and its SVG or DXF
+files)
 and always opens with it. When the installed template of the same folder differs from that
 copy, now or after its files change on disk, a popup says so, with both versions, and
 offers to **Compare** them (the installed one left of a divider on the canvas, the
@@ -479,7 +595,7 @@ window says which, and briefly highlights that command's row and key (shown what
 search); remove it there first. The circular
 arrow at the end of the row gives a command its default keys back, those another command
 does not use by then, and
-**Reset all** does it for every command. Save As, Quit, Real size, the View panel's options and the window itself have no key by
+**Reset all** does it for every command. Save As, Quit, Real size, the View panel's options, the template commands (New, Edit, Delete, Open folder, Check) and the window itself have no key by
 default; you can give them one. Cut, Copy and Paste, and the arrow keys, keep theirs.
 Search by command name or by key. While you type in a text field, only the File commands
 work, and only with Ctrl or Alt held. The keys are kept between sessions; menus and
@@ -540,7 +656,7 @@ handles turn together; **Alt** moves one on its own. Double-click a point to mak
 smooth or sharp. **Del** removes the point picked last and the **arrow keys** nudge it.
 
 While drawing or editing points, **Shift** keeps the segment at 15° steps, and points snap
-to anchors unless **Alt** is held.
+to the template's shape centers unless **Alt** is held.
 
 While typing in a text layer on the canvas, the keys edit the text as in any text field:
 arrows, Home / End, Shift to select, Ctrl+A / C / X / V, Ctrl+Z for the typing itself.

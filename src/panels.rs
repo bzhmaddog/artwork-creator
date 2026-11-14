@@ -34,6 +34,10 @@ const FLOAT_SIZE: Vec2 = vec2(320.0, 420.0);
 /// The panels, each with its title and contents.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum PanelId {
+    /// The settings of the template being edited: only shown while one is.
+    TemplateSettings,
+    /// What makes the template being edited invalid: only shown while one is.
+    TemplateCheck,
     Template,
     Page,
     View,
@@ -51,7 +55,7 @@ pub enum PanelId {
 
 impl PanelId {
     /// In the order of the default layout and of View > Panels.
-    pub const ALL: [PanelId; 8] = [
+    pub const ALL: [PanelId; 10] = [
         PanelId::Template,
         PanelId::Page,
         PanelId::View,
@@ -60,10 +64,15 @@ impl PanelId {
         PanelId::ColorsInUse,
         PanelId::Layers,
         PanelId::Properties,
+        // On the left, alone there while a template is edited.
+        PanelId::TemplateSettings,
+        PanelId::TemplateCheck,
     ];
 
     pub fn title(self) -> &'static str {
         translate(match self {
+            PanelId::TemplateSettings => tr_noop!("TEMPLATE_PROPERTIES_TITLE"),
+            PanelId::TemplateCheck => tr_noop!("TEMPLATE_CHECK_TITLE"),
             PanelId::Template => tr_noop!("TEMPLATE_SECTION"),
             PanelId::Page => tr_noop!("PAGE_SECTION"),
             PanelId::View => tr_noop!("VIEW_SECTION"),
@@ -77,10 +86,11 @@ impl PanelId {
     }
 
     /// The narrowest width its contents fit in. The layer toolbar and the rows of
-    /// Properties need 310 points.
+    /// Properties need 310 points, the template's settings 300.
     pub fn min_width(self) -> f32 {
         match self {
             PanelId::Layers | PanelId::Properties => 310.0,
+            PanelId::TemplateSettings => 300.0,
             _ => 240.0,
         }
     }
@@ -211,6 +221,9 @@ struct Runtime {
     /// The rectangle each own window was opened with. The window is then left where
     /// the user puts it: a changed position would move it back.
     spawn: HashMap<PanelId, [f32; 4]>,
+    /// Panels left out for now, whether open or not (those that have no use while a
+    /// template is edited).
+    hidden: Vec<PanelId>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -222,7 +235,8 @@ pub struct Layout {
 }
 
 impl Default for Layout {
-    /// Template, Page, View, Print, Variables and Colors in use on the left; Layers and
+    /// Template, Page, View, Print, Variables, Colors in use, Template settings and
+    /// Template check (shown only while a template is edited) on the left; Layers and
     /// Properties on the right.
     fn default() -> Self {
         Self {
@@ -238,7 +252,11 @@ impl Default for Layout {
                     window_rect: None,
                 })
                 .collect(),
-            runtime: Runtime::default(),
+            // Until a template is edited.
+            runtime: Runtime {
+                hidden: vec![PanelId::TemplateSettings, PanelId::TemplateCheck],
+                ..Runtime::default()
+            },
         }
     }
 }
@@ -316,6 +334,16 @@ impl Layout {
         self.entry(id).open
     }
 
+    /// Leaves out `ids` (shown again with an empty list), keeping whether they are open.
+    pub fn set_hidden(&mut self, ids: &[PanelId]) {
+        self.runtime.hidden = ids.to_vec();
+    }
+
+    /// The panel is shown: open and not left out.
+    fn shown(&self, e: &Entry) -> bool {
+        e.open && !self.runtime.hidden.contains(&e.id)
+    }
+
     pub fn set_open(&mut self, id: PanelId, open: bool) {
         self.entry_mut(id).open = open;
     }
@@ -328,7 +356,7 @@ impl Layout {
     pub fn docked(&self, side: Side) -> Vec<PanelId> {
         self.entries
             .iter()
-            .filter(|e| e.open && e.place == Place::Docked(side))
+            .filter(|e| self.shown(e) && e.place == Place::Docked(side))
             .map(|e| e.id)
             .collect()
     }
@@ -337,7 +365,7 @@ impl Layout {
     fn shown_in(&self, place: Place) -> Vec<PanelId> {
         self.entries
             .iter()
-            .filter(|e| e.open && e.place == place)
+            .filter(|e| self.shown(e) && e.place == place)
             .map(|e| e.id)
             .collect()
     }

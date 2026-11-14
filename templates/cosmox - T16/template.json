@@ -1,20 +1,31 @@
 {
-  "vendor": "Cosmox",
   "name": "T16",
-  "version":"1.0",
+  "vendor": "Cosmox",
+  "version": "1.2",
+  "page": {
+    "size": "A4",
+    "orientation": "landscape"
+  },
   "elements": [
-    {"kind":"outline","dxf":"outline.dxf", "name": "Outline"},
-    {"kind":"buttons","dxf":"buttons.dxf", "name": "Action buttons"},
-    {"kind":"buttons","dxf":"menu.dxf","name":"Menu buttons"},
-    {"kind":"cutouts","dxf":"holes.dxf","name":"Fastener holes"},
-    {"kind":"anchors","dxf":"anchors.dxf","name":"Button centers"}
-  ],
-  "units": "inch",
-  "page": { "size": "A4", "orientation": "landscape" },
-  "placement": {
-    "rotation": 90,
-    "flip_x": true,
-    "flip_y": true,
-    "offset_mm": [0.0, 0.0]
-  }
+    {
+      "kind": "outline",
+      "id": "outline",
+      "name": "Outline"
+    },
+    {
+      "kind": "buttons",
+      "id": "action-buttons",
+      "name": "Action buttons"
+    },
+    {
+      "kind": "buttons",
+      "id": "menu-buttons",
+      "name": "Menu buttons"
+    },
+    {
+      "kind": "cutouts",
+      "id": "fastener-holes",
+      "name": "Fastener holes"
+    }
+  ]
 }

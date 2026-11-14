@@ -38,7 +38,7 @@ pub const STORAGE_KEY: &str = "autosave_minutes";
 
 /// The folder holding the sessions' folders: in the app's data folder.
 pub fn root() -> Option<PathBuf> {
-    eframe::storage_dir("Artwork Creator").map(|d| d.join("recovery"))
+    crate::data_dir().map(|d| d.join("recovery"))
 }
 
 /// What a copy is a copy of.

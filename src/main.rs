@@ -35,6 +35,7 @@ mod template;
 mod template_check;
 mod template_edit;
 mod template_geom;
+mod template_reference;
 mod template_svg;
 mod template_ui;
 mod text;
@@ -58,6 +59,15 @@ fn window_icon() -> std::sync::Arc<egui::IconData> {
     std::sync::Arc::new(icon)
 }
 
+/// The app's id: names its data folder, where eframe keeps the settings, and the
+/// `.desktop` file's name.
+const APP_ID: &str = "artwork-creator";
+
+/// The app's data folder, the one eframe keeps the settings in; it may not exist yet.
+pub fn data_dir() -> Option<std::path::PathBuf> {
+    eframe::storage_dir(APP_ID)
+}
+
 /// Starts the app, opening the project file given on the command line, if any.
 fn main() -> eframe::Result {
     // RUST_LOG overrides this. The title bar drawn on Wayland asks the desktop for its
@@ -77,7 +87,7 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default()
             .with_title("Artwork Creator")
             // Matches the `.desktop` file's name, for Linux desktops to show its icon.
-            .with_app_id("artwork-creator")
+            .with_app_id(APP_ID)
             .with_icon(window_icon())
             .with_inner_size([1280.0, 800.0])
             .with_min_inner_size([900.0, 600.0])

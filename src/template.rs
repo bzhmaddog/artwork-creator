@@ -29,21 +29,17 @@ pub const CONFIG_FILE: &str = "template.json";
 pub enum ElementKind {
     /// Edge of the panel: artwork outside it is not printed.
     Outline,
-    /// Button holes.
-    Buttons,
-    /// Other holes: screws, switches, windows.
-    Cutouts,
+    /// Holes: buttons, screws, switches, windows. Read from "buttons" and "cutouts", the
+    /// kinds of older templates.
+    #[serde(alias = "buttons", alias = "cutouts")]
+    Holes,
 }
 
 /// Number of element kinds, for per-kind settings arrays.
 pub const KINDS: usize = ElementKind::ALL.len();
 
 impl ElementKind {
-    pub const ALL: [ElementKind; 3] = [
-        ElementKind::Outline,
-        ElementKind::Buttons,
-        ElementKind::Cutouts,
-    ];
+    pub const ALL: [ElementKind; 2] = [ElementKind::Outline, ElementKind::Holes];
 
     /// Position in `ALL`, for per-kind settings arrays.
     pub fn index(self) -> usize {
@@ -54,8 +50,7 @@ impl ElementKind {
     pub fn label(self) -> &'static str {
         match self {
             ElementKind::Outline => tr_noop!("ELEMENT_OUTLINE"),
-            ElementKind::Buttons => tr_noop!("ELEMENT_BUTTONS"),
-            ElementKind::Cutouts => tr_noop!("ELEMENT_CUTOUTS"),
+            ElementKind::Holes => tr_noop!("ELEMENT_HOLES"),
         }
     }
 
@@ -63,8 +58,7 @@ impl ElementKind {
     pub fn default_color(self) -> [u8; 3] {
         match self {
             ElementKind::Outline => [255, 0, 255],
-            ElementKind::Buttons => [0, 170, 255],
-            ElementKind::Cutouts => [255, 140, 0],
+            ElementKind::Holes => [255, 140, 0],
         }
     }
 }
@@ -78,7 +72,8 @@ pub struct ElementTag {
 }
 
 /// Per-kind settings (`ElementKind::index`) as saved: a list longer than the kinds, from
-/// a version that had more (anchors, last), keeps the first ones; a shorter one is
+/// a version that had more (buttons then cutouts where holes are now, anchors last),
+/// keeps the first ones; a shorter one is
 /// completed with `fill`.
 pub fn per_kind<T: Copy>(saved: &[T], fill: [T; KINDS]) -> [T; KINDS] {
     std::array::from_fn(|i| saved.get(i).copied().unwrap_or(fill[i]))
@@ -109,7 +104,8 @@ pub struct ElementConfig {
     /// Display name. Defaults to the kind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    /// Line color as "#rrggbb". Defaults to a color per kind.
+    /// Line color as "#rrggbb". Always written by the template editor; one missing
+    /// takes its kind's: magenta for the outline, orange for holes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub color: Option<String>,
 }
@@ -166,6 +162,36 @@ pub struct TemplateConfig {
     /// along when the template opens elsewhere on its page.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub bindings_origin: Option<P2>,
+    /// A drawing, photo or PDF the shapes are drawn over in the template editor, never
+    /// shown anywhere else.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reference: Option<ReferenceConfig>,
+}
+
+/// The template editor's reference, in `template.json`: its file, in the template's
+/// folder, and where it lies.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ReferenceConfig {
+    /// Its file name in the template's folder.
+    pub file: String,
+    /// Its center, in mm from the top-left corner of the template's frame (y down).
+    pub center: P2,
+    /// Its width and height in mm.
+    pub size: P2,
+    #[serde(default)]
+    pub rotation: f32,
+    #[serde(default = "full")]
+    pub opacity: f32,
+    #[serde(default = "shown")]
+    pub visible: bool,
+}
+
+fn full() -> f32 {
+    1.0
+}
+
+fn shown() -> bool {
+    true
 }
 
 /// The template a copy was made from, in `template.json`: `{ "name": "T16", "vendor":
@@ -546,16 +572,9 @@ impl TemplateFiles {
 
     /// Writes the files into a folder named `id` of their own (under the system's
     /// temporary folder, once for each fingerprint) and returns it, to be read as an
-    /// installed template is. Names that would lead out of the folder are refused.
+    /// installed template is.
     pub fn unpack(&self, id: &str) -> Result<PathBuf, String> {
-        let normal = |name: &str| {
-            let p = Path::new(name);
-            (!name.is_empty()
-                && p.components()
-                    .all(|c| matches!(c, std::path::Component::Normal(_))))
-            .then(|| p.to_path_buf())
-        };
-        let id = normal(id)
+        let id = normal_path(id)
             .filter(|p| p.components().count() == 1)
             .unwrap_or_else(|| PathBuf::from("template"));
         let dir = std::env::temp_dir()
@@ -566,10 +585,19 @@ impl TemplateFiles {
         if done.is_file() {
             return Ok(dir);
         }
+        self.write_into(&dir)?;
+        std::fs::write(&done, b"")
+            .map_err(|e| tr!("CANNOT_WRITE_FILE", path = done.display(), e = e))?;
+        Ok(dir)
+    }
+
+    /// Writes the files into the folder `dir`, made if needed: an installed template.
+    /// Names that would lead out of the folder are refused.
+    pub fn write_into(&self, dir: &Path) -> Result<(), String> {
         let cannot =
             |path: &Path, e: std::io::Error| tr!("CANNOT_WRITE_FILE", path = path.display(), e = e);
         for (name, data) in &self.0 {
-            let Some(rel) = normal(name) else {
+            let Some(rel) = normal_path(name) else {
                 return Err(tr!("TEMPLATE_FILE_NAME_REFUSED", name = name));
             };
             let path = dir.join(rel);
@@ -578,9 +606,17 @@ impl TemplateFiles {
             }
             std::fs::write(&path, data.as_slice()).map_err(|e| cannot(&path, e))?;
         }
-        std::fs::write(&done, b"").map_err(|e| cannot(&done, e))?;
-        Ok(dir)
+        Ok(())
     }
+}
+
+/// `name` as a relative path that stays in its folder (no `..`, no root), or `None`.
+pub fn normal_path(name: &str) -> Option<PathBuf> {
+    let p = Path::new(name);
+    (!name.is_empty()
+        && p.components()
+            .all(|c| matches!(c, std::path::Component::Normal(_))))
+    .then(|| p.to_path_buf())
 }
 
 /// Parses "#rrggbb" (the # is optional).
@@ -730,6 +766,9 @@ pub struct TemplateElement {
     /// The center of each of its closed shapes (of its box: a circle's center), in
     /// template mm: images snap to them.
     pub centers: Vec<P2>,
+    /// The centers of its closed shapes that have an id in the template's SVG, with it,
+    /// in template mm: a project layer's position can be linked to them.
+    pub points: Vec<(String, P2)>,
 }
 
 /// Template geometry in mm, origin at the top-left of the bounding box of all its
@@ -765,7 +804,7 @@ pub fn templates_dir() -> Option<PathBuf> {
 
 /// The user's templates folder, in the app's data folder; it may not exist yet.
 pub fn user_templates_dir() -> Option<PathBuf> {
-    eframe::storage_dir("Artwork Creator").map(|d| d.join("templates"))
+    crate::data_dir().map(|d| d.join("templates"))
 }
 
 /// Lists every subfolder that is a template, sorted by display name.
@@ -1140,24 +1179,33 @@ pub fn load(entry: &TemplateEntry) -> Result<Template, String> {
         })?),
         None => None,
     };
-    // (source, paths, centers) in drawing mm.
+    // (source, paths, centers, named centers) in drawing mm.
     let mut elements = Vec::new();
     for src in &entry.sources {
-        let raw = if src.is_svg() {
-            item_paths(&crate::template_svg::read(&src.path, src.group.as_deref())?)
+        let (raw, points) = if src.is_svg() {
+            let items = crate::template_svg::read_with_ids(&src.path, src.group.as_deref())?;
+            let points: Vec<(String, [f64; 2])> = items
+                .iter()
+                .filter_map(|(id, item)| {
+                    let c = *centers(&item_paths(std::slice::from_ref(item))).first()?;
+                    Some((id.clone()?, c))
+                })
+                .collect();
+            let items: Vec<_> = items.into_iter().map(|(_, i)| i).collect();
+            (item_paths(&items), points)
         } else {
-            read_dxf(&src.path, units)?
+            (read_dxf(&src.path, units)?, Vec::new())
         };
         let paths = drop_duplicates(join_paths(raw));
         let centers = centers(&paths);
-        elements.push((src, paths, centers));
+        elements.push((src, paths, centers, points));
     }
 
     // One frame for all elements: the bounding box of their lines.
     let (mut min, mut max) = ([f64::MAX; 2], [f64::MIN; 2]);
     for p in elements
         .iter()
-        .flat_map(|(_, paths, _)| paths)
+        .flat_map(|(_, paths, _, _)| paths)
         .flat_map(|(pts, _)| pts)
     {
         min = [min[0].min(p[0]), min[1].min(p[1])];
@@ -1175,7 +1223,7 @@ pub fn load(entry: &TemplateEntry) -> Result<Template, String> {
     let to_frame = |p: &[f64; 2]| [(p[0] - min[0]) as f32, (max[1] - p[1]) as f32];
     let elements = elements
         .into_iter()
-        .map(|(src, paths, centers)| TemplateElement {
+        .map(|(src, paths, centers, points)| TemplateElement {
             kind: src.kind,
             name: src.name.clone(),
             color: src.color,
@@ -1187,6 +1235,10 @@ pub fn load(entry: &TemplateEntry) -> Result<Template, String> {
                 })
                 .collect(),
             centers: centers.iter().map(to_frame).collect(),
+            points: points
+                .iter()
+                .map(|(id, p)| (id.clone(), to_frame(p)))
+                .collect(),
         })
         .collect();
 
@@ -1199,6 +1251,25 @@ pub fn load(entry: &TemplateEntry) -> Result<Template, String> {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn a_project_copy_installs_as_the_same_template() {
+        let source = fixture();
+        let files = TemplateFiles::read(&source).unwrap();
+        let dir = std::env::temp_dir().join(format!("artwork-install-{}", std::process::id()));
+        let folder = dir.join(&source.id);
+        files.write_into(&folder).unwrap();
+        let installed = read_entry(&folder).expect("a template");
+        assert_eq!(
+            TemplateFiles::read(&installed).unwrap().fingerprint(),
+            files.fingerprint()
+        );
+        // Names leading out of the folder are refused.
+        let bad = TemplateFiles(vec![("../x".into(), std::sync::Arc::new(vec![]))]);
+        assert!(bad.write_into(&folder).is_err());
+        assert!(normal_path("a/../b").is_none() && normal_path("T16").is_some());
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn shapes_drawn_twice_are_kept_once() {
@@ -1248,9 +1319,9 @@ pub(crate) mod tests {
             summary,
             [
                 (ElementKind::Outline, "Outline", 1),
-                (ElementKind::Buttons, "Action buttons", 3),
-                (ElementKind::Buttons, "Menu buttons", 2),
-                (ElementKind::Cutouts, "Fastener holes", 2),
+                (ElementKind::Holes, "Action buttons", 3),
+                (ElementKind::Holes, "Menu buttons", 2),
+                (ElementKind::Holes, "Fastener holes", 2),
             ]
         );
         // Everything is closed, the panel edge included (drawn as separate pieces).
@@ -1507,6 +1578,34 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn shapes_with_an_id_are_named_points() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("templates");
+        let entry = scan(&dir)
+            .into_iter()
+            .find(|t| t.id.contains("T16"))
+            .expect("Cosmox T16");
+        let t = load(&entry).unwrap();
+        let points: Vec<&(String, P2)> = t.elements.iter().flat_map(|e| &e.points).collect();
+        assert_eq!(points.len(), 31);
+        let (_, p) = points
+            .iter()
+            .find(|(id, _)| id == "action-buttons-1")
+            .unwrap();
+        // Among the element's centers.
+        let buttons = t
+            .elements
+            .iter()
+            .find(|e| e.name == "Action buttons")
+            .unwrap();
+        assert!(
+            buttons
+                .centers
+                .iter()
+                .any(|c| (c[0] - p[0]).abs() < 1e-3 && (c[1] - p[1]).abs() < 1e-3)
+        );
+    }
+
+    #[test]
     fn closed_shapes_give_their_centers_and_anchors_are_left_out() {
         let dir = std::env::temp_dir().join(format!("artwork-centers-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1674,9 +1773,9 @@ pub(crate) mod tests {
         // Outline, buttons, cutouts and anchors.
         assert_eq!(
             per_kind(&[false, true, true, false], [true; KINDS]),
-            [false, true, true]
+            [false, true]
         );
-        assert_eq!(per_kind(&[false], [true; KINDS]), [false, true, true]);
+        assert_eq!(per_kind(&[false], [true; KINDS]), [false, true]);
     }
 
     #[test]
@@ -1713,11 +1812,7 @@ pub(crate) mod tests {
         let kinds: Vec<_> = t.elements.iter().map(|e| e.kind).collect();
         assert_eq!(
             kinds,
-            [
-                ElementKind::Outline,
-                ElementKind::Buttons,
-                ElementKind::Cutouts
-            ]
+            [ElementKind::Outline, ElementKind::Holes, ElementKind::Holes]
         );
         assert_eq!(t.elements[1].color, Some([0, 255, 0]));
         assert_eq!(t.elements[2].name, "Screws");

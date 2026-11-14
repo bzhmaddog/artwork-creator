@@ -5,7 +5,7 @@
 
 A desktop app for designing printed artwork for arcade controllers and fightsticks.
 
-Load a controller template drawn in SVG (outline, buttons, cutouts), arrange your
+Load a controller template drawn in SVG (an outline and holes), arrange your
 images on top, and export print-ready PNG, PDF or SVG at true size. The artwork is clipped to the
 panel outline and left blank in the button and cutout holes. Runs on Windows and Linux.
 Built in Rust with [egui](https://github.com/emilk/egui).
@@ -137,11 +137,13 @@ layers panel on the right](doc/capture.png)
     button is filled with the link color), and follows when a variable changes. A field takes the variables of its
     kind and numbers; a formula using another kind shows an error and leaves the field
     as it is. Typing a plain number in a linked field, or dragging its value, unlinks
-    it, and so does moving, resizing or turning the layer some other way (on the canvas,
-    with Align or the arrow keys).
+    it, and so does moving, resizing or turning the layer some other way (on the canvas
+    or with Align). The arrow keys don't move a layer along a linked X or Y.
   - The **fx** button inside each of those fields, at its right end, opens the formula
     editor: the formula (the field's value to start with), its result or what is wrong
-    with it, and the variables the field takes, a click inserting one at the cursor.
+    with it, and the variables the field takes, a click inserting one at the cursor: the
+    template's points come folded by family (`action_buttons (16)`), and a search box
+    above them narrows the list.
     **OK** (or Enter) links the field to the formula, or just sets the value when it
     names no variable; **Unlink, keeping the value** unlinks the field. The fx becomes a
     badge filled with the link color when the field is linked, so the fields using
@@ -178,9 +180,19 @@ layers panel on the right](doc/capture.png)
     Layers pasted into another project bring their color variables along, unless that
     project gives the name to another variable.
 - **Snap to centers**: the centers, corners and edge middles of images snap to the
-  center of each closed shape of the template (its buttons, cutouts and outline), drawn
+  center of each closed shape of the template (its holes and outline), drawn
   as a small cross in the element's color. So do a shape's center, the corners and side
   middles of its box, or its points (its stroke left out). Hold Alt to drag freely.
+  When a single layer is dropped on the center of a template shape that has an id in
+  the template's SVG (the template editor gives one to every shape drawn in one piece
+  when it saves, and keeps it from save to save), the app asks whether to link its position to it: its X and Y then
+  become formulas over the shape's position (`action_buttons_3_x`, `action_buttons_3_y`,
+  plus the offset of the snapped corner or edge), so the layer follows the shape when the
+  template changes. Edit the formulas to change the offset. A layer whose position
+  is linked stays linked while it is dragged, a warning next to the pointer while it is
+  near where it started: released there, it goes back to its linked position; released
+  farther, it is unlinked and stays where it is dropped. If the shape is no longer in the template, the layer stays put and its
+  links show as broken.
 - **Snap to page and outline**: while a layer or group is moved, its edges and middle snap
   to the page's edges and middle, and to the template's outline: the edges and middle of
   its bounds, its straight sides, and the bleed line when there is a bleed. An edge being
@@ -205,8 +217,8 @@ layers panel on the right](doc/capture.png)
   template...** opens the project's template, **Tools > Templates > New template...** a
   new one; the project is put aside and the template opens in the window, under a
   colored bar saying which one, with **Back to project** (ends editing, asking to save
-  first). **File > Save** (Ctrl+S) saves the template. A copy is named "name copy", or
-  "name copy (2)" and so on when that name is taken. The **Template properties** panel
+  first). **File > Save** (Ctrl+S) saves the template. A copy is named "Copy of name", or
+  "Copy (2) of name" and so on when that name is taken. The **Template properties** panel
   ends with **Open folder** (the template's folder in the file manager, also in **Tools >
   Templates**; a new template has one once saved, the copy of a provided one shows the
   provided folder until then) and, in red, **Delete...** (your templates only, after
@@ -224,8 +236,8 @@ layers panel on the right](doc/capture.png)
   template; it only shows them (**End comparison**, at the bottom of the canvas, or
   Compare again, ends it). It is available when the source is installed. A template provided with the
   app can't be changed: editing it first says so and asks (**Edit a copy** or Cancel),
-  then edits a copy, named "name copy", that saving puts into your templates, and the project uses the copy from then on. Each element is a group in the
-  Layers panel (Outline, Action buttons...), its shapes inside; the Element button (an
+  then edits a copy, named "Copy of name" unless you change the name there, that saving puts into your templates, and the project uses the copy from then on. Each element is a group in the
+  **Elements** panel (the Layers panel, renamed while a template is edited: Outline, Action buttons...), its shapes inside; the Element button (an
   outline with a plus) adds one (Outline is grayed out once the template has one: a
   template has a single outline), and the Shape button adds a shape into the element
   selected (it waits for one). A group's Properties show its element's **Kind**. There are no canvases, groups or stacking order: Group,
@@ -237,6 +249,15 @@ layers panel on the right](doc/capture.png)
   are listed at the top in red, with an error mark (also on the canvas, in the middle of
   one selected, as the padlock of a locked layer): drag them into an element or delete
   them before saving.
+  A **reference** to draw the template over: the Reference button (beside Element) or
+  **Tools > Templates > Reference...** takes a DXF, SVG, PNG or PDF file (a PDF's first
+  page), shown at its true size (a PNG from its resolution, 96 DPI when it says none),
+  centered on the template. It is the last row of the Elements panel, below a line,
+  always under every element; it can't be dragged among them. Selected, it is moved,
+  resized and turned on the canvas or in Properties, which also set its opacity; its eye
+  hides it. Choosing another file replaces it, Delete removes it. Saving copies it into
+  the template's folder as `reference.<extension>`, with where it lies in
+  `template.json`. Only the template editor shows it: projects, export and print never do.
   Shapes are drawn, moved, resized and point-edited as usual, in their element's color,
   with no fill, paint or effects; images, texts and canvases can't be added, and the
   Template, Page, View, Print and Colors in use panels are hidden meanwhile. A
@@ -252,7 +273,7 @@ layers panel on the right](doc/capture.png)
 - **Export** PNG, PDF and/or SVG. The Export window only asks what to export: the formats
   and which template lines are printed, saved with the project. How it is printed is
   set once for all projects in the **Print** panel: the resolution (72 to 1200 DPI),
-  whether the outside of the outline and the inside of buttons and of cutouts are left
+  whether the outside of the outline and the inside of the holes are left
   blank or printed over, the bleed, the marks, mirroring and sheets. In the PDF, template lines, text and shapes stay sharp vectors
   (text as outlines, so no font is needed to print it), gradients included; text and
   shape layers with effects, inside a semi-transparent group, distorted with a gradient,
@@ -279,9 +300,10 @@ layers panel on the right](doc/capture.png)
   (150 DPI by default, set in the Print panel) are flagged with a ⚠ in the layer list,
   in Properties, in the Print panel and in the Export window. The resolution is measured where the image is
   stretched most, distortion included.
-- **Mirrored export**: the whole print flipped left to right, template lines and marks
-  included, to print on the back of clear film or plexi and see it the right way through
-  it.
+- **Mirrored export**: **Mirror** in the Print panel flips the whole print
+  **Horizontally** (left to right) and / or **Vertically** (top to bottom), template lines
+  and marks included, to print on the back of clear film or plexi and see it the right
+  way through it.
 - **Print margins and marks**: a **bleed** (Print panel) prints the artwork a few mm
   past the outline and into the holes, so a cut slightly off the line leaves no blank
   edge: what is under that band is printed, so a shape meant to reach the cut should
@@ -437,10 +459,10 @@ the order shown below):
   "version": "1.1",
   "page": { "size": "A4", "orientation": "landscape" },
   "elements": [
-    { "kind": "outline", "id": "outline", "name": "Outline" },
-    { "kind": "buttons", "id": "action-buttons", "name": "Action buttons" },
-    { "kind": "buttons", "id": "menu-buttons", "name": "Menu buttons" },
-    { "kind": "cutouts", "id": "fastener-holes", "name": "Fastener holes", "color": "#ff8c00" }
+    { "kind": "outline", "id": "outline", "name": "Outline", "color": "#ff00ff" },
+    { "kind": "holes", "id": "action-buttons", "name": "Action buttons", "color": "#00aaff" },
+    { "kind": "holes", "id": "menu-buttons", "name": "Menu buttons", "color": "#00aaff" },
+    { "kind": "holes", "id": "fastener-holes", "name": "Fastener holes", "color": "#ff8c00" }
   ]
 }
 ```
@@ -486,13 +508,14 @@ What is checked:
   with no shapes is a warning.
 - Outline: the template has one outline element (none or more than one is an error), made of one
   closed shape (a warning otherwise), and it fits on the page `page` asks for.
-- Holes: buttons and cutouts lie inside the outline without crossing it, and don't
+- Holes: holes lie inside the outline without crossing it, and don't
   overlap each other.
 - Every shape, in any element, is closed.
 
-- `kind` is `outline`, `buttons` or `cutouts`. The outline clips the artwork;
-  buttons and cutouts are holes, left blank in the export unless turned off in the Print
-  panel. **Preview cuts** (View panel) covers all of them on the canvas, at the
+- `kind` is `outline` (one per template) or `holes` (as many elements as needed). The
+  outline clips the artwork; holes are left blank in the export unless turned off in the Print
+  panel. `buttons` and `cutouts`, from older templates, are read as `holes`; the
+  template is saved with `holes`. **Preview cuts** (View panel) covers all of them on the canvas, at the
   **Cut opacity** set there, and hatches them, whatever the export prints: the panel is
   cut there anyway.
 - The center of each closed shape (of its box: a circle's center) is a point images snap
@@ -514,7 +537,9 @@ What is checked:
 - `vendor`, `name`, `color` (`#rrggbb`) and `page` are optional. Templates are listed
   by `vendor` in the Template panel, each vendor's models under its name (`name` is then
   the model's, shown as "Cosmox - T16" once picked); those without one come first. `name`
-  defaults to the folder's name. A `placement` left by an older version is ignored.
+  defaults to the folder's name. An element's `color` is its line color on the canvas
+  and in the export, always written by the template editor; one missing is magenta for
+  the outline, orange for holes. A `placement` left by an older version is ignored.
 - Without `elements`, the whole `template.svg` (or else the folder's single DXF file) is
   used as the outline.
 - `version` (optional, such as `"1.2"`) tells versions of a template apart for people;
@@ -524,11 +549,15 @@ A project archive keeps its own copy of its template (`template.json` and its SV
 files)
 and always opens with it. When the installed template of the same folder differs from that
 copy, now or after its files change on disk, a popup says so, with both versions, and
-offers to **Compare** them (the installed one left of a divider on the canvas, the
-project's right of it; drag the divider, and choose from the bar at the bottom of the
+offers to **Compare** them (the project's copy left of a divider on the canvas, the
+installed one right of it; drag the divider, and choose from the bar at the bottom of the
 canvas), **Use installed** (the project takes it and keeps it; Undo goes back), or **Keep
 project's** (not asked again for that installed version). Esc decides later: the Template
 panel then has a **Review...** button that brings the popup back.
+When the project's template isn't installed at all (deleted, or the project comes from
+another computer), opening the project asks whether to **Install** the copy it keeps into
+your templates, where it is listed and can be edited from then on; **Not now** (or Esc)
+opens the project with its copy as usual.
 
 ## Plugins
 
@@ -616,6 +645,7 @@ The default keys:
 | Type in a text layer on the canvas | Double-click it (straight text only); Esc or a click outside it to stop |
 | Finish drawing a polyline or polygon | Double-click, Enter, Esc or right-click; a click on the first point closes it |
 | Edit the points of a line, polyline, polygon or path | Double-click it; Esc or selecting something else to stop |
+| End comparing the edited template with its source | Esc, or End comparison |
 | Add a point while editing points | Double-click a segment |
 | Make a point smooth or sharp | Double-click it while editing points |
 | Place a smooth point while drawing | Press and drag |
@@ -624,6 +654,8 @@ The default keys:
 | Group / Ungroup | Ctrl+G / Ctrl+Shift+G |
 | Delete layer | Del or Backspace |
 | Nudge by 1 mm (10 mm with Shift) | Arrow keys |
+| Tilt the selected layer in 3D (Shift: 15° steps) | Ctrl+drag on it |
+| Select the layer above / below (the layer list clicked last) | Up / Down |
 | Fit page in view | F |
 | Select / Pencil / Brush / Eraser tool (with a closed shape selected) | V / P / B / E (Esc: back to Select) |
 | Clear the paint in the selected shape | Ctrl+Shift+Delete |
@@ -638,6 +670,14 @@ On the canvas, with a layer selected:
 - **Corner handles** scale; **Shift** scales width and height freely.
 - **Distort** (in Properties) makes corner handles move one corner at a time, for
   perspective. **Holding Ctrl** swaps between resizing and distorting while you drag.
+- **3D tilt** (in Properties, under Rotation) turns a layer in 3D around its center: **x**
+  takes its top away from you, **y** its right side (negative values bring them toward
+  you), up to 85°. On the canvas, **Ctrl+drag on the selected layer** tilts it: up and down
+  tip its top, left and right turn its sides (**Shift** snaps to 15°).
+  **Perspective** sets how strong the depth looks, from 0 (parallel
+  lines stay parallel) to 1. Effects such as a halftone are applied before, so they
+  recede with the layer. The tilts can be linked to variables like the rotation;
+  Distort's corners move on top of the tilt, and **Reset** clears both.
 - **Edge handles** stretch one side; **Alt** stretches both sides from the center.
 - **Rotation handle** rotates; **Shift** snaps to 15° steps.
 - **Ctrl+Alt** on a corner or edge handle of a shape painted in: its paint does the

@@ -58,6 +58,8 @@ pub struct ExportSettings {
     pub tile_offset_mm: P2,
     /// Mirror the page left to right, to print on the back of clear film or plexi.
     pub mirror: bool,
+    /// Mirror the page top to bottom.
+    pub mirror_vertical: bool,
     /// Image layers printed below this resolution (DPI) are flagged.
     pub min_image_dpi: u32,
 }
@@ -137,10 +139,27 @@ fn tile_path(base: &Path, tile: print::Tile, ext: &str) -> PathBuf {
     base.with_file_name(format!("{stem}-r{}c{}.{ext}", tile.row + 1, tile.col + 1))
 }
 
-/// `print_lines` as saved, also by a version that had more element kinds.
+/// `print_lines` as saved, also by a version that had more element kinds: a list in a
+/// project's JSON, a tuple in the app's preferences (RON), which tells them apart.
 fn print_lines_saved<'de, D: serde::Deserializer<'de>>(d: D) -> Result<[bool; KINDS], D::Error> {
-    use serde::Deserialize;
-    let saved = Vec::<bool>::deserialize(d)?;
+    struct Flags;
+    impl<'de> serde::de::Visitor<'de> for Flags {
+        type Value = Vec<bool>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a list of booleans")
+        }
+        fn visit_seq<A: serde::de::SeqAccess<'de>>(
+            self,
+            mut seq: A,
+        ) -> Result<Vec<bool>, A::Error> {
+            let mut out = Vec::new();
+            while let Some(b) = seq.next_element()? {
+                out.push(b);
+            }
+            Ok(out)
+        }
+    }
+    let saved = d.deserialize_any(Flags)?;
     Ok(crate::template::per_kind(&saved, [true; KINDS]))
 }
 
@@ -164,6 +183,7 @@ impl Default for ExportSettings {
             tile_marks: true,
             tile_offset_mm: [0.0, 0.0],
             mirror: false,
+            mirror_vertical: false,
             min_image_dpi: 150,
         }
     }
@@ -941,7 +961,7 @@ pub(crate) mod tests {
         Scene::new(
             &doc,
             Some(&tpl),
-            [[255, 0, 255]; crate::template::KINDS],
+            &[[255, 0, 255]; crate::template::KINDS],
             [true; crate::template::KINDS],
             Cuts::default(),
         )
@@ -1053,7 +1073,7 @@ pub(crate) mod tests {
         let scene = Scene::new(
             &doc,
             None,
-            [[255, 0, 255]; crate::template::KINDS],
+            &[[255, 0, 255]; crate::template::KINDS],
             [true; crate::template::KINDS],
             Cuts::default(),
         );
@@ -1139,7 +1159,7 @@ pub(crate) mod tests {
         let scene = Scene::new(
             &doc,
             None,
-            [[255, 0, 255]; crate::template::KINDS],
+            &[[255, 0, 255]; crate::template::KINDS],
             [true; crate::template::KINDS],
             Cuts::default(),
         );
@@ -1198,7 +1218,7 @@ pub(crate) mod tests {
             let scene = Scene::new(
                 &doc,
                 None,
-                [[255, 0, 255]; crate::template::KINDS],
+                &[[255, 0, 255]; crate::template::KINDS],
                 [true; crate::template::KINDS],
                 Cuts::default(),
             );
@@ -1233,7 +1253,7 @@ pub(crate) mod tests {
         let scene = Scene::new(
             &doc,
             None,
-            [[255, 0, 255]; crate::template::KINDS],
+            &[[255, 0, 255]; crate::template::KINDS],
             [true; crate::template::KINDS],
             Cuts::default(),
         );
@@ -1319,7 +1339,7 @@ pub(crate) mod tests {
         let scene = Scene::new(
             &doc,
             None,
-            [[255, 0, 255]; crate::template::KINDS],
+            &[[255, 0, 255]; crate::template::KINDS],
             [true; crate::template::KINDS],
             Cuts::default(),
         );
@@ -1426,7 +1446,7 @@ pub(crate) mod tests {
         let scene = Scene::new(
             &doc,
             None,
-            [[255, 0, 255]; crate::template::KINDS],
+            &[[255, 0, 255]; crate::template::KINDS],
             [true; crate::template::KINDS],
             Cuts::default(),
         );
@@ -1549,25 +1569,35 @@ pub(crate) mod tests {
         let scene = || text_scene(false).with_marks(true, true);
         let dpi = 254.0;
         let plain = render::compose(&scene(), dpi, true).unwrap();
-        let mirrored = render::compose(&scene().mirrored(), dpi, true).unwrap();
         let (w, h) = (plain.width(), plain.height());
         assert_eq!(w as f32, scene().page_mm[0] * 10.0);
-        let mut differ = 0;
-        for y in 0..h {
-            for x in 0..w {
-                let a = plain.pixel(x, y).unwrap();
-                let b = mirrored.pixel(w - 1 - x, y).unwrap();
-                let d = [
-                    a.red().abs_diff(b.red()),
-                    a.green().abs_diff(b.green()),
-                    a.blue().abs_diff(b.blue()),
-                ];
-                if d.iter().any(|&d| d > 40) {
-                    differ += 1;
+        // Left to right, top to bottom, both.
+        for (hor, ver) in [(true, false), (false, true), (true, true)] {
+            let mirrored = render::compose(&scene().mirrored(hor, ver), dpi, true).unwrap();
+            let mut differ = 0;
+            for y in 0..h {
+                for x in 0..w {
+                    let a = plain.pixel(x, y).unwrap();
+                    let (mx, my) = (
+                        if hor { w - 1 - x } else { x },
+                        if ver { h - 1 - y } else { y },
+                    );
+                    let b = mirrored.pixel(mx, my).unwrap();
+                    let d = [
+                        a.red().abs_diff(b.red()),
+                        a.green().abs_diff(b.green()),
+                        a.blue().abs_diff(b.blue()),
+                    ];
+                    if d.iter().any(|&d| d > 40) {
+                        differ += 1;
+                    }
                 }
             }
+            assert!(
+                differ < (w * h) as usize / 2000,
+                "{hor} {ver}: {differ} pixels differ"
+            );
         }
-        assert!(differ < (w * h) as usize / 2000, "{differ} pixels differ");
         // Something to mirror: the page isn't symmetric.
         assert!((0..w).any(|x| plain.pixel(x, h / 2) != plain.pixel(w - 1 - x, h / 2)));
 
@@ -1585,7 +1615,10 @@ pub(crate) mod tests {
                 .unwrap()
         };
         let page_w = mm_to_pt(scene().page_mm[0]);
-        for (a, b) in letters(&scene()).iter().zip(letters(&scene().mirrored())) {
+        for (a, b) in letters(&scene())
+            .iter()
+            .zip(letters(&scene().mirrored(true, false)))
+        {
             assert!((a - (page_w - b)).abs() < 0.01, "{a} {b}");
         }
     }
@@ -1600,7 +1633,7 @@ pub(crate) mod tests {
         let scene = Scene::new(
             &doc,
             Some(&tpl),
-            [[255, 0, 255]; crate::template::KINDS],
+            &[[255, 0, 255]; crate::template::KINDS],
             [true; crate::template::KINDS],
             Cuts::default(),
         );
@@ -1632,5 +1665,36 @@ pub(crate) mod tests {
         assert_eq!(err, render::CANCELED);
         assert!(!dir.join("gone.png").exists() && !dir.join("gone.pdf").exists());
         std::fs::remove_dir_all(&dir).ok();
+    }
+}
+
+#[cfg(test)]
+mod settings_tests {
+    use super::*;
+
+    #[test]
+    fn print_settings_come_back_from_the_app_preferences() {
+        let s = ExportSettings {
+            mirror_vertical: true,
+            cuts: Cuts {
+                blank_holes: false,
+                ..Default::default()
+            },
+            dpi: 600,
+            ..Default::default()
+        };
+        // As eframe saves and reads its values.
+        let saved = ron::ser::to_string(&s).unwrap();
+        let read: ExportSettings = ron::from_str(&saved).unwrap();
+        assert_eq!(read, s);
+        // Saved by an older version: more element kinds, cuts named otherwise.
+        let old = "(png:true,pdf:true,svg:false,dpi:450,print_lines:(true,false,true,false),\
+            cuts:(clip_to_outline:true,blank_buttons:true,blank_cutouts:true),bleed_mm:2.0,\
+            crop_marks:false,registration_marks:false,tile:false,sheet:A4,\
+            sheet_orientation:Portrait,sheet_margin_mm:10.0,tile_overlap_mm:10.0,\
+            tile_marks:true,tile_offset_mm:(0.0,0.0),mirror:true,min_image_dpi:150)";
+        let read: ExportSettings = ron::from_str(old).unwrap();
+        assert_eq!((read.dpi, read.bleed_mm, read.mirror), (450, 2.0, true));
+        assert_eq!(read.print_lines, [true, false]);
     }
 }

@@ -395,14 +395,14 @@ mod shadow_tests {
         let export = Scene::new(
             &doc,
             None,
-            colors,
+            &colors,
             [false; crate::template::KINDS],
             Cuts::default(),
         );
         let screen = Scene::preview(
             &doc,
             None,
-            colors,
+            &colors,
             [false; crate::template::KINDS],
             Cuts::default(),
         );

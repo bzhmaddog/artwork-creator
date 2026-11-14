@@ -32,6 +32,9 @@ impl Effect for Halftone {
     fn params(&self) -> Vec<Param> {
         vec![
             Param::float("size", "Dot spacing", 2.0, 100.0, 8.0).unit(" px"),
+            Param::float("dot_size", "Dot size", 0.0, 100.0, 100.0)
+                .unit(" %")
+                .decimals(0),
             Param::float("angle", "Angle", 0.0, 90.0, 45.0)
                 .unit("°")
                 .decimals(0),
@@ -48,6 +51,13 @@ impl Effect for Halftone {
 
     fn apply(&self, img: &mut Image, v: &Values, scale: f32) -> Result<(), String> {
         let cell = (v.f32("size") * scale).max(2.0);
+        // How large the dots are, from none to as large as the darkness makes them;
+        // full size in a project saved before there was this choice.
+        let dot_size = v
+            .json()
+            .get("dot_size")
+            .and_then(|x| x.as_f64())
+            .map_or(1.0, |x| (x as f32 / 100.0).clamp(0.0, 1.0));
         let (sin, cos) = v.f32("angle").to_radians().sin_cos();
         let one_ink = v.choice("style") != "color";
         let ink = v.color("ink").map(|c| c as f32);
@@ -105,7 +115,7 @@ impl Effect for Halftone {
                 // at full darkness the dot reaches the cell's corners.
                 let dark = (1.0 - luma) * alpha / 9.0;
                 *c = Cell {
-                    radius: cell * std::f32::consts::FRAC_1_SQRT_2 * dark.sqrt(),
+                    radius: cell * std::f32::consts::FRAC_1_SQRT_2 * dark.sqrt() * dot_size,
                     color,
                 };
             }
@@ -156,3 +166,35 @@ export_plugin!(
     version: env!("CARGO_PKG_VERSION"),
     effects: [Halftone],
 );
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// How much of a 64 x 64 mid-gray square the dots cover, out of 1, with these
+    /// values.
+    fn ink(json: &str) -> f32 {
+        let (w, h) = (64u32, 64u32);
+        // Premultiplied mid gray, opaque.
+        let mut px = [128u8, 128, 128, 255].repeat((w * h) as usize);
+        let mut img = Image::new(&mut px, w, h, w as usize * 4).unwrap();
+        let v = Values::from_json(json).unwrap();
+        Halftone.apply(&mut img, &v, 1.0).unwrap();
+        let dark = px.chunks(4).filter(|p| p[0] < 64).count();
+        dark as f32 / (w * h) as f32
+    }
+
+    #[test]
+    fn dot_size_leaves_room_between_the_dots() {
+        let base =
+            r##""size": 8, "angle": 0, "style": "ink", "ink": "#000000ff", "paper": "#ffffffff""##;
+        let full = ink(&format!("{{{base}, \"dot_size\": 100}}"));
+        let half = ink(&format!("{{{base}, \"dot_size\": 50}}"));
+        let none = ink(&format!("{{{base}, \"dot_size\": 0}}"));
+        // Area goes with the square of the size.
+        assert!((half - full / 4.0).abs() < 0.05, "{full} {half}");
+        assert_eq!(none, 0.0);
+        // Saved before Dot size: full size.
+        assert_eq!(ink(&format!("{{{base}}}")), full);
+    }
+}

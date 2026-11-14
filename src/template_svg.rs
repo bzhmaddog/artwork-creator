@@ -134,6 +134,7 @@ fn path_items(p: &usvg::Path) -> Vec<Item> {
 /// What the group of id `id` of the SVG at `path` draws (the whole drawing for `None`),
 /// in mm, y up, from the top-left corner of the SVG's canvas. A group that isn't there
 /// draws nothing.
+#[cfg_attr(not(test), allow(dead_code))] // Loading uses `read_with_ids`.
 pub fn read(path: &Path, id: Option<&str>) -> Result<Vec<Item>, String> {
     let tree = parse(path)?;
     let group = match id {

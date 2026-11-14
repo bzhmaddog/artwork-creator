@@ -190,10 +190,10 @@ impl PlacedElement {
 pub struct Cuts {
     /// Nothing outside the outline is printed.
     pub clip_to_outline: bool,
-    /// Nothing is printed inside buttons.
-    pub blank_buttons: bool,
-    /// Nothing is printed inside cutouts.
-    pub blank_cutouts: bool,
+    /// Nothing is printed inside the holes. Read from `blank_buttons` too, saved by
+    /// versions that had buttons and cutouts.
+    #[serde(alias = "blank_buttons")]
+    pub blank_holes: bool,
     /// The artwork goes this far past the cut lines, in mm, so a cut slightly off the
     /// line leaves no blank edge: the outline grows by it and the holes shrink by it.
     /// Set from the project's bleed, so not saved with the export settings.
@@ -203,7 +203,7 @@ pub struct Cuts {
 
 impl std::hash::Hash for Cuts {
     fn hash<H: std::hash::Hasher>(&self, h: &mut H) {
-        (self.clip_to_outline, self.blank_buttons, self.blank_cutouts).hash(h);
+        (self.clip_to_outline, self.blank_holes).hash(h);
         self.bleed_mm.to_bits().hash(h);
     }
 }
@@ -213,8 +213,7 @@ impl Cuts {
     pub fn blanks(self, kind: ElementKind) -> bool {
         match kind {
             ElementKind::Outline => false,
-            ElementKind::Buttons => self.blank_buttons,
-            ElementKind::Cutouts => self.blank_cutouts,
+            ElementKind::Holes => self.blank_holes,
         }
     }
 }
@@ -223,8 +222,7 @@ impl Default for Cuts {
     fn default() -> Self {
         Self {
             clip_to_outline: true,
-            blank_buttons: true,
-            blank_cutouts: true,
+            blank_holes: true,
             bleed_mm: 0.0,
         }
     }
@@ -264,12 +262,12 @@ impl Scene {
         self.elements.iter().map(|e| e.placed.clone()).collect()
     }
 
-    /// The page as exported. `colors` and `print` are per element kind
-    /// (`ElementKind::index`).
+    /// The page as exported. `colors` are per template element, in its order (the kind's
+    /// default color for one missing); `print` is per element kind (`ElementKind::index`).
     pub fn new(
         doc: &Document,
         template: Option<&Template>,
-        colors: [[u8; 3]; KINDS],
+        colors: &[[u8; 3]],
         print: [bool; KINDS],
         cuts: Cuts,
     ) -> Self {
@@ -280,7 +278,7 @@ impl Scene {
     pub fn preview(
         doc: &Document,
         template: Option<&Template>,
-        colors: [[u8; 3]; KINDS],
+        colors: &[[u8; 3]],
         print: [bool; KINDS],
         cuts: Cuts,
     ) -> Self {
@@ -290,7 +288,7 @@ impl Scene {
     fn build(
         doc: &Document,
         template: Option<&Template>,
-        colors: [[u8; 3]; KINDS],
+        colors: &[[u8; 3]],
         print: [bool; KINDS],
         cuts: Cuts,
         preview: bool,
@@ -299,8 +297,12 @@ impl Scene {
             .map(|t| placed_elements(doc, t))
             .unwrap_or_default()
             .into_iter()
-            .map(|placed| SceneElement {
-                color: colors[placed.kind.index()],
+            .enumerate()
+            .map(|(i, placed)| SceneElement {
+                color: colors
+                    .get(i)
+                    .copied()
+                    .unwrap_or(placed.kind.default_color()),
                 print: print[placed.kind.index()],
                 placed,
             })
@@ -327,11 +329,17 @@ impl Scene {
 }
 
 impl Scene {
-    /// The page mirrored left to right, everything on it included (layers, template
-    /// lines, cuts and marks): for printing on the back of a clear sheet, to be seen
-    /// through it.
-    pub fn mirrored(mut self) -> Self {
-        let m = Affine::scale(-1.0, 1.0).then(Affine::translate(self.page_mm[0], 0.0));
+    /// The page mirrored left to right (`horizontally`) and / or top to bottom
+    /// (`vertically`), everything on it included (layers, template lines, cuts and
+    /// marks): for printing on the back of a clear sheet, to be seen through it.
+    pub fn mirrored(mut self, horizontally: bool, vertically: bool) -> Self {
+        if !horizontally && !vertically {
+            return self;
+        }
+        let [w, h] = self.page_mm;
+        let (sx, dx) = if horizontally { (-1.0, w) } else { (1.0, 0.0) };
+        let (sy, dy) = if vertically { (-1.0, h) } else { (1.0, 0.0) };
+        let m = Affine::scale(sx, sy).then(Affine::translate(dx, dy));
         mirror_nodes(&mut self.layers, m);
         let flip = |p: &mut P2| *p = m.apply(*p);
         for e in &mut self.elements {
@@ -1152,7 +1160,7 @@ mod tests {
         let scene = Scene::new(
             &doc,
             None,
-            [[255, 0, 255]; crate::template::KINDS],
+            &[[255, 0, 255]; crate::template::KINDS],
             [true; crate::template::KINDS],
             Cuts::default(),
         );
@@ -1203,7 +1211,7 @@ mod tests {
         Scene::new(
             &doc,
             None,
-            [[0; 3]; crate::template::KINDS],
+            &[[0; 3]; crate::template::KINDS],
             [true; crate::template::KINDS],
             Cuts::default(),
         )
@@ -1319,7 +1327,7 @@ mod tests {
         let scene = Scene::new(
             &doc,
             None,
-            [[0; 3]; crate::template::KINDS],
+            &[[0; 3]; crate::template::KINDS],
             [true; crate::template::KINDS],
             Cuts::default(),
         );
@@ -1354,7 +1362,7 @@ mod tests {
         let scene = Scene::new(
             &doc,
             None,
-            [[0; 3]; crate::template::KINDS],
+            &[[0; 3]; crate::template::KINDS],
             [true; crate::template::KINDS],
             Cuts::default(),
         );
@@ -1363,6 +1371,53 @@ mod tests {
             SceneNode::Image(l) => assert!((l.opacity - 0.25).abs() < 1e-6),
             SceneNode::Group { .. } => panic!("expected the layer itself"),
         }
+    }
+
+    /// Checkerboards tilted in 3D (none, top away, right side away, both), exported:
+    /// `TILT_PREVIEW=out.png cargo test tilt_preview -- --ignored`.
+    #[test]
+    #[ignore]
+    fn tilt_preview() {
+        let Ok(path) = std::env::var("TILT_PREVIEW") else {
+            return;
+        };
+        let img = image::RgbaImage::from_fn(400, 400, |x, y| {
+            if (x / 50 + y / 50) % 2 == 0 {
+                image::Rgba([200, 40, 40, 255])
+            } else {
+                image::Rgba([250, 240, 220, 255])
+            }
+        });
+        let layers = [(0.0, 0.0), (55.0, 0.0), (0.0, 55.0), (40.0, -35.0)]
+            .iter()
+            .enumerate()
+            .map(|(i, &(tx, ty))| {
+                let mut l = Layer::new(i as u64 + 1, "c".into(), "x.png".into());
+                l.size_px = [400, 400];
+                l.transform.scale = [0.1, 0.1];
+                l.transform.center = [25.0 + 50.0 * i as f32, 25.0];
+                l.transform.tilt_x_deg = tx;
+                l.transform.tilt_y_deg = ty;
+                l.transform.perspective = 0.8;
+                l.pixmap = Some(Arc::new(premultiplied_pixmap(&img).unwrap()));
+                Node::Layer(Box::new(l))
+            })
+            .collect();
+        let doc = Document {
+            layers,
+            page: crate::document::PageSize::Custom,
+            custom_page_mm: [50.0, 200.0],
+            ..Default::default()
+        };
+        let scene = Scene::new(
+            &doc,
+            None,
+            &[[0; 3]; crate::template::KINDS],
+            [true; crate::template::KINDS],
+            Cuts::default(),
+        );
+        let pm = compose(&scene, 200.0, false).unwrap();
+        pm.save_png(&path).unwrap();
     }
 
     #[test]
@@ -1379,7 +1434,7 @@ mod tests {
         let scene = Scene::new(
             &doc,
             None,
-            [[0; 3]; crate::template::KINDS],
+            &[[0; 3]; crate::template::KINDS],
             [true; crate::template::KINDS],
             Cuts::default(),
         );
@@ -1420,7 +1475,7 @@ mod tests {
         let scene = Scene::new(
             &doc,
             None,
-            [[0; 3]; crate::template::KINDS],
+            &[[0; 3]; crate::template::KINDS],
             [true; crate::template::KINDS],
             Cuts::default(),
         );
@@ -1472,11 +1527,11 @@ mod tests {
                     true,
                 ),
                 element(
-                    ElementKind::Buttons,
+                    ElementKind::Holes,
                     vec![rect_poly([20.0, 20.0], [30.0, 30.0])],
                     false,
                 ),
-                element(ElementKind::Cutouts, vec![screw.clone(), screw], false),
+                element(ElementKind::Holes, vec![screw.clone(), screw], false),
             ],
             cuts: Cuts::default(),
             marks: Vec::new(),
@@ -1500,20 +1555,19 @@ mod tests {
         assert!(pm.pixel(50, 10).unwrap().red() < 200, "outline line");
         assert_eq!(pm.pixel(25, 20).unwrap().red(), 255, "no button line");
 
-        // Buttons can be printed over while cutouts stay blank.
-        scene.cuts.blank_buttons = false;
+        // Holes can be printed over.
+        scene.cuts.blank_holes = false;
         let pm = compose(&scene, 25.4, false).unwrap();
         assert_eq!(pm.pixel(25, 25).unwrap().red(), 0, "button printed over");
         assert_eq!(
             pm.pixel(72, 22).unwrap().red(),
-            255,
-            "screw hole still blank"
+            0,
+            "screw hole printed over"
         );
 
         scene.cuts = Cuts {
             clip_to_outline: false,
-            blank_buttons: false,
-            blank_cutouts: false,
+            blank_holes: false,
             bleed_mm: 0.0,
         };
         let pm = compose(&scene, 25.4, false).unwrap();
@@ -1652,8 +1706,7 @@ mod tests {
             }],
             cuts: Cuts {
                 clip_to_outline: false,
-                blank_buttons: false,
-                blank_cutouts: false,
+                blank_holes: false,
                 bleed_mm: 0.0,
             },
             marks: Vec::new(),

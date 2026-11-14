@@ -315,7 +315,7 @@ mod tests {
         let scene = Scene::new(
             &doc,
             None,
-            [[0, 0, 0]; crate::template::KINDS],
+            &[[0, 0, 0]; crate::template::KINDS],
             [false; crate::template::KINDS],
             render::Cuts::default(),
         );

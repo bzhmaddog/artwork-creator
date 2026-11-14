@@ -10,7 +10,8 @@
     {
       "kind": "outline",
       "id": "outline",
-      "name": "Outline"
+      "name": "Outline",
+      "color": "#ff00ff"
     }
   ]
 }

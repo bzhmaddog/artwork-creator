@@ -52,6 +52,10 @@ pub struct LayersPanel {
     pub keys: HashMap<Command, String>,
     /// A template is edited: only shapes are added, into its elements.
     pub template_mode: bool,
+    /// The layer list was clicked last: Up and Down step through its rows.
+    pub list_focused: bool,
+    /// Scroll the list to the selected row, chosen with the keyboard.
+    pub scroll_to_selected: bool,
 }
 
 impl LayersPanel {
@@ -120,6 +124,8 @@ pub struct LayersOutput {
     pub edit: Option<Edit>,
     /// A kind was picked from the Element button's menu: add a template element.
     pub add_element: Option<ElementKind>,
+    /// The Reference button was clicked: choose the template's reference file.
+    pub choose_reference: bool,
     /// The height the layer list and its toolbar would take without a limit.
     pub natural_height: f32,
 }
@@ -342,6 +348,27 @@ pub fn delete(doc: &mut Document, selected: &mut Option<u64>) -> bool {
     true
 }
 
+/// Selects the row below the selected one in the layer list (above it when `down` is
+/// false), as a click on it would; the first or last row when none is selected.
+/// Returns true if the selection changed.
+pub fn step_selection(doc: &Document, selected: &mut Option<u64>, down: bool) -> bool {
+    let rows = rows(doc);
+    let at = selected.and_then(|id| rows.iter().position(|r| r.id == id));
+    let next = match at {
+        Some(i) if down => rows.get(i + 1),
+        Some(i) => i.checked_sub(1).and_then(|i| rows.get(i)),
+        None if down => rows.first(),
+        None => rows.last(),
+    };
+    match next {
+        Some(row) => {
+            *selected = Some(row.id);
+            true
+        }
+        None => false,
+    }
+}
+
 /// Moves the selected layer, or every unlocked layer of the selected group.
 pub fn nudge(doc: &mut Document, selected: Option<u64>, d: P2) -> bool {
     let Some(id) = selected else { return false };
@@ -353,6 +380,18 @@ pub fn nudge(doc: &mut Document, selected: Option<u64>, d: P2) -> bool {
         }
     }
     !ids.is_empty()
+}
+
+/// Whether the X and the Y of the layers moving with the selected node are linked to a
+/// variable: the arrow keys leave a linked axis as it is.
+pub fn linked_axes(doc: &Document, selected: Option<u64>) -> [bool; 2] {
+    let ids = selected.map_or_else(Vec::new, |id| movable_layers(doc, id));
+    [crate::variables::Field::X, crate::variables::Field::Y].map(|field| {
+        ids.iter().any(|&id| {
+            doc.layer(id)
+                .is_some_and(|l| l.bindings.contains_key(&field))
+        })
+    })
 }
 
 /// Page-mm bounds (min, max) of the given layers as drawn, rotation and distortion
@@ -574,6 +613,12 @@ pub fn drop_node(doc: &mut Document, id: u64, target: DropTarget) -> bool {
 pub fn drop_allowed(doc: &Document, id: u64, target: DropTarget, template_mode: bool) -> bool {
     if !template_mode {
         return true;
+    }
+    // The reference stays at the bottom, under everything.
+    let reference = |t: u64| crate::template_edit::is_reference(doc, t);
+    if reference(id) || matches!(target, DropTarget::Below(t) | DropTarget::Into(t) if reference(t))
+    {
+        return false;
     }
     let parent = match target {
         DropTarget::Above(t) | DropTarget::Below(t) => doc.path_of(t).map(|mut p| {
@@ -1481,6 +1526,13 @@ pub fn show(
                     }
                 }
             });
+            let hint = state.hint(
+                tr!("CHOOSE_TEMPLATE_REFERENCE_HINT"),
+                Command::ChooseReference,
+            );
+            if tool_button(ui, Tool::AddImage, true, &hint) {
+                out.choose_reference = true;
+            }
         } else {
             let hint = state.hint(tr!("ADD_IMAGE_LAYERS"), Command::AddImages);
             if tool_button(ui, Tool::AddImage, true, &hint) {
@@ -1491,9 +1543,11 @@ pub fn show(
                 out.add_text = true;
             }
         }
-        let hint = match state.keys.get(&Command::AddShape) {
-            Some(s) => tr!("ADD_SHAPE_LAYER_WITH_SHORTCUT", shortcut = s),
-            None => tr!("ADD_SHAPE_LAYER").to_owned(),
+        let hint = match (state.keys.get(&Command::AddShape), state.template_mode) {
+            (Some(s), false) => tr!("ADD_SHAPE_LAYER_WITH_SHORTCUT", shortcut = s),
+            (None, false) => tr!("ADD_SHAPE_LAYER").to_owned(),
+            (Some(s), true) => tr!("ADD_TEMPLATE_SHAPE_WITH_SHORTCUT", shortcut = s),
+            (None, true) => tr!("ADD_TEMPLATE_SHAPE").to_owned(),
         };
         // In a template, shapes go into an element: one must be selected (or a shape of
         // it).
@@ -1616,11 +1670,21 @@ pub fn show(
         .max_height(ui.available_height().max(TOOL))
         .show(ui, |ui| {
             if doc.layers.is_empty() {
-                crate::callout::callout(ui, crate::callout::Tone::Info, tr!("NO_LAYERS_YET"));
+                let text = if state.template_mode {
+                    tr!("NO_ELEMENTS_YET")
+                } else {
+                    tr!("NO_LAYERS_YET")
+                };
+                crate::callout::callout(ui, crate::callout::Tone::Info, text);
             }
             let full = ui.max_rect();
             let broken_links = variables::broken_links_by_node(doc);
             for row in rows(doc) {
+                // The template's reference: at the bottom, apart from the elements.
+                let reference = crate::template_edit::is_reference(doc, row.id);
+                if reference {
+                    ui.separator();
+                }
                 let Some(node) = doc.node_at_mut(&row.path) else {
                     continue;
                 };
@@ -1643,6 +1707,7 @@ pub fn show(
                     out.changed |= lock_toggle(ui, locked, row.parent_locked).changed();
                     // In a template, a shape in no element: an error, until moved into one.
                     let orphan = state.template_mode
+                        && !reference
                         && row.depth == 0
                         && match &*node {
                             Node::Group(g) => g.element.is_none(),
@@ -1718,36 +1783,41 @@ pub fn show(
                             );
                             ui.painter().galley(pos, galley, color);
                         }
-                        r.dnd_set_drag_payload(DraggedNode(row.id));
-                        r.context_menu(|ui| {
-                            let entry = |key: &str, c: Command| {
-                                let b = Button::new(translate(key));
-                                match state.keys.get(&c) {
-                                    Some(s) => b.shortcut_text(s.as_str()),
-                                    None => b,
+                        // The reference stays where it is, and is no layer to copy.
+                        if !reference {
+                            r.dnd_set_drag_payload(DraggedNode(row.id));
+                        }
+                        if !reference {
+                            r.context_menu(|ui| {
+                                let entry = |key: &str, c: Command| {
+                                    let b = Button::new(translate(key));
+                                    match state.keys.get(&c) {
+                                        Some(s) => b.shortcut_text(s.as_str()),
+                                        None => b,
+                                    }
+                                };
+                                for (edit, key, c, enabled) in [
+                                    (Edit::Cut, tr_noop!("CUT_LAYER"), Command::Cut, true),
+                                    (Edit::Copy, tr_noop!("COPY_LAYER"), Command::Copy, true),
+                                    (
+                                        Edit::Paste,
+                                        tr_noop!("PASTE_LAYER"),
+                                        Command::Paste,
+                                        state.can_paste,
+                                    ),
+                                ] {
+                                    if ui.add_enabled(enabled, entry(key, c)).clicked() {
+                                        pending_edit = Some((row.id, edit));
+                                    }
                                 }
-                            };
-                            for (edit, key, c, enabled) in [
-                                (Edit::Cut, tr_noop!("CUT_LAYER"), Command::Cut, true),
-                                (Edit::Copy, tr_noop!("COPY_LAYER"), Command::Copy, true),
-                                (
-                                    Edit::Paste,
-                                    tr_noop!("PASTE_LAYER"),
-                                    Command::Paste,
-                                    state.can_paste,
-                                ),
-                            ] {
-                                if ui.add_enabled(enabled, entry(key, c)).clicked() {
-                                    pending_edit = Some((row.id, edit));
+                                if ui
+                                    .add(entry(tr_noop!("DUPLICATE_LAYER"), Command::Duplicate))
+                                    .clicked()
+                                {
+                                    pending_duplicate = Some(row.id);
                                 }
-                            }
-                            if ui
-                                .add(entry(tr_noop!("DUPLICATE_LAYER"), Command::Duplicate))
-                                .clicked()
-                            {
-                                pending_duplicate = Some(row.id);
-                            }
-                        });
+                            });
+                        }
                         if r.dragged()
                             && let Some(p) = ui.ctx().pointer_interact_pos()
                         {
@@ -1772,6 +1842,10 @@ pub fn show(
 
                 // Drop target: upper/lower part of the row, or the middle of a group row.
                 let rect = Rect::from_x_y_ranges(full.x_range(), r.response.rect.y_range());
+                if state.scroll_to_selected && *selected == Some(row.id) {
+                    ui.scroll_to_rect(rect, None);
+                    state.scroll_to_selected = false;
+                }
                 // The whole row, not only the name, shows the selection and the hover.
                 let fill = if *selected == Some(row.id) {
                     Some(ui.visuals().selection.bg_fill)
@@ -1835,6 +1909,10 @@ pub fn show(
             }
         });
     out.natural_height = list.content_size.y + toolbar;
+    // A press in the list gives it the arrow keys, a press anywhere else takes them back.
+    if let Some(p) = ui.input(|i| i.pointer.any_pressed().then(|| i.pointer.press_origin())) {
+        state.list_focused = p.is_some_and(|p| list.inner_rect.contains(p));
+    }
     if let Some((id, target)) = pending_drop {
         out.changed |= drop_node(doc, id, target);
     }
@@ -2667,7 +2745,12 @@ fn properties(
     out: &mut LayersOutput,
 ) {
     let Some(id) = sel else {
-        crate::callout::callout(ui, crate::callout::Tone::Info, tr!("NO_LAYER_SELECTED"));
+        let text = if state.template_mode {
+            tr!("NO_SHAPE_SELECTED")
+        } else {
+            tr!("NO_LAYER_SELECTED")
+        };
+        crate::callout::callout(ui, crate::callout::Tone::Info, text);
         return;
     };
     let page_center = doc.page_center();
@@ -2725,6 +2808,9 @@ fn properties(
     // In the template editor: the element the selection is in.
     // A template's shapes, in an element or not, are plain lines.
     let plain = state.template_mode || crate::template_edit::element_of(doc, id).is_some();
+    // The template's reference: its place, size, turn, opacity and visibility, saved with
+    // the template; nothing it wouldn't keep (flips, distortion, effects).
+    let reference = crate::template_edit::is_reference(doc, id);
     match doc.node_mut(id) {
         Some(Node::Group(g)) => {
             // A group has only the properties all layers have.
@@ -2780,7 +2866,7 @@ fn properties(
                         out.changed |= ui.text_edit_singleline(&mut layer.name).changed();
                         ui.end_row();
 
-                        if !plain {
+                        if !plain || reference {
                             ui.label(tr!("OPACITY"));
                             out.changed |= ui
                                 .add(Slider::new(&mut layer.opacity, 0.0..=1.0).fixed_decimals(2))
@@ -2878,6 +2964,47 @@ fn properties(
                             });
                         });
                         ui.end_row();
+
+                        // Turned in 3D: not for the template's reference, which keeps
+                        // only its place, size and turn.
+                        if !reference {
+                            ui.label(tr!("LAYER_TILT"))
+                                .on_hover_text(tr!("LAYER_TILT_HINT"));
+                            ui.add_enabled_ui(!locked, |ui| {
+                                ui.horizontal(|ui| {
+                                    let (t, b) = (&mut layer.transform, &mut layer.bindings);
+                                    for (field, v, prefix) in [
+                                        (Field::TiltX, &mut t.tilt_x_deg, "x"),
+                                        (Field::TiltY, &mut t.tilt_y_deg, "y"),
+                                    ] {
+                                        if variables::field(ui, b, field, v, |d| {
+                                            d.fixed_decimals(1)
+                                                .speed(0.5)
+                                                .prefix(format!("{prefix} "))
+                                        })
+                                        .changed()
+                                        {
+                                            *v = variables::clamp_tilt(*v);
+                                            out.changed = true;
+                                        }
+                                    }
+                                    unit(ui, "°");
+                                });
+                            });
+                            ui.end_row();
+                            ui.label(tr!("LAYER_PERSPECTIVE"))
+                                .on_hover_text(tr!("LAYER_PERSPECTIVE_HINT"));
+                            ui.add_enabled_ui(!locked && layer.transform.is_tilted(), |ui| {
+                                out.changed |= ui
+                                    .add(
+                                        Slider::new(&mut layer.transform.perspective, 0.0..=1.0)
+                                            .fixed_decimals(2),
+                                    )
+                                    .on_hover_text(tr!("LAYER_PERSPECTIVE_HINT"))
+                                    .changed();
+                            });
+                            ui.end_row();
+                        }
                     });
 
                     ui.add_space(4.0);
@@ -2913,7 +3040,13 @@ fn properties(
                                 layer.transform.flip_x = false;
                                 layer.transform.flip_y = false;
                                 layer.transform.distort = Default::default();
+                                layer.transform.tilt_x_deg = 0.0;
+                                layer.transform.tilt_y_deg = 0.0;
+                                layer.transform.perspective = crate::document::DEFAULT_PERSPECTIVE;
                                 out.changed = true;
+                            }
+                            if reference {
+                                return;
                             }
                             if ui.button(tr!("FLIP_LAYER_HORIZONTALLY")).clicked() {
                                 layer.transform.flip_x ^= true;
@@ -2927,7 +3060,7 @@ fn properties(
                     });
 
                     ui.add_space(4.0);
-                    ui.add_enabled_ui(!locked, |ui| {
+                    ui.add_enabled_ui(!locked && !reference, |ui| {
                         ui.horizontal_wrapped(|ui| {
                             ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
                             // Shows what the corner handles do right now: Ctrl swaps the mode
@@ -3662,6 +3795,47 @@ mod tests {
             g.locked = true;
         }
         assert!(!nudge(&mut d, Some(1), [1.0, 0.0]));
+    }
+
+    #[test]
+    fn step_selection_follows_the_rows() {
+        let mut d = doc_with(vec![layer(1), layer(2), layer(3)]);
+        group(&mut d, &mut Some(2));
+        drop_node(&mut d, 1, DropTarget::Into(100));
+        // Rows, top first: 3, the group, 2, 1.
+        let mut sel = None;
+        assert!(step_selection(&d, &mut sel, true));
+        assert_eq!(sel, Some(3));
+        let order: Vec<_> = (0..3)
+            .map(|_| {
+                step_selection(&d, &mut sel, true);
+                sel.unwrap()
+            })
+            .collect();
+        assert_eq!(
+            order,
+            rows(&d).iter().skip(1).map(|r| r.id).collect::<Vec<_>>()
+        );
+        assert!(!step_selection(&d, &mut sel, true), "stays on the last row");
+        assert!(step_selection(&d, &mut sel, false));
+        assert_eq!(sel, Some(rows(&d)[2].id));
+    }
+
+    #[test]
+    fn linked_axes_of_layer_and_group() {
+        use crate::variables::Field;
+        let mut d = doc_with(vec![layer(1), layer(2)]);
+        group(&mut d, &mut Some(1));
+        drop_node(&mut d, 2, DropTarget::Into(100));
+        assert_eq!(linked_axes(&d, Some(100)), [false, false]);
+        d.layer_mut(2)
+            .unwrap()
+            .bindings
+            .insert(Field::Y, "p_y".into());
+        assert_eq!(linked_axes(&d, Some(1)), [false, false]);
+        assert_eq!(linked_axes(&d, Some(2)), [false, true]);
+        assert_eq!(linked_axes(&d, Some(100)), [false, true]);
+        assert_eq!(linked_axes(&d, None), [false, false]);
     }
 
     #[test]

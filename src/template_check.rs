@@ -250,6 +250,9 @@ pub fn check_document(doc: &Document) -> Vec<Problem> {
     let mut elements = Vec::new();
     // In list order, from the top: the order of `template.json`.
     for node in doc.layers.iter().rev() {
+        if crate::template_edit::is_reference(doc, node.id()) {
+            continue;
+        }
         match node {
             Node::Group(g) if g.element.is_some() => {
                 let kind = g.element.map(|t| t.kind).unwrap_or(ElementKind::Outline);
@@ -572,7 +575,7 @@ mod tests {
                 vec![shape(square(0.0, 0.0, 100.0), true)],
             ),
             element(
-                ElementKind::Buttons,
+                ElementKind::Holes,
                 vec![
                     shape(square(10.0, 10.0, 20.0), true),
                     shape(square(40.0, 10.0, 20.0), true),
@@ -590,7 +593,7 @@ mod tests {
                 vec![shape(square(0.0, 0.0, 100.0), true)],
             ),
             element(
-                ElementKind::Buttons,
+                ElementKind::Holes,
                 vec![
                     // Overlap each other.
                     shape(square(10.0, 10.0, 20.0), true),
@@ -602,7 +605,7 @@ mod tests {
                 ],
             ),
             element(
-                ElementKind::Cutouts,
+                ElementKind::Holes,
                 vec![shape(square(60.0, 60.0, 5.0), false)],
             ),
         ];
@@ -615,7 +618,7 @@ mod tests {
     #[test]
     fn a_template_without_outline_or_larger_than_its_page_is_an_error() {
         let elements = [element(
-            ElementKind::Buttons,
+            ElementKind::Holes,
             vec![shape(square(0.0, 0.0, 250.0), true)],
         )];
         let config: TemplateConfig = serde_json::from_str(r#"{"page": {"size": "A4"}}"#).unwrap();

@@ -181,11 +181,10 @@ pub struct CanvasState {
     /// Corner handles distort the selected layer instead of scaling it. Holding Ctrl
     /// swaps the two.
     pub distort_mode: bool,
-    /// Image centers, corners and edge middles snap to the template's anchors while
-    /// dragged. Holding Alt
-    /// turns it off for the drag.
-    pub snap_to_anchors: bool,
-    /// The anchor the dragged image snapped to this frame, in page mm, to highlight it.
+    /// Image centers, corners and edge middles snap to the centers of the template's
+    /// shapes while dragged. Holding Alt turns it off for the drag.
+    pub snap_to_centers: bool,
+    /// The center the dragged image snapped to this frame, in page mm, to highlight it.
     snapped: Option<P2>,
     /// Edges and centers of layers snap to the page's and the template outline's edges
     /// while moved or resized. Holding Alt turns it off for the drag.
@@ -272,7 +271,7 @@ impl Default for CanvasState {
             safe_area: None,
             cursor_mm: None,
             distort_mode: false,
-            snap_to_anchors: true,
+            snap_to_centers: true,
             snapped: None,
             snap_to_edges: true,
             snapped_guides: [None; 2],
@@ -588,25 +587,55 @@ fn handles(cam: &Camera, rect: Rect, layer: &Layer) -> ([Pos2; 4], Pos2, Pos2) {
     (c, top_mid, top_mid + dir * ROTATE_HANDLE_OFFSET)
 }
 
-/// The topmost visible, unlocked layer under a page point.
-fn topmost_hit(doc: &Document, p: P2) -> Option<u64> {
-    doc.leaves()
-        .into_iter()
-        .rev()
-        .find(|l| l.visible && !l.locked && l.layer.contains(p))
-        .map(|l| l.layer.id)
+/// Of the layers under a click, topmost first, the one it selects: the topmost; in the
+/// template editor, the smallest (on a tie, the topmost), so a click inside a button or
+/// a cutout picks that hole rather than the outline around it.
+fn pick<'a>(doc: &Document, hits: impl Iterator<Item = &'a Layer>) -> Option<u64> {
+    if doc.edited_template.is_none() {
+        return hits.map(|l| l.id).next();
+    }
+    let area = |l: &Layer| {
+        let c = l.corners();
+        (0..4)
+            .map(|i| {
+                let (a, b) = (c[i], c[(i + 1) % 4]);
+                a[0] * b[1] - b[0] * a[1]
+            })
+            .sum::<f32>()
+            .abs()
+            / 2.0
+    };
+    hits.map(|l| (area(l), l.id))
+        .fold(None, |best: Option<(f32, u64)>, (a, id)| match best {
+            Some((b, _)) if b <= a => best,
+            _ => Some((a, id)),
+        })
+        .map(|(_, id)| id)
 }
 
-/// The layer a click at a page point selects: the topmost unlocked one, or else the
-/// topmost locked one. A locked layer can be selected (for the layer toolbar and
-/// Properties) but does not hide the layers under it from clicks.
+/// The visible, unlocked layer under a page point a click selects (see `pick`).
+fn topmost_hit(doc: &Document, p: P2) -> Option<u64> {
+    let leaves = doc.leaves();
+    let hits = leaves
+        .iter()
+        .rev()
+        .filter(|l| l.visible && !l.locked && l.layer.contains(p))
+        .map(|l| l.layer);
+    pick(doc, hits)
+}
+
+/// The layer a click at a page point selects: an unlocked one, or else a locked one. A
+/// locked layer can be selected (for the layer toolbar and Properties) but does not
+/// hide the layers under it from clicks.
 fn layer_to_select(doc: &Document, p: P2) -> Option<u64> {
     topmost_hit(doc, p).or_else(|| {
-        doc.leaves()
-            .into_iter()
+        let leaves = doc.leaves();
+        let hits = leaves
+            .iter()
             .rev()
-            .find(|l| l.visible && l.layer.contains(p))
-            .map(|l| l.layer.id)
+            .filter(|l| l.visible && l.layer.contains(p))
+            .map(|l| l.layer);
+        pick(doc, hits)
     })
 }
 
@@ -739,10 +768,10 @@ pub fn show(
     let alt = ui.input(|i| i.modifiers.alt) && !flip_paint;
     // Ctrl swaps the corner handles between resizing and distorting while held.
     let distorting = state.distort_mode != (ui.input(|i| i.modifiers.command) && !flip_paint);
-    // Snapping reach in mm, when on and the template has anchors.
-    let anchors: Vec<P2> = elements.iter().flat_map(|e| &e.anchors).copied().collect();
+    // Snapping reach in mm, when on and the template has shapes with a center.
+    let anchors: Vec<P2> = elements.iter().flat_map(|e| &e.centers).copied().collect();
     let snap_reach =
-        (state.snap_to_anchors && !alt && !anchors.is_empty()).then_some(SNAP_RADIUS / cam.zoom);
+        (state.snap_to_centers && !alt && !anchors.is_empty()).then_some(SNAP_RADIUS / cam.zoom);
     let mut snapped = None;
     // The lines layers snap to: the page's and the outline's, and the guides, each when
     // snapping to them is on; and their reach in mm.
@@ -1324,12 +1353,14 @@ pub fn show(
     changed
 }
 
-/// The template's lines and anchors, and the safe-area guide, as the canvas shows them.
+/// The template's lines and their shapes' centers, and the safe-area guide, as the
+/// canvas shows them.
 fn paint_template(
     painter: &egui::Painter,
     elements: &[PlacedElement],
     state: &mut CanvasState,
     rect: Rect,
+    width_mm: Option<f32>,
 ) {
     let cam = state.camera;
     for e in elements.iter().filter(|_| state.show_template) {
@@ -1338,6 +1369,10 @@ fn paint_template(
             continue;
         }
         let stroke = Stroke::new(1.2, state.element_color[k]);
+        let line = Stroke {
+            width: width_mm.map_or(stroke.width, |w| w * cam.zoom),
+            ..stroke
+        };
         for poly in &e.polylines {
             let pts: Vec<Pos2> = poly
                 .points
@@ -1345,13 +1380,13 @@ fn paint_template(
                 .map(|&p| cam.to_screen(rect, p))
                 .collect();
             painter.add(if poly.closed {
-                Shape::closed_line(pts, stroke)
+                Shape::closed_line(pts, line)
             } else {
-                Shape::line(pts, stroke)
+                Shape::line(pts, line)
             });
         }
-        // Anchors: small crosses.
-        for &a in &e.anchors {
+        // The centers images snap to: small crosses.
+        for &a in &e.centers {
             let p = cam.to_screen(rect, a);
             let (h, v) = (vec2(ANCHOR_MARK, 0.0), vec2(0.0, ANCHOR_MARK));
             painter.line_segment([p - h, p + h], stroke);
@@ -2101,8 +2136,21 @@ fn paint(
         None => state.background = None,
     }
 
+    // While comparing, the project's template right of the divider, the other one left.
+    let split = state
+        .compare
+        .as_ref()
+        .map(|_| rect.left() + rect.width() * state.compare_split);
+    let right = split.map_or(rect, |x| Rect::from_min_max(pos2(x, rect.top()), rect.max));
+    let left = split.map(|x| Rect::from_min_max(rect.min, pos2(x, rect.bottom())));
+    // In the template editor, the layers are the template compared: right of it too.
+    let layers_painter = if doc.edited_template.is_some() {
+        painter.with_clip_rect(right)
+    } else {
+        painter.clone()
+    };
     let mut painting = Painting {
-        painter: painter.clone(),
+        painter: layers_painter,
         ctx: ui.ctx().clone(),
         cam,
         rect,
@@ -2111,16 +2159,30 @@ fn paint(
         used: HashMap::new(),
     };
     painting.nodes(&doc.layers, 1.0);
+    // In the template editor, the centers of the elements' closed shapes, crossed as a
+    // project's template shows them.
+    if doc.edited_template.is_some() && state.show_template {
+        for leaf in doc.leaves().iter().filter(|l| l.visible) {
+            let Some(tag) = leaf
+                .path
+                .first()
+                .and_then(|&i| doc.layers.get(i)?.as_group()?.element)
+            else {
+                continue;
+            };
+            let [r, g, b] = tag.color;
+            let stroke = Stroke::new(1.2, Color32::from_rgb(r, g, b));
+            for c in crate::template_edit::layer_centers(leaf.layer) {
+                let p = cam.to_screen(rect, c);
+                let (h, v) = (vec2(ANCHOR_MARK, 0.0), vec2(0.0, ANCHOR_MARK));
+                painting.painter.line_segment([p - h, p + h], stroke);
+                painting.painter.line_segment([p - v, p + v], stroke);
+            }
+        }
+    }
     // Previews not drawn this frame are dropped with their textures.
     state.group_previews = painting.used;
 
-    // While comparing, the project's template right of the divider, the other one left.
-    let split = state
-        .compare
-        .as_ref()
-        .map(|_| rect.left() + rect.width() * state.compare_split);
-    let right = split.map_or(rect, |x| Rect::from_min_max(pos2(x, rect.top()), rect.max));
-    let left = split.map(|x| Rect::from_min_max(rect.min, pos2(x, rect.bottom())));
     let painter_right = painter.with_clip_rect(right);
     paint_cuts(
         ui.ctx(),
@@ -2131,7 +2193,8 @@ fn paint(
         rect,
     );
     let compare = state.compare.take();
-    if let (Some(left), Some(other)) = (left, &compare) {
+    // In the template editor, both sides are plain lines: no cut preview on the source.
+    if let (Some(left), Some(other), None) = (left, &compare, &doc.edited_template) {
         swap_compare_caches(state);
         let painter_left = painter.with_clip_rect(left);
         paint_cuts(
@@ -2164,10 +2227,21 @@ fn paint(
         StrokeKind::Outside,
     );
 
-    paint_template(&painter_right, elements, state, rect);
+    paint_template(&painter_right, elements, state, rect, None);
     if let (Some(left), Some(other)) = (left, &compare) {
         swap_compare_caches(state);
-        paint_template(&painter.with_clip_rect(left), &other.elements, state, rect);
+        // In the template editor, as wide as the shapes it is compared with.
+        let width = doc
+            .edited_template
+            .is_some()
+            .then_some(crate::template_edit::LINE_WIDTH_MM);
+        paint_template(
+            &painter.with_clip_rect(left),
+            &other.elements,
+            state,
+            rect,
+            width,
+        );
         swap_compare_caches(state);
     }
     if let (Some(x), Some(other)) = (split, &compare) {
@@ -2184,7 +2258,7 @@ fn paint(
             painter.line_segment(guide_line(cam, rect, g), Stroke::new(width, GUIDE_COLOR));
         }
     }
-    // The anchor the dragged image snapped to, shown even when anchors are hidden.
+    // The center the dragged image snapped to, shown even when its lines are hidden.
     if let Some(a) = state.snapped {
         let p = cam.to_screen(rect, a);
         painter.circle_stroke(p, ANCHOR_MARK * 1.6, Stroke::new(2.0, ACCENT));
@@ -2210,6 +2284,8 @@ fn paint(
     };
     let locked = doc.effectively_locked(sel);
     let color = if locked { Color32::GRAY } else { ACCENT };
+    // In the template editor, a shape in no element: an error.
+    let orphan = crate::template_edit::is_orphan(doc, sel);
     if let Some(Node::Group(_)) = doc.node(sel) {
         // Group: outline its visible layers and a dashed box around them all.
         let path = doc.path_of(sel).unwrap_or_default();
@@ -2234,9 +2310,7 @@ fn paint(
                 b.left_top(),
             ];
             painter.extend(Shape::dashed_line(&line, Stroke::new(1.5, color), 6.0, 4.0));
-            if locked {
-                lock_badge(ui, &painter, b.center());
-            }
+            badges(ui, &painter, b.center(), locked, orphan);
         }
     } else if let Some(layer) = doc.layer(sel)
         // Its points are being edited or drawn: they are shown instead.
@@ -2246,9 +2320,8 @@ fn paint(
         let (corners, top_mid, rot) = handles(&cam, rect, layer);
         let stroke = Stroke::new(1.5, color);
         painter.add(Shape::closed_line(corners.to_vec(), stroke));
-        if locked {
-            lock_badge(ui, &painter, cam.to_screen(rect, layer.transform.center));
-        }
+        let c = cam.to_screen(rect, layer.transform.center);
+        badges(ui, &painter, c, locked, orphan);
         if !locked {
             painter.line_segment([top_mid, rot], stroke);
             for c in corners {
@@ -2517,7 +2590,9 @@ pub fn active_tool(
 /// unlocked.
 pub fn can_paint(doc: &Document, selected: Option<u64>) -> bool {
     selected.is_some_and(|id| {
-        doc.layer(id).is_some_and(crate::shape::paintable)
+        // A template's shapes are lines only.
+        crate::template_edit::element_of(doc, id).is_none()
+            && doc.layer(id).is_some_and(crate::shape::paintable)
             && !doc.effectively_locked(id)
             && doc.effectively_visible(id)
     })
@@ -2807,6 +2882,53 @@ fn background_texture(
 /// Radius of the badge showing that the selected layer is locked.
 const LOCK_BADGE: f32 = 18.0;
 
+/// The badges in the middle of the selection on screen, at `c`: the padlock when
+/// `locked`, the error mark when `orphan` (a template shape in no element), side by side
+/// when both.
+fn badges(ui: &egui::Ui, painter: &egui::Painter, c: Pos2, locked: bool, orphan: bool) {
+    let d = if locked && orphan {
+        LOCK_BADGE + 3.0
+    } else {
+        0.0
+    };
+    if locked {
+        lock_badge(ui, painter, c - vec2(d, 0.0));
+    }
+    if orphan {
+        error_badge(ui, painter, c + vec2(d, 0.0));
+    }
+}
+
+/// A white exclamation point on a red disc at `c`, the size of the padlock badge, with a
+/// tooltip saying the shape is in no element.
+fn error_badge(ui: &egui::Ui, painter: &egui::Painter, c: Pos2) {
+    painter.circle_filled(
+        c + vec2(0.0, 1.5),
+        LOCK_BADGE + 1.5,
+        Color32::from_black_alpha(60),
+    );
+    let [r, g, b] = crate::template_edit::ORPHAN_COLOR;
+    painter.circle(
+        c,
+        LOCK_BADGE,
+        Color32::from_rgb(r, g, b),
+        Stroke::new(2.0, Color32::WHITE),
+    );
+    let ink = Color32::WHITE;
+    painter.line_segment(
+        [c + vec2(0.0, -10.0), c + vec2(0.0, 3.0)],
+        Stroke::new(3.6, ink),
+    );
+    painter.circle_filled(c + vec2(0.0, 9.0), 2.2, ink);
+    let badge = Rect::from_center_size(c, Vec2::splat(LOCK_BADGE * 2.0));
+    ui.interact(
+        badge,
+        ui.scope_id().with("error_badge"),
+        egui::Sense::hover(),
+    )
+    .on_hover_text(crate::i18n::tr!("TEMPLATE_ORPHAN_SHAPE"));
+}
+
 /// A white padlock on a dark disc at `c` (the middle of the selection on screen), seen on
 /// any artwork, with a tooltip saying why the layer does not move.
 fn lock_badge(ui: &egui::Ui, painter: &egui::Painter, c: Pos2) {
@@ -2854,6 +2976,35 @@ fn lock_badge(ui: &egui::Ui, painter: &egui::Painter, c: Pos2) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_click_in_the_template_editor_picks_the_hole_under_it() {
+        use crate::template::ElementKind;
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("templates");
+        let entry = crate::template::scan(&dir)
+            .into_iter()
+            .find(|t| t.id.contains("T16"))
+            .expect("Cosmox T16");
+        let mut doc = crate::template_edit::open(&entry, entry.config.clone()).unwrap();
+        let of_kind = |doc: &crate::document::Document, kind| {
+            doc.leaves()
+                .iter()
+                .find(|l| {
+                    crate::template_edit::element_of(doc, l.layer.id)
+                        .is_some_and(|t| t.kind == kind)
+                })
+                .map(|l| (l.layer.id, l.layer.transform.center))
+                .unwrap()
+        };
+        let (outline, _) = of_kind(&doc, ElementKind::Outline);
+        for kind in [ElementKind::Buttons, ElementKind::Cutouts] {
+            let (hole, at) = of_kind(&doc, kind);
+            assert_eq!(super::layer_to_select(&doc, at), Some(hole), "{kind:?}");
+        }
+        // In a project, the topmost layer: the outline, at the top of the list.
+        let (_, at) = of_kind(&doc, ElementKind::Buttons);
+        doc.edited_template = None;
+        assert_eq!(super::layer_to_select(&doc, at), Some(outline));
+    }
     use super::*;
 
     #[test]
@@ -2866,7 +3017,7 @@ mod tests {
         let element = |kind, poly| PlacedElement {
             kind,
             polylines: vec![poly],
-            anchors: Vec::new(),
+            centers: Vec::new(),
         };
         let elements = [
             element(ElementKind::Outline, rect_poly([10.0, 10.0], [90.0, 40.0])),
@@ -2947,7 +3098,7 @@ mod tests {
                 points: vec![[10.0, 10.0], [90.0, 10.0], [90.0, 40.0], [10.0, 40.0]],
                 closed: true,
             }],
-            anchors: Vec::new(),
+            centers: Vec::new(),
         }];
         let ctx = egui::Context::default();
         let mut doc = Document::default();
@@ -2993,6 +3144,7 @@ mod tests {
                     opacity: 0.5,
                     expanded: true,
                     children: vec![square(2, 50.0), square(3, 100.0)],
+                    element: None,
                 }),
                 square(4, 200.0),
             ],
@@ -3500,6 +3652,60 @@ mod tests {
         });
     }
 
+    /// Draws the template editor comparing T16 opened for editing, one button moved,
+    /// with T16 as installed, in both themes:
+    /// `SOURCE_COMPARE_PREVIEW=out.png cargo test source_compare_preview -- --ignored`.
+    #[test]
+    #[ignore]
+    fn source_compare_preview() {
+        let Ok(path) = std::env::var("SOURCE_COMPARE_PREVIEW") else {
+            return;
+        };
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("templates");
+        let entry = crate::template::scan(&dir)
+            .into_iter()
+            .find(|t| t.id.contains("T16"))
+            .expect("Cosmox T16");
+        let source = crate::template::load(&entry).unwrap();
+        let mut doc = crate::template_edit::open(&entry, entry.config.clone()).unwrap();
+        // Moved: the comparison shows it.
+        let moved = doc
+            .leaves()
+            .iter()
+            .find(|l| {
+                crate::template_edit::element_of(&doc, l.layer.id)
+                    .is_some_and(|t| t.kind == crate::template::ElementKind::Buttons)
+            })
+            .map(|l| l.layer.id)
+            .unwrap();
+        doc.for_each_layer_mut(|l| {
+            if l.id == moved {
+                l.transform.center[0] += 15.0;
+            }
+        });
+        let elements = crate::render::placed_elements(&doc, &source);
+        let doc = std::cell::RefCell::new(doc);
+        let state = std::cell::RefCell::new(CanvasState::default());
+        let last: std::cell::RefCell<Option<egui::Context>> = Default::default();
+        crate::preview::render(&path, vec2(900.0, 640.0), |ui| {
+            let mut doc = doc.borrow_mut();
+            let mut state = state.borrow_mut();
+            if last.borrow().as_ref() != Some(ui.ctx()) {
+                doc.for_each_layer_mut(|l| l.pixmap = None);
+                *state = CanvasState::default();
+                state.fit_pending = true;
+                *last.borrow_mut() = Some(ui.ctx().clone());
+            }
+            crate::shape::sync(ui.ctx(), &mut doc, true);
+            state.compare = Some(Compare {
+                elements: elements.clone(),
+                labels: ["Source (Cosmox - T16 - v1.1)".into(), "Being edited".into()],
+            });
+            let mut sel = None;
+            show(ui, &mut doc, &[], &mut sel, &mut state);
+        });
+    }
+
     /// Draws the rulers and two guides, in both themes:
     /// `RULERS_PREVIEW=out.png cargo test rulers_preview -- --ignored`.
     #[test]
@@ -3569,7 +3775,7 @@ mod tests {
         let element = |kind, poly| PlacedElement {
             kind,
             polylines: vec![poly],
-            anchors: Vec::new(),
+            centers: Vec::new(),
         };
         let elements = vec![
             element(ElementKind::Outline, square([100.0, 80.0], 50.0)),
@@ -3929,12 +4135,12 @@ mod tests {
         }
     }
 
-    /// Template elements made of the given anchors only.
+    /// A template element with only the given shape centers.
     fn anchors(points: &[P2]) -> Vec<PlacedElement> {
         vec![PlacedElement {
-            kind: ElementKind::Anchors,
+            kind: ElementKind::Buttons,
             polylines: Vec::new(),
-            anchors: points.to_vec(),
+            centers: points.to_vec(),
         }]
     }
 
@@ -4461,7 +4667,7 @@ mod tests {
                 points: vec![lo, [hi[0], lo[1]], hi, [lo[0], hi[1]]],
                 closed: true,
             }],
-            anchors: Vec::new(),
+            centers: Vec::new(),
         }]
     }
 

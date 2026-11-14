@@ -7,16 +7,11 @@ work goes on.
 
 ### Template creator
 
-- Create a template in the app instead of writing DXF files and `template.json` by hand.
-- Outline: rectangle with rounded corners, or imported from DXF / SVG.
 - Buttons: place holes by standard size (24 mm, 30 mm, custom), one by one or from layout
   presets, with numeric position, spacing and alignment.
-- Cutouts and fastener holes, with the same tools.
-- Anchors generated from the button centers.
-- Placement on the page: rotation, flips and offset, saved in `template.json`.
-- Saves the DXF files and `template.json` into a new folder under `templates`.
-- Edit an existing template.
 - Publish template to a repository
+- Import DXF, PDF and DWG drawings into an element of the template being edited (the
+  template itself is kept as `template.svg`).
 
 ## Further features
 

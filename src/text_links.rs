@@ -97,6 +97,7 @@ pub fn adopt_links(vars: &mut Vec<Variable>, node: &mut Node) {
             t.link = None;
         } else {
             vars.push(Variable {
+                formula: None,
                 name,
                 value: Value::Text(t.content.clone()),
             });
@@ -144,6 +145,7 @@ mod tests {
 
     fn tv(name: &str, text: &str) -> Variable {
         Variable {
+            formula: None,
             name: name.into(),
             value: Value::Text(text.into()),
         }

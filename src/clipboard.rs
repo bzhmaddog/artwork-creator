@@ -224,6 +224,7 @@ mod tests {
                 Node::Layer(Box::new(shape)),
                 Node::Layer(Box::new(follower)),
             ],
+            element: None,
         });
         let mut d = doc_with(vec![group]);
         let mut clip = Clipboard::default();

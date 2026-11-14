@@ -24,6 +24,10 @@ use crate::i18n::{tr, tr_n};
 use crate::shape::{self, ShapeKind};
 use crate::text;
 
+/// The kinds of variables a template's shapes can use: their fields are lengths and
+/// angles.
+pub const TEMPLATE_KINDS: [Kind; 3] = [Kind::Length, Kind::Angle, Kind::Number];
+
 /// What a variable holds, which says where it can be used.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -251,13 +255,20 @@ impl Value {
     }
 }
 
-/// A named value. Saved as `{"name": "button", "kind": "length", "value": 30}`.
+/// A named value. Saved as `{"name": "button", "kind": "length", "value": 30}`, with
+/// `"formula": "panel + 2"` when it inherits from the template's variables.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(try_from = "SavedVariable")]
 pub struct Variable {
     pub name: String,
     #[serde(flatten)]
     pub value: Value,
+    /// For a project's length, angle, size or number: a formula using the template's
+    /// variables, such as `panel + 2`, which [`apply`] keeps the value set to. Its value
+    /// is the formula's last result, kept while the formula has an error (a template
+    /// variable it uses is gone).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub formula: Option<String>,
 }
 
 /// A variable as read from a project file. Variables of the first projects that had
@@ -268,6 +279,8 @@ struct SavedVariable {
     #[serde(default)]
     kind: Option<Kind>,
     value: serde_json::Value,
+    #[serde(default)]
+    formula: Option<String>,
 }
 
 impl TryFrom<SavedVariable> for Variable {
@@ -294,6 +307,7 @@ impl TryFrom<SavedVariable> for Variable {
         Ok(Variable {
             name: saved.name,
             value,
+            formula: saved.formula,
         })
     }
 }
@@ -402,10 +416,27 @@ fn name_char(c: char) -> bool {
     c.is_alphanumeric() || c == '_'
 }
 
-/// True if `name` can be a variable's name: a letter or `_`, then letters, digits, `_`.
+/// What is wrong with `name` as a variable's name, in the current language, or `None`
+/// if it is a valid one ([`is_valid_name`]) that no other variable has (`taken`).
+pub fn name_problem(name: &str, taken: bool) -> Option<String> {
+    if !is_valid_name(name) {
+        Some(tr!("VARIABLE_NAME_INVALID").to_owned())
+    } else if taken {
+        Some(tr!("VARIABLE_NAME_TAKEN").to_owned())
+    } else {
+        None
+    }
+}
+
+/// True if `name` can be a new variable's name: a lowercase letter or `_`, then
+/// letters, digits, `_`. Formulas still read names starting with a capital, which
+/// variables named before this rule may have.
 pub fn is_valid_name(name: &str) -> bool {
     let mut chars = name.chars();
-    chars.next().is_some_and(name_start) && chars.all(name_char)
+    chars
+        .next()
+        .is_some_and(|c| name_start(c) && !c.is_uppercase())
+        && chars.all(name_char)
 }
 
 fn tokenize(s: &str) -> Result<Vec<Token>, FormulaError> {
@@ -632,12 +663,39 @@ fn same(a: f32, b: f32) -> bool {
     (a - b).abs() <= 1e-4 * a.abs().max(b.abs()).max(1.0)
 }
 
-/// Sets every linked field to its formula's value, and unlinks those changed by hand
+/// The result of the project variable `var`'s formula with the template's variables
+/// `template`, or `None` if it has no formula. Only the template's variables can be
+/// used: of the variable's kind, or numbers.
+pub fn inherited(var: &Variable, template: &[Variable]) -> Option<Result<f64, FormulaError>> {
+    let formula = var.formula.as_deref()?;
+    Some(eval(formula, template, var.value.kind()))
+}
+
+/// Sets every project variable with a formula to its result; one with an error keeps
+/// its value. Returns true if one changed.
+fn apply_inherited(doc: &mut Document) -> bool {
+    let mut changed = false;
+    for var in &mut doc.variables {
+        let Some(Ok(v)) = inherited(var, &doc.template_variables) else {
+            continue;
+        };
+        if let Some(n) = var.value.number_mut()
+            && !same(*n, v as f32)
+        {
+            *n = v as f32;
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// Sets the project variables inheriting from the template's to their formula's value,
+/// then every linked field to its formula's value, and unlinks those changed by hand
 /// since the last call. A formula with an error leaves its field as it is. Returns true
 /// if the document changed.
 pub fn apply(doc: &mut Document, applied: &mut Applied) -> bool {
-    let vars = doc.variables.clone();
-    let mut changed = false;
+    let mut changed = apply_inherited(doc);
+    let vars = doc.all_variables();
     doc.for_each_layer_mut(|layer| {
         if layer.bindings.is_empty() {
             return;
@@ -682,7 +740,7 @@ fn vars_id() -> Id {
 
 /// Makes the project's variables available to the fields drawn this frame.
 pub fn publish(ctx: &egui::Context, doc: &Document) {
-    let vars = Arc::new(doc.variables.clone());
+    let vars = Arc::new(doc.all_variables());
     ctx.data_mut(|d| d.insert_temp(vars_id(), vars));
 }
 
@@ -708,11 +766,42 @@ pub fn field<'a>(
     make: impl FnOnce(DragValue<'a>) -> DragValue<'a>,
 ) -> Response {
     let vars = published(ui.ctx());
-    let kind = field.kind();
-    let formula_id = ui.auto_id_with(("formula", field));
-    let link = match bindings.get(&field) {
+    let id = ui.auto_id_with(("formula", field));
+    let mut formula = bindings.get(&field).cloned();
+    let width = ui.spacing().interact_size.x * 1.6 + ui.spacing().interact_size.y;
+    let response = formula_field(
+        ui,
+        id,
+        &mut formula,
+        field.kind(),
+        &vars,
+        value,
+        make,
+        width,
+    );
+    match formula {
+        Some(f) => bindings.insert(field, f),
+        None => bindings.remove(&field),
+    };
+    response
+}
+
+/// A [`field`] of `kind` linked to `formula` (none when unlinked), whose variables are
+/// `vars`, its state kept under `formula_id`, `width` wide with the fx button.
+#[allow(clippy::too_many_arguments)]
+fn formula_field<'a>(
+    ui: &mut Ui,
+    formula_id: Id,
+    formula: &mut Option<String>,
+    kind: Kind,
+    vars: &[Variable],
+    value: &'a mut f32,
+    make: impl FnOnce(DragValue<'a>) -> DragValue<'a>,
+    width: f32,
+) -> Response {
+    let link = match formula.as_deref() {
         None => Link::None,
-        Some(formula) => match eval(formula, &vars, kind) {
+        Some(formula) => match eval(formula, vars, kind) {
             Ok(v) => Link::Linked(tr!(
                 "LINKED_FIELD_HINT",
                 formula = formula,
@@ -727,7 +816,6 @@ pub fn field<'a>(
         },
     };
     let fx_width = ui.spacing().interact_size.y;
-    let width = ui.spacing().interact_size.x * 1.6 + fx_width;
     // A number set in the formula editor last frame (the value is borrowed by the field
     // once drawn, so it is set now).
     let pending_id = formula_id.with("set");
@@ -738,14 +826,10 @@ pub fn field<'a>(
     let current = *value;
     // The value, the formula's result when linked. A number typed in or dragged unlinks
     // it, a formula links it again.
-    let (mut response, typed) = plain_field(ui, value, make, &vars, kind, width);
+    let (mut response, typed) = plain_field(ui, value, make, vars, kind, width);
     match typed {
-        Some(formula) => {
-            bindings.insert(field, formula);
-        }
-        None if response.changed() => {
-            bindings.remove(&field);
-        }
+        Some(typed) => *formula = Some(typed),
+        None if response.changed() => *formula = None,
         None => {}
     }
     match &link {
@@ -808,7 +892,7 @@ pub fn field<'a>(
         let galley = painter.layout_job(job);
         painter.galley(fx_rect.center() - galley.size() / 2.0, galley, color);
     }
-    if let Some(v) = formula_editor(ui, &fx, bindings, field, current, &vars) {
+    if let Some(v) = formula_editor(ui, &fx, formula, kind, current, vars) {
         ui.data_mut(|d| d.insert_temp(pending_id, v));
         ui.ctx().request_repaint();
     }
@@ -830,19 +914,17 @@ const FORMULA_EDITOR_WIDTH: f32 = 260.0;
 fn formula_editor(
     ui: &mut Ui,
     fx: &Response,
-    bindings: &mut Bindings,
-    field: Field,
+    formula: &mut Option<String>,
+    kind: Kind,
     value: f32,
     vars: &[Variable],
 ) -> Option<f32> {
-    let kind = field.kind();
     let popup_id = fx.id.with("editor");
     let draft_id = popup_id.with("draft");
     let edit_id = popup_id.with("edit");
     if fx.clicked() {
-        let draft = bindings
-            .get(&field)
-            .cloned()
+        let draft = formula
+            .clone()
             .unwrap_or_else(|| format!("{}", (value * 1000.0).round() / 1000.0));
         ui.data_mut(|d| {
             d.insert_temp(draft_id, draft);
@@ -919,10 +1001,10 @@ fn formula_editor(
                     .add_enabled(result.is_ok(), egui::Button::new(tr!("OK")))
                     .clicked();
                 let cancel = ui.button(tr!("CANCEL")).clicked();
-                if bindings.contains_key(&field) {
+                if formula.is_some() {
                     crate::app::at_left_edge(ui, |ui| {
                         if ui.button(tr!("UNLINK_VARIABLE")).clicked() {
-                            bindings.remove(&field);
+                            *formula = None;
                             close = true;
                         }
                     });
@@ -933,9 +1015,9 @@ fn formula_editor(
                 {
                     let text = draft.trim().to_owned();
                     if uses_variables(&text) {
-                        bindings.insert(field, text);
+                        *formula = Some(text);
                     } else {
-                        bindings.remove(&field);
+                        *formula = None;
                         set = Some(v as f32);
                     }
                     close = true;
@@ -1181,7 +1263,7 @@ pub fn broken_links_by_node(doc: &Document) -> HashMap<u64, Vec<String>> {
         all
     }
     let mut out = HashMap::new();
-    walk(&doc.layers, &doc.variables, &mut out);
+    walk(&doc.layers, &doc.all_variables(), &mut out);
     out
 }
 
@@ -1257,6 +1339,66 @@ fn scaled(formula: &str, k: f32) -> String {
     }
 }
 
+/// `formula` plus `d`: a number it ends with (`col + 12`) takes `d` in, or else `+ d` is
+/// added, and nothing for a zero.
+pub fn shifted(formula: &str, d: f32) -> String {
+    let formula = formula.trim();
+    if d.abs() < 1e-4 {
+        return formula.to_owned();
+    }
+    let number = |v: f32| {
+        let s = format!("{:.4}", v.abs());
+        s.trim_end_matches('0').trim_end_matches('.').to_owned()
+    };
+    let with = |base: &str, c: f32| {
+        if c.abs() < 1e-4 {
+            base.to_owned()
+        } else if base.is_empty() {
+            format!("{}{}", if c < 0.0 { "-" } else { "" }, number(c))
+        } else {
+            format!("{base} {} {}", if c < 0.0 { "-" } else { "+" }, number(c))
+        }
+    };
+    if let Ok(c) = formula.parse::<f32>() {
+        return with("", c + d);
+    }
+    // The last term, when it is a number added or taken away outside any parentheses.
+    let mut depth = 0;
+    let mut last = None;
+    for (i, c) in formula.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            '+' | '-' if depth == 0 && i > 0 => last = Some(i),
+            _ => {}
+        }
+    }
+    if let Some(i) = last {
+        let base = formula[..i].trim_end();
+        let binary = base
+            .chars()
+            .last()
+            .is_some_and(|c| c.is_alphanumeric() || c == '_' || c == ')' || c == '.');
+        if binary && let Ok(c) = formula[i + 1..].trim().parse::<f32>() {
+            let c = if formula[i..].starts_with('-') { -c } else { c };
+            return with(base, c + d);
+        }
+    }
+    with(formula, d)
+}
+
+/// Moves the X and Y formulas of every layer by `d` mm, as when the layers are all
+/// moved by `d`.
+pub fn shift_positions(doc: &mut Document, d: [f32; 2]) {
+    doc.for_each_layer_mut(|l| {
+        for (field, k) in [(Field::X, 0), (Field::Y, 1)] {
+            if let Some(f) = l.bindings.get_mut(&field) {
+                *f = shifted(f, d[k]);
+            }
+        }
+    });
+}
+
 /// An unlinked [`field`]: the `DragValue` made by `make`, which also takes a formula.
 /// Returns its response and the formula typed in, when it names a variable.
 fn plain_field<'a>(
@@ -1284,17 +1426,34 @@ fn plain_field<'a>(
 /// Renaming a variable renames it in
 /// the formulas and color links. Removing one in use asks first; the fields and colors
 /// using it keep their link and their value, and show a broken link icon (see
-/// [`field`]). Returns true if the document changed.
-pub fn variables_ui(ui: &mut Ui, doc: &mut Document) -> bool {
+/// [`field`]). Only `kinds` can be added. Returns true if the document changed.
+pub fn variables_ui(ui: &mut Ui, doc: &mut Document, kinds: &[Kind]) -> bool {
     let mut changed = false;
-    if doc.variables.is_empty() {
+    if doc.variables.is_empty() && doc.template_variables.is_empty() {
         crate::callout::callout(ui, crate::callout::Tone::Info, tr!("VARIABLES_EMPTY"));
         ui.add_space(4.0);
+    }
+    // Names the template's variables have: not given to the project's.
+    let template_names: Vec<String> = doc
+        .template_variables
+        .iter()
+        .map(|v| v.name.clone())
+        .collect();
+    // With a template that has variables: two sections, the template's first.
+    let sections = template_variables_ui(ui, doc);
+    if sections {
+        ui.add_space(4.0);
+        ui.label(RichText::new(tr!("PROJECT_VARIABLES")).strong());
+        if doc.variables.is_empty() {
+            ui.weak(tr!("NO_PROJECT_VARIABLES"));
+        }
     }
     let mut remove = None;
     let mut rename = None;
     let names: Vec<String> = doc.variables.iter().map(|v| v.name.clone()).collect();
     let used: Vec<usize> = names.iter().map(|n| use_count(doc, n)).collect();
+    // What the project's lengths, angles, sizes and numbers can inherit from.
+    let template_vars = doc.template_variables.clone();
     for kind in Kind::ALL {
         let of_kind: Vec<usize> = (0..doc.variables.len())
             .filter(|&i| doc.variables[i].value.kind() == kind)
@@ -1304,6 +1463,14 @@ pub fn variables_ui(ui: &mut Ui, doc: &mut Document) -> bool {
         }
         for i in of_kind {
             let var = &mut doc.variables[i];
+            // Inheriting from a template variable that is gone (the template replaced),
+            // or with another error.
+            // What is wrong with the name being typed (or the name itself).
+            let mut name_error = None;
+            let error = match inherited(var, &template_vars) {
+                Some(Err(e)) => Some(e),
+                _ => None,
+            };
             ui.horizontal(|ui| {
                 kind.icon(ui);
                 // From the right edge: the remove button, the value, then the name in the
@@ -1337,13 +1504,30 @@ pub fn variables_ui(ui: &mut Ui, doc: &mut Document) -> bool {
                             .inner
                             .on_hover_text(crate::colors::describe(*c))
                             .changed();
+                    } else if !template_vars.is_empty() || var.formula.is_some() {
+                        // With an fx button, to inherit from the template's variables.
+                        let id = ui.scope_id().with(("variable_formula", i));
+                        let before = var.formula.clone();
+                        if let Some(v) = var.value.number_mut() {
+                            changed |= formula_field(
+                                ui,
+                                id,
+                                &mut var.formula,
+                                kind,
+                                &template_vars,
+                                v,
+                                |d| d.speed(0.1).max_decimals(3),
+                                value_width,
+                            )
+                            .changed();
+                        }
+                        changed |= var.formula != before;
                     } else if let Some(v) = var.value.number_mut() {
                         changed |= ui
                             .add_sized(
                                 [value_width, row_height],
                                 DragValue::new(v).speed(0.1).max_decimals(3),
                             )
-                            .on_hover_text(kind.label())
                             .changed();
                     }
                     // The name is edited in a draft, applied when the field is left, so the
@@ -1352,19 +1536,24 @@ pub fn variables_ui(ui: &mut Ui, doc: &mut Document) -> bool {
                     let mut draft = ui
                         .data(|d| d.get_temp::<String>(id))
                         .unwrap_or_else(|| var.name.clone());
-                    let taken = |n: &str| names.iter().enumerate().any(|(j, m)| j != i && m == n);
-                    let ok = is_valid_name(&draft) && !taken(&draft);
+                    let taken = |n: &str| {
+                        names.iter().enumerate().any(|(j, m)| j != i && m == n)
+                            || template_names.iter().any(|m| m == n)
+                    };
+                    let problem = name_problem(&draft, taken(&draft));
+                    let ok = problem.is_none();
                     let mut edit = egui::TextEdit::singleline(&mut draft)
                         .desired_width(ui.available_width())
                         .hint_text(tr!("VARIABLE_NAME_HINT"));
-                    if !ok {
+                    if !ok || error.is_some() {
                         edit = edit.text_color(ui.visuals().error_fg_color);
                     }
                     let r = ui.add(edit);
+                    // The use count; a problem is told in the warning under the row.
                     let r = if ok {
                         r.on_hover_text(tr_n!("VARIABLE_USE_COUNT", used[i]))
                     } else {
-                        r.on_hover_text(tr!("VARIABLE_NAME_INVALID"))
+                        r
                     };
                     if r.lost_focus() {
                         if ok && draft != var.name {
@@ -1376,8 +1565,25 @@ pub fn variables_ui(ui: &mut Ui, doc: &mut Document) -> bool {
                     } else if r.has_focus() || r.changed() {
                         ui.data_mut(|d| d.insert_temp(id, draft));
                     }
+                    name_error = problem;
                 });
             });
+            if let Some(text) = &name_error {
+                crate::callout::callout(ui, crate::callout::Tone::Warning, text);
+                ui.add_space(2.0);
+            }
+            if let (Some(e), Some(formula)) = (&error, &var.formula) {
+                let text = match e {
+                    FormulaError::UnknownVariable(source) => tr!(
+                        "INHERITED_VARIABLE_MISSING",
+                        name = var.name,
+                        source = source
+                    ),
+                    e => format!("{} = {formula}: {}", var.name, e.message()),
+                };
+                crate::callout::callout(ui, crate::callout::Tone::Warning, &text);
+                ui.add_space(2.0);
+            }
         }
     }
     if let Some((old, new)) = rename {
@@ -1426,26 +1632,88 @@ pub fn variables_ui(ui: &mut Ui, doc: &mut Document) -> bool {
         }
     }
     ui.add_space(6.0);
-    ui.menu_button(tr!("ADD_VARIABLE"), |ui| {
-        for kind in Kind::ALL {
-            let clicked = ui
-                .horizontal(|ui| {
-                    kind.icon(ui);
-                    ui.button(kind.label()).clicked()
-                })
-                .inner;
-            if clicked {
-                let name = new_name(&doc.variables, kind);
-                doc.variables.push(Variable {
-                    name,
-                    value: kind.new_value(),
-                });
-                changed = true;
-            }
-        }
-    });
+    // At the panel's right edge.
+    ui.allocate_ui_with_layout(
+        egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
+        egui::Layout::right_to_left(egui::Align::Center),
+        |ui| {
+            ui.menu_button(tr!("ADD_VARIABLE"), |ui| {
+                for &kind in kinds {
+                    let clicked = ui
+                        .horizontal(|ui| {
+                            kind.icon(ui);
+                            ui.button(kind.label()).clicked()
+                        })
+                        .inner;
+                    if clicked {
+                        let name = new_name(&doc.all_variables(), kind);
+                        doc.variables.push(Variable {
+                            formula: None,
+                            name,
+                            value: kind.new_value(),
+                        });
+                        changed = true;
+                    }
+                }
+            });
+        },
+    );
     ui.add_space(6.0);
     changed
+}
+
+/// The project template's variables, under a Template heading, in rows tinted in the
+/// accent color: read-only (they are the template's, changed in the template editor),
+/// usable in formulas like the others. Those a project variable names are left out: the
+/// project's is used. Returns true if it showed any.
+fn template_variables_ui(ui: &mut Ui, doc: &mut Document) -> bool {
+    let shown: Vec<Variable> = doc
+        .template_variables
+        .iter()
+        .filter(|t| doc.variables.iter().all(|v| v.name != t.name))
+        .cloned()
+        .collect();
+    if shown.is_empty() {
+        return false;
+    }
+    ui.label(RichText::new(tr!("TEMPLATE_VARIABLES")).strong());
+    let tint = ui.visuals().selection.bg_fill.gamma_multiply(0.18);
+    for var in &shown {
+        let kind = var.value.kind();
+        let used = use_count(doc, &var.name);
+        let response = egui::Frame::NONE
+            .fill(tint)
+            .corner_radius(4.0)
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    kind.icon(ui);
+                    // At the right edge, the unit then the value, the name in the room
+                    // left.
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        crate::layers_ui::unit(ui, kind.unit());
+                        // As the project's value fields show it: one decimal at least.
+                        let value = match var.value.number() {
+                            Some(v) if v.fract() == 0.0 => format!("{v:.1}"),
+                            Some(v) => format!("{v}"),
+                            None => var.value.short_text(),
+                        };
+                        ui.label(value);
+                        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                            ui.add_space(ui.spacing().button_padding.x);
+                            ui.add(egui::Label::new(&var.name).truncate());
+                        });
+                    });
+                });
+            })
+            .response;
+        response.on_hover_text(format!(
+            "{}\n{}",
+            tr!("TEMPLATE_VARIABLE_HINT"),
+            tr_n!("VARIABLE_USE_COUNT", used)
+        ));
+        ui.add_space(2.0);
+    }
+    true
 }
 
 /// A text variable's value in the Variables section: a button of `size` showing the
@@ -1491,6 +1759,11 @@ fn use_count(doc: &mut Document, name: &str) -> usize {
             .sum()
     }
     walk(&doc.layers, name)
+        + doc
+            .variables
+            .iter()
+            .filter(|v| v.formula.as_deref().is_some_and(|f| uses(f, name)))
+            .count()
         + crate::colors::use_count(doc, name)
         + crate::text_links::use_count(doc, name)
 }
@@ -1499,8 +1772,109 @@ fn use_count(doc: &mut Document, name: &str) -> usize {
 mod tests {
     use super::*;
 
+    #[test]
+    fn project_layers_follow_their_template_variables() {
+        let mut doc = Document {
+            variables: vec![var("gap", Value::Length(2.0))],
+            template_variables: vec![
+                var("button", Value::Length(41.0)),
+                // Named by a project variable too: the project's is used.
+                var("gap", Value::Length(99.0)),
+            ],
+            ..Default::default()
+        };
+        let names: Vec<String> = doc.all_variables().into_iter().map(|v| v.name).collect();
+        assert_eq!(names, ["gap", "button"]);
+        let mut layer = crate::shape::new_layer(1, ShapeKind::Ellipse, [100.0, 80.0]);
+        layer.bindings.insert(Field::Width, "button + gap".into());
+        doc.layers.push(Node::Layer(Box::new(layer)));
+        let mut applied = Applied::new();
+        assert!(apply(&mut doc, &mut applied));
+        let Node::Layer(l) = &doc.layers[0] else {
+            unreachable!()
+        };
+        assert!((raw(l, Field::Width).unwrap() - 43.0).abs() < 1e-4);
+        // Not saved with the project: only its own variable is.
+        let json = serde_json::to_value(&doc).unwrap();
+        assert_eq!(json["variables"].as_array().unwrap().len(), 1);
+        assert!(json.get("template_variables").is_none());
+    }
+
+    #[test]
+    fn project_variables_inherit_from_the_template_ones() {
+        let mut wide = var("wide", Value::Length(0.0));
+        wide.formula = Some("button + 2".into());
+        // Project variables can't be used: only the template's.
+        let mut other = var("other", Value::Length(5.0));
+        other.formula = Some("wide * 2".into());
+        let mut doc = Document {
+            variables: vec![wide, other],
+            template_variables: vec![var("button", Value::Length(41.0))],
+            ..Default::default()
+        };
+        let mut layer = crate::shape::new_layer(1, ShapeKind::Ellipse, [100.0, 80.0]);
+        layer.bindings.insert(Field::Width, "wide".into());
+        doc.layers.push(Node::Layer(Box::new(layer)));
+        let mut applied = Applied::new();
+        assert!(apply(&mut doc, &mut applied));
+        assert_eq!(doc.variables[0].value, Value::Length(43.0));
+        assert_eq!(doc.variables[1].value, Value::Length(5.0));
+        assert_eq!(
+            inherited(&doc.variables[1], &doc.template_variables),
+            Some(Err(FormulaError::UnknownVariable("wide".into())))
+        );
+        let Node::Layer(l) = &doc.layers[0] else {
+            unreachable!()
+        };
+        assert!((raw(l, Field::Width).unwrap() - 43.0).abs() < 1e-4);
+        // The formula is saved and read back.
+        let json = serde_json::to_string(&doc.variables[0]).unwrap();
+        assert!(json.contains("\"formula\":\"button + 2\""), "{json}");
+        let read: Variable = serde_json::from_str(&json).unwrap();
+        assert_eq!(read, doc.variables[0]);
+        let plain = serde_json::to_string(&var("gap", Value::Length(2.0))).unwrap();
+        assert!(!plain.contains("formula"), "{plain}");
+        // Another template without `button`: an error, and the last value is kept.
+        doc.template_variables = vec![var("panel", Value::Length(10.0))];
+        assert!(!apply(&mut doc, &mut applied));
+        assert_eq!(doc.variables[0].value, Value::Length(43.0));
+        assert_eq!(
+            inherited(&doc.variables[0], &doc.template_variables),
+            Some(Err(FormulaError::UnknownVariable("button".into())))
+        );
+        // Back with a new value: followed again.
+        doc.template_variables = vec![var("button", Value::Length(20.0))];
+        assert!(apply(&mut doc, &mut applied));
+        assert_eq!(doc.variables[0].value, Value::Length(22.0));
+    }
+
+    #[test]
+    fn shifted_formulas_take_the_offset_into_their_last_number() {
+        assert_eq!(shifted("col", 0.0), "col");
+        assert_eq!(shifted("col", 12.5), "col + 12.5");
+        assert_eq!(shifted("col", -12.5), "col - 12.5");
+        assert_eq!(shifted("col + 12.5", -12.5), "col");
+        assert_eq!(shifted("col - 2", 5.0), "col + 3");
+        assert_eq!(shifted("(a + 2) * b", 1.0), "(a + 2) * b + 1");
+        assert_eq!(shifted("a + 2 * b", 1.0), "a + 2 * b + 1");
+        assert_eq!(shifted("a / -2", 1.0), "a / -2 + 1");
+        assert_eq!(shifted("40", -10.0), "30");
+        let vars = vars();
+        for f in [
+            "button",
+            "button * 2 - 3",
+            "(button + 1) / 2",
+            "-button + 4",
+        ] {
+            let before = eval(f, &vars, Kind::Length).unwrap();
+            let after = eval(&shifted(f, 7.25), &vars, Kind::Length).unwrap();
+            assert!((after - before - 7.25).abs() < 1e-4, "{f}");
+        }
+    }
+
     fn var(name: &str, value: Value) -> Variable {
         Variable {
+            formula: None,
             name: name.into(),
             value,
         }
@@ -1556,6 +1930,29 @@ mod tests {
         );
         assert!(is_valid_name("_a1") && is_valid_name("épaisseur"));
         assert!(!is_valid_name("1a") && !is_valid_name("a b") && !is_valid_name(""));
+        assert!(is_valid_name("buttonSize") && !is_valid_name("Button"));
+        for name in [
+            "",
+            "Button",
+            "1a",
+            "a b",
+            "a-b",
+            "-a",
+            "_a1",
+            "épaisseur",
+            "Épaisseur",
+        ] {
+            assert_eq!(
+                name_problem(name, false).is_none(),
+                is_valid_name(name),
+                "{name}"
+            );
+        }
+        assert!(name_problem("a", true).is_some());
+        assert!(!is_valid_name("Épaisseur"));
+        // Still read in formulas.
+        let v = [var("Button", Value::Length(3.0))];
+        assert_eq!(eval("Button + 1", &v, Kind::Length), Ok(4.0));
     }
 
     fn doc_with(layer: Layer) -> Document {
@@ -1755,7 +2152,7 @@ mod tests {
                 ..Default::default()
             };
             let mut out = ctx.run_ui(input, |ui| {
-                variables_ui(ui, doc);
+                variables_ui(ui, doc, &Kind::ALL);
             });
             out.textures_delta.clear();
             out.shapes
@@ -2010,7 +2407,7 @@ mod tests {
                 ..Default::default()
             };
             let mut out = ctx.run_ui(input, |ui| {
-                variables_ui(ui, doc);
+                variables_ui(ui, doc, &Kind::ALL);
             });
             out.textures_delta.clear();
             out.shapes
@@ -2094,6 +2491,7 @@ mod tests {
                     opacity: 1.0,
                     expanded: false,
                     children: vec![Node::Layer(Box::new(gone))],
+                    element: None,
                 }),
             ],
             variables: vars(),
@@ -2180,7 +2578,7 @@ mod tests {
         };
         let ctx = egui::Context::default();
         let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
-            variables_ui(ui, &mut doc);
+            variables_ui(ui, &mut doc, &Kind::ALL);
         });
         out.textures_delta.clear();
         let texts: Vec<String> = out

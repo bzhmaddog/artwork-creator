@@ -524,6 +524,24 @@ enum Action {
     Confirm(Vec<PathBuf>),
 }
 
+/// Shows `folder` in the system's file manager.
+pub fn open_folder(folder: &Path) -> Result<(), String> {
+    let program = if cfg!(target_os = "windows") {
+        "explorer"
+    } else if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let mut child = std::process::Command::new(program)
+        .arg(folder)
+        .spawn()
+        .map_err(|e| tr!("CANNOT_OPEN_FOLDER", path = folder.display(), e = e))?;
+    // Reaped once the file manager is started (or Explorer exits).
+    std::thread::spawn(move || child.wait());
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

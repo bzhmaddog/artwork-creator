@@ -15,7 +15,7 @@ use crate::gradient::{Geometry as GradientGeometry, Gradient, Ink};
 use crate::i18n::tr;
 use crate::print;
 use crate::render::{self, Cuts, OUTLINE_WIDTH_MM, Part, Scene};
-use crate::template::{ElementKind, KINDS, Polyline};
+use crate::template::{KINDS, Polyline};
 
 /// How the artwork is exported and printed. Two parts: what to export (the formats and
 /// the template lines printed), chosen in the Export and Print windows and saved with the
@@ -33,6 +33,7 @@ pub struct ExportSettings {
     /// Raster resolution, for both formats.
     pub dpi: u32,
     /// Print the lines of each element kind (`ElementKind::index`).
+    #[serde(deserialize_with = "print_lines_saved")]
     pub print_lines: [bool; KINDS],
     /// Clip to the outline and leave holes blank. Its bleed is `bleed_mm`.
     pub cuts: Cuts,
@@ -136,6 +137,13 @@ fn tile_path(base: &Path, tile: print::Tile, ext: &str) -> PathBuf {
     base.with_file_name(format!("{stem}-r{}c{}.{ext}", tile.row + 1, tile.col + 1))
 }
 
+/// `print_lines` as saved, also by a version that had more element kinds.
+fn print_lines_saved<'de, D: serde::Deserializer<'de>>(d: D) -> Result<[bool; KINDS], D::Error> {
+    use serde::Deserialize;
+    let saved = Vec::<bool>::deserialize(d)?;
+    Ok(crate::template::per_kind(&saved, [true; KINDS]))
+}
+
 impl Default for ExportSettings {
     fn default() -> Self {
         Self {
@@ -143,8 +151,7 @@ impl Default for ExportSettings {
             pdf: true,
             svg: false,
             dpi: 300,
-            // Anchors are construction marks: printed only when asked for.
-            print_lines: ElementKind::ALL.map(|k| k != ElementKind::Anchors),
+            print_lines: [true; KINDS],
             cuts: Cuts::default(),
             bleed_mm: 0.0,
             crop_marks: false,
@@ -905,7 +912,6 @@ pub(crate) mod tests {
         let entry = template::tests::fixture();
         let tpl = template::load(&entry).unwrap();
         let mut doc = Document::default();
-        doc.template_placement = entry.default_placement(tpl.size_mm, doc.page_mm());
         let c = doc.page_center();
         let square = |id: u64, rgb: [u8; 3], center: P2| {
             let img =
@@ -1590,8 +1596,7 @@ pub(crate) mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         let entry = template::tests::fixture();
         let tpl = template::load(&entry).unwrap();
-        let mut doc = Document::default();
-        doc.template_placement = entry.default_placement(tpl.size_mm, doc.page_mm());
+        let doc = Document::default();
         let scene = Scene::new(
             &doc,
             Some(&tpl),

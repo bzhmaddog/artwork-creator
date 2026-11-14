@@ -1,8 +1,14 @@
-//! Controller templates: each subfolder of `templates/` holding `.dxf` files.
+//! Controller templates: each subfolder of `templates/` holding a `template.svg` (or the
+//! `.dxf` files of an older template).
 //!
-//! A template is made of elements (outline, buttons, cutouts, anchors), each drawn in its
-//! own DXF file. The files share one coordinate system, as when exported from the same
-//! drawing.
+//! Templates come from two folders: the provided ones, shipped next to the executable and
+//! never changed by the app (an update replaces them), and the user's, in the app's data
+//! folder, which the user makes by duplicating a template and may change or delete.
+//!
+//! A template is made of elements (outline, buttons, cutouts), each a group (layer) of
+//! its `template.svg`, named by its `id` in `template.json`. Older templates draw each
+//! element in its own DXF file; the files share one coordinate system, as when exported
+//! from the same drawing. Both are read; the template editor writes the SVG.
 
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -11,7 +17,7 @@ use dxf::entities::EntityType;
 use dxf::enums::Units;
 use serde::{Deserialize, Serialize};
 
-use crate::document::{CUSTOM_PAGE_RANGE_MM, Orientation, P2, PageSize, TemplatePlacement};
+use crate::document::{CUSTOM_PAGE_RANGE_MM, Orientation, P2, PageSize};
 use crate::i18n::{tr, tr_noop};
 
 /// Name of the optional per-template configuration file.
@@ -27,22 +33,16 @@ pub enum ElementKind {
     Buttons,
     /// Other holes: screws, switches, windows.
     Cutouts,
-    /// Points that images snap to on the canvas, e.g. button centers. Cut nothing; printed
-    /// as small crosses only when asked for in the Export window. Read from the DXF's
-    /// POINT entities and the centers of its closed shapes, so a buttons DXF gives the
-    /// button centers.
-    Anchors,
 }
 
 /// Number of element kinds, for per-kind settings arrays.
 pub const KINDS: usize = ElementKind::ALL.len();
 
 impl ElementKind {
-    pub const ALL: [ElementKind; 4] = [
+    pub const ALL: [ElementKind; 3] = [
         ElementKind::Outline,
         ElementKind::Buttons,
         ElementKind::Cutouts,
-        ElementKind::Anchors,
     ];
 
     /// Position in `ALL`, for per-kind settings arrays.
@@ -56,7 +56,6 @@ impl ElementKind {
             ElementKind::Outline => tr_noop!("ELEMENT_OUTLINE"),
             ElementKind::Buttons => tr_noop!("ELEMENT_BUTTONS"),
             ElementKind::Cutouts => tr_noop!("ELEMENT_CUTOUTS"),
-            ElementKind::Anchors => tr_noop!("ELEMENT_ANCHORS"),
         }
     }
 
@@ -66,14 +65,34 @@ impl ElementKind {
             ElementKind::Outline => [255, 0, 255],
             ElementKind::Buttons => [0, 170, 255],
             ElementKind::Cutouts => [255, 140, 0],
-            ElementKind::Anchors => [0, 200, 120],
         }
     }
+}
 
-    /// Made of lines (all but anchors, which are points).
-    pub fn has_lines(self) -> bool {
-        self != ElementKind::Anchors
-    }
+/// What a group of the template editor stands for: an element of the template.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ElementTag {
+    pub kind: ElementKind,
+    /// Its line color.
+    pub color: [u8; 3],
+}
+
+/// Per-kind settings (`ElementKind::index`) as saved: a list longer than the kinds, from
+/// a version that had more (anchors, last), keeps the first ones; a shorter one is
+/// completed with `fill`.
+pub fn per_kind<T: Copy>(saved: &[T], fill: [T; KINDS]) -> [T; KINDS] {
+    std::array::from_fn(|i| saved.get(i).copied().unwrap_or(fill[i]))
+}
+
+/// The elements of `template.json`, without those of kinds no longer known ("anchors",
+/// from an older version: element centers are snapped to now).
+fn known_elements<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<ElementConfig>, D::Error> {
+    let values = Vec::<serde_json::Value>::deserialize(d)?;
+    values
+        .into_iter()
+        .filter(|v| v.get("kind").and_then(|k| k.as_str()) != Some("anchors"))
+        .map(|v| serde_json::from_value(v).map_err(serde::de::Error::custom))
+        .collect()
 }
 
 /// One element in `template.json`.
@@ -81,8 +100,12 @@ impl ElementKind {
 pub struct ElementConfig {
     /// What the element is for.
     pub kind: ElementKind,
-    /// DXF file inside the template folder.
-    pub dxf: String,
+    /// Its group's id in `template.svg`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    /// Its DXF file inside the template folder, in an older template (without `id`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dxf: Option<String>,
     /// Display name. Defaults to the kind.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -91,36 +114,121 @@ pub struct ElementConfig {
     pub color: Option<String>,
 }
 
-/// Contents of `template.json`. Every field is optional.
+/// Contents of `template.json`. Every field is optional. Written in the order of the
+/// fields here, always the same: who it is, where it comes from, its page, its
+/// drawing, then what the template editor keeps.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TemplateConfig {
+    /// Display name, the model's when there is a vendor ("T16"). Defaults to the folder
+    /// name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// Who makes the controller ("Cosmox"): the templates are listed by vendor.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub vendor: Option<String>,
     /// Which version of the template this is ("1.2"), shown to tell copies apart.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub version: Option<String>,
-    /// Display name, the model's when there is a vendor ("T16"). Defaults to the folder
-    /// name.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    /// The template's elements. When empty, a single DXF (`dxf`, or else the first
-    /// `.dxf` found) is the outline.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub elements: Vec<ElementConfig>,
-    /// DXF file of a template without `elements`.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub dxf: Option<String>,
-    /// Drawing units when the DXF does not declare them: "mm", "cm", "inch".
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub units: Option<String>,
-    /// Default placement on the page. Rotation is chosen automatically when absent.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub placement: Option<TemplatePlacement>,
+    /// The template this one was made from, for a copy. One lacking its name or version
+    /// is ignored.
+    #[serde(
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "complete_source"
+    )]
+    pub source: Option<TemplateSource>,
     /// The page the template is made for, set when it is picked.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub page: Option<PageConfig>,
+    /// Drawing units when the DXF does not declare them: "mm", "cm", "inch".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub units: Option<String>,
+    /// DXF file of a template without `elements`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dxf: Option<String>,
+    /// The template's elements. When empty, the whole `template.svg` (or else a single
+    /// DXF: `dxf`, or the first `.dxf` found) is the outline.
+    #[serde(
+        skip_serializing_if = "Vec::is_empty",
+        deserialize_with = "known_elements"
+    )]
+    pub elements: Vec<ElementConfig>,
+    /// Variables the shapes' sizes and positions are worked out from, in the template
+    /// editor (see `variables`).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub variables: Vec<crate::variables::Variable>,
+    /// The formulas of the shapes' linked fields, by the `id` of the shape in
+    /// `template.svg`.
+    #[serde(skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub bindings: std::collections::BTreeMap<String, crate::variables::Bindings>,
+    /// Where the top-left corner of `template.svg` was on the editor's page when
+    /// `bindings` were written, in mm: their X and Y formulas are page positions, moved
+    /// along when the template opens elsewhere on its page.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bindings_origin: Option<P2>,
+}
+
+/// The template a copy was made from, in `template.json`: `{ "name": "T16", "vendor":
+/// "Cosmox", "version": "1.1" }`. Its name and version are required, as every
+/// template's are; its vendor may be left out.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct TemplateSource {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub vendor: Option<String>,
+    pub version: String,
+}
+
+impl TemplateSource {
+    /// The template a copy of `entry` comes from: none unless it has a version (it has
+    /// a name).
+    pub fn of(entry: &TemplateEntry) -> Option<Self> {
+        Self {
+            name: entry.name.clone(),
+            vendor: entry.vendor.clone(),
+            version: entry.version.clone()?,
+        }
+        .complete()
+    }
+
+    /// The source if its name and version aren't blank; a blank vendor is none.
+    fn complete(mut self) -> Option<Self> {
+        if self.vendor.as_deref().is_some_and(|v| v.trim().is_empty()) {
+            self.vendor = None;
+        }
+        (!self.name.trim().is_empty() && !self.version.trim().is_empty()).then_some(self)
+    }
+
+    /// As shown: "vendor - name - vversion", or "name - vversion" without a vendor.
+    pub fn describe(&self) -> String {
+        match &self.vendor {
+            Some(v) => format!("{v} - {} - v{}", self.name, self.version),
+            None => format!("{} - v{}", self.name, self.version),
+        }
+    }
+}
+
+/// A `source` with its name and version; anything else (one missing, blank or not a
+/// text) is ignored rather than making `template.json` unreadable.
+fn complete_source<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<TemplateSource>, D::Error> {
+    let value = Option::<serde_json::Value>::deserialize(d)?;
+    Ok(value
+        .and_then(|v| serde_json::from_value::<TemplateSource>(v).ok())
+        .and_then(TemplateSource::complete))
+}
+
+/// The version of a new template, or of a copy of one without a valid version.
+pub const FIRST_VERSION: &str = "1.0";
+
+/// Whether `version` follows the "x.y" convention templates use: two whole numbers
+/// ("1.0", "2.13").
+pub fn is_valid_version(version: &str) -> bool {
+    let mut parts = version.split('.');
+    let number =
+        |p: Option<&str>| p.is_some_and(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()));
+    number(parts.next()) && number(parts.next()) && parts.next().is_none()
 }
 
 /// The page a template is made for, in `template.json`: `{ "size": "A4", "orientation":
@@ -194,17 +302,38 @@ impl PageConfig {
     }
 }
 
-/// An element's DXF file, resolved from the config.
+/// Where an element is drawn, resolved from the config.
 #[derive(Clone, Debug, PartialEq)]
 pub struct ElementSource {
     /// What the element is for.
     pub kind: ElementKind,
     /// Shown in the app.
     pub name: String,
-    /// The DXF file.
+    /// The file: the template's SVG, or a DXF file.
     pub path: PathBuf,
+    /// Its group's id in the SVG; `None` for all of it (or for a DXF file).
+    pub group: Option<String>,
     /// Color from `template.json`, if set.
     pub color: Option<[u8; 3]>,
+}
+
+impl ElementSource {
+    /// It is drawn in an SVG file (else a DXF file).
+    pub fn is_svg(&self) -> bool {
+        self.path
+            .extension()
+            .is_some_and(|x| x.eq_ignore_ascii_case("svg"))
+    }
+}
+
+/// Which folder a template comes from.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Origin {
+    /// Shipped with the app: read only.
+    #[default]
+    Provided,
+    /// In the user's templates folder: can be changed and deleted.
+    User,
 }
 
 /// An installed template folder, read but not loaded yet.
@@ -212,6 +341,8 @@ pub struct ElementSource {
 pub struct TemplateEntry {
     /// Folder name; this is what projects store.
     pub id: String,
+    /// Which folder it comes from.
+    pub origin: Origin,
     /// Shown to the user: the model's name when there is a vendor.
     pub name: String,
     /// Who makes the controller, if `template.json` says.
@@ -222,12 +353,15 @@ pub struct TemplateEntry {
     pub page: PageSetup,
     /// The template's folder.
     pub folder: PathBuf,
-    /// Its elements' DXF files.
+    /// Where its elements are drawn.
     pub sources: Vec<ElementSource>,
     /// Parsed `template.json`; defaults if missing or invalid.
     pub config: TemplateConfig,
     /// Error from reading `template.json`, if any.
     pub config_error: Option<String>,
+    /// What the template diagnostic found wrong with it (`template_check`), filled when
+    /// the templates are listed (`scan_all`).
+    pub problems: Vec<crate::template_check::Problem>,
 }
 
 impl TemplateEntry {
@@ -244,7 +378,7 @@ impl TemplateEntry {
         self.folder.join(CONFIG_FILE)
     }
 
-    /// Modification times of the config and the DXF files, used to reload on change.
+    /// Modification times of the config and the drawing files, used to reload on change.
     pub fn stamp(&self) -> Vec<Option<SystemTime>> {
         let mtime = |p: &Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
         std::iter::once(self.config_path())
@@ -253,27 +387,106 @@ impl TemplateEntry {
             .collect()
     }
 
-    /// Placement from the config, or an automatic rotation for this page.
-    pub fn default_placement(&self, tpl_size: P2, page: P2) -> TemplatePlacement {
-        self.config
-            .placement
-            .unwrap_or_else(|| TemplatePlacement::auto(tpl_size, page))
+    /// Deletes its folder. Only a user template can be deleted.
+    pub fn delete(&self) -> Result<(), String> {
+        if self.origin != Origin::User {
+            return Err(tr!("PROVIDED_TEMPLATE_READ_ONLY", name = self.full_name()));
+        }
+        std::fs::remove_dir_all(&self.folder)
+            .map_err(|e| tr!("CANNOT_DELETE_FOLDER", path = self.folder.display(), e = e))
     }
 
-    /// Writes `placement` into `template.json`, keeping the other settings.
-    // For the template editor (see ROADMAP): the drawing no longer changes the placement.
-    #[allow(dead_code)]
-    pub fn save_placement(&mut self, placement: TemplatePlacement) -> Result<(), String> {
-        self.config.placement = Some(placement);
-        let json = serde_json::to_string_pretty(&self.config).map_err(|e| e.to_string())?;
-        let path = self.config_path();
-        std::fs::write(&path, json + "\n")
-            .map_err(|e| tr!("CANNOT_WRITE_FILE", path = path.display(), e = e))
+    /// Copies it into a new folder of `dir` (the user's templates folder), named after
+    /// `name` and `vendor`, which its `template.json` takes. `taken` are the folder names
+    /// in use, in any templates folder: the new one is none of them, so it hides no
+    /// template. Returns the new folder.
+    pub fn duplicate(
+        &self,
+        dir: &Path,
+        name: &str,
+        vendor: Option<&str>,
+        taken: &[String],
+    ) -> Result<PathBuf, String> {
+        let files = TemplateFiles::read(self)?;
+        let base = match vendor {
+            Some(v) => format!("{v} - {name}"),
+            None => name.to_owned(),
+        };
+        let id = unique_folder_name(&base, taken, dir);
+        let folder = dir.join(&id);
+        let cannot =
+            |path: &Path, e: std::io::Error| tr!("CANNOT_WRITE_FILE", path = path.display(), e = e);
+        std::fs::create_dir_all(&folder).map_err(|e| cannot(&folder, e))?;
+        let written = (|| {
+            for (rel, data) in &files.0 {
+                if rel == CONFIG_FILE {
+                    continue;
+                }
+                let path = folder.join(rel);
+                if let Some(parent) = path.parent() {
+                    std::fs::create_dir_all(parent).map_err(|e| cannot(parent, e))?;
+                }
+                std::fs::write(&path, data.as_slice()).map_err(|e| cannot(&path, e))?;
+            }
+            let mut config = self.config.clone();
+            config.name = Some(name.to_owned());
+            config.vendor = vendor.map(str::to_owned);
+            // A folder without `template.json` took its first DXF file: name it, so the
+            // copy keeps the same one.
+            if config.elements.is_empty() && config.dxf.is_none() {
+                config.dxf = self
+                    .sources
+                    .first()
+                    .filter(|s| !s.is_svg())
+                    .and_then(|s| s.path.file_name())
+                    .map(|f| f.to_string_lossy().into_owned());
+            }
+            write_config(&folder, &config)
+        })();
+        if let Err(e) = written {
+            let _ = std::fs::remove_dir_all(&folder);
+            return Err(e);
+        }
+        Ok(folder)
     }
 }
 
-/// A template's files, as a project keeps them: `template.json` and the DXF files it
-/// uses, each by its path in the template's folder ("/"-separated).
+/// Writes `config` as the `template.json` of `folder`.
+fn write_config(folder: &Path, config: &TemplateConfig) -> Result<(), String> {
+    let json = serde_json::to_string_pretty(config).map_err(|e| e.to_string())?;
+    let path = folder.join(CONFIG_FILE);
+    std::fs::write(&path, json + "\n")
+        .map_err(|e| tr!("CANNOT_WRITE_FILE", path = path.display(), e = e))
+}
+
+/// A folder name made from `name` that is none of `taken` and not in `dir` yet: the
+/// characters Windows refuses replaced, then " (2)", " (3)"... added when needed.
+pub fn unique_folder_name(name: &str, taken: &[String], dir: &Path) -> String {
+    let clean: String = name
+        .chars()
+        .map(|c| {
+            if c.is_control() || r#"<>:"/\|?*"#.contains(c) {
+                '_'
+            } else {
+                c
+            }
+        })
+        .collect();
+    // Windows also refuses names ending in a dot or a space.
+    let clean = clean.trim().trim_end_matches('.').trim();
+    let base = if clean.is_empty() { "template" } else { clean };
+    let free = |n: &str| !taken.iter().any(|t| t.eq_ignore_ascii_case(n)) && !dir.join(n).exists();
+    if free(base) {
+        return base.to_owned();
+    }
+    (2..)
+        .map(|i| format!("{base} ({i})"))
+        .find(|n| free(n))
+        .expect("some number is free")
+}
+
+/// A template's files, as a project keeps them: `template.json` and the SVG or DXF files
+/// it uses, each by its path in the template's folder ("/"-separated).
 #[derive(Clone, Debug, Default)]
 pub struct TemplateFiles(pub Vec<(String, std::sync::Arc<Vec<u8>>)>);
 
@@ -380,7 +593,8 @@ pub fn parse_color(s: &str) -> Option<[u8; 3]> {
     Some([byte(0)?, byte(2)?, byte(4)?])
 }
 
-/// Reads one template folder. Returns `None` if it holds no DXF file and lists no elements.
+/// Reads one template folder. Returns `None` if it lists no elements and holds no
+/// `template.svg` nor DXF file.
 pub fn read_entry(folder: &Path) -> Option<TemplateEntry> {
     let id = folder.file_name()?.to_string_lossy().into_owned();
     let (config, mut config_error) = match std::fs::read_to_string(folder.join(CONFIG_FILE)) {
@@ -406,11 +620,33 @@ pub fn read_entry(folder: &Path) -> Option<TemplateEntry> {
             }
             parsed
         });
+        let (path, group) = match (&e.id, &e.dxf) {
+            (Some(id), _) => (folder.join(crate::template_svg::SVG_FILE), Some(id.clone())),
+            (None, Some(dxf)) => (folder.join(dxf), None),
+            (None, None) => {
+                config_error.get_or_insert(tr!(
+                    "TEMPLATE_ELEMENT_WITHOUT_DRAWING",
+                    path = folder.join(CONFIG_FILE).display()
+                ));
+                continue;
+            }
+        };
         sources.push(ElementSource {
             kind: e.kind,
             name: e.name.clone().unwrap_or_else(|| e.kind.label().to_owned()),
-            path: folder.join(&e.dxf),
+            path,
+            group,
             color,
+        });
+    }
+    let svg = folder.join(crate::template_svg::SVG_FILE);
+    if sources.is_empty() && config.dxf.is_none() && svg.is_file() {
+        sources.push(ElementSource {
+            kind: ElementKind::Outline,
+            name: ElementKind::Outline.label().to_owned(),
+            path: svg,
+            group: None,
+            color: None,
         });
     }
     if sources.is_empty() {
@@ -433,6 +669,7 @@ pub fn read_entry(folder: &Path) -> Option<TemplateEntry> {
             kind: ElementKind::Outline,
             name: ElementKind::Outline.label().to_owned(),
             path,
+            group: None,
             color: None,
         });
     }
@@ -461,10 +698,12 @@ pub fn read_entry(folder: &Path) -> Option<TemplateEntry> {
             .filter(|v| !v.is_empty())
             .map(str::to_owned),
         id,
+        origin: Origin::Provided,
         folder: folder.to_path_buf(),
         sources,
         config,
         config_error,
+        problems: Vec::new(),
     })
 }
 
@@ -486,10 +725,11 @@ pub struct TemplateElement {
     pub name: String,
     /// Color from `template.json`, if set.
     pub color: Option<[u8; 3]>,
-    /// Its shapes in template mm. Empty for anchors.
+    /// Its shapes in template mm.
     pub polylines: Vec<Polyline>,
-    /// Its anchor points in template mm. Empty for other kinds.
-    pub anchors: Vec<P2>,
+    /// The center of each of its closed shapes (of its box: a circle's center), in
+    /// template mm: images snap to them.
+    pub centers: Vec<P2>,
 }
 
 /// Template geometry in mm, origin at the top-left of the bounding box of all its
@@ -523,17 +763,44 @@ pub fn templates_dir() -> Option<PathBuf> {
     candidates.into_iter().find(|p| p.is_dir())
 }
 
-/// Lists every subfolder that contains a `.dxf` file, sorted by display name.
+/// The user's templates folder, in the app's data folder; it may not exist yet.
+pub fn user_templates_dir() -> Option<PathBuf> {
+    eframe::storage_dir("Artwork Creator").map(|d| d.join("templates"))
+}
+
+/// Lists every subfolder that is a template, sorted by display name.
+#[cfg_attr(not(test), allow(dead_code))] // Tests read one folder of templates.
 pub fn scan(dir: &Path) -> Vec<TemplateEntry> {
-    let Ok(read) = std::fs::read_dir(dir) else {
-        return Vec::new();
+    scan_all(Some(dir), None)
+}
+
+/// Lists the templates of both folders, sorted by display name, each checked
+/// (`TemplateEntry::problems`). A user template hides a provided one of the same folder
+/// name.
+pub fn scan_all(provided: Option<&Path>, user: Option<&Path>) -> Vec<TemplateEntry> {
+    let read = |dir: &Path, origin: Origin| -> Vec<TemplateEntry> {
+        let Ok(read) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        read.flatten()
+            .map(|e| e.path())
+            .filter(|p| p.is_dir())
+            .filter_map(|p| read_entry(&p))
+            .map(|e| TemplateEntry {
+                origin,
+                problems: crate::template_check::check_entry(&e),
+                ..e
+            })
+            .collect()
     };
-    let mut out: Vec<TemplateEntry> = read
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| p.is_dir())
-        .filter_map(|p| read_entry(&p))
+    let users = user.map(|d| read(d, Origin::User)).unwrap_or_default();
+    let mut out: Vec<TemplateEntry> = provided
+        .map(|d| read(d, Origin::Provided))
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|p| !users.iter().any(|u| u.id == p.id))
         .collect();
+    out.extend(users);
     // Those without a vendor first, then by vendor; by name within.
     out.sort_by_key(|t| {
         (
@@ -545,13 +812,18 @@ pub fn scan(dir: &Path) -> Vec<TemplateEntry> {
 }
 
 /// Millimeters per unit for the `units` setting of `template.json`.
-fn units_override(name: &str) -> Option<f64> {
+pub(crate) fn units_override(name: &str) -> Option<f64> {
     match name.trim().to_lowercase().as_str() {
         "mm" | "millimeter" | "millimeters" | "millimetre" | "millimetres" => Some(1.0),
         "cm" | "centimeter" | "centimeters" | "centimetre" | "centimetres" => Some(10.0),
         "in" | "inch" | "inches" => Some(25.4),
         _ => None,
     }
+}
+
+/// Millimeters per drawing unit of a DXF file, as its header declares them.
+pub fn mm_per_unit(drawing: &dxf::Drawing) -> f64 {
+    units_to_mm(drawing.header.default_drawing_units)
 }
 
 /// Millimeters per drawing unit declared in a DXF header.
@@ -633,19 +905,77 @@ fn bulged_path(verts: &[([f64; 2], f64)], closed: bool) -> Vec<[f64; 2]> {
 }
 
 /// Points of a path and whether it is closed.
-type RawPath = (Vec<[f64; 2]>, bool);
+pub(crate) type RawPath = (Vec<[f64; 2]>, bool);
+
+/// The outlines of items (mm, y up) as paths of points, their curves cut in short lines.
+/// Points of an outline closer than this (mm) are the same point.
+const SAME_POINT_MM: f64 = 1e-4;
+
+pub(crate) fn item_paths(items: &[crate::template_geom::Item]) -> Vec<RawPath> {
+    use crate::template_geom::{Item, Seg};
+    let mut out = Vec::new();
+    for item in items {
+        match item {
+            Item::Circle { c, r } => {
+                let mut pts = arc_points(*c, *r, 0.0, 360.0);
+                pts.pop();
+                out.push((pts, true));
+            }
+            Item::Outline { segs, closed } => {
+                let Some(first) = segs.first() else { continue };
+                let mut pts = vec![first.start()];
+                for s in segs {
+                    match *s {
+                        Seg::Line(_, b) => pts.push(b),
+                        Seg::Arc { c, r, a0, sweep } => {
+                            let steps = ((sweep.abs() / 5f64.to_radians()).ceil() as usize).max(2);
+                            pts.extend((1..=steps).map(|i| {
+                                let t = a0 + sweep * i as f64 / steps as f64;
+                                [c[0] + r * t.cos(), c[1] + r * t.sin()]
+                            }));
+                        }
+                        Seg::Cubic([p0, p1, p2, p3]) => {
+                            pts.extend((1..=16).map(|i| {
+                                let t = i as f64 / 16.0;
+                                let u = 1.0 - t;
+                                let w = [u * u * u, 3.0 * u * u * t, 3.0 * u * t * t, t * t * t];
+                                [
+                                    w[0] * p0[0] + w[1] * p1[0] + w[2] * p2[0] + w[3] * p3[0],
+                                    w[0] * p0[1] + w[1] * p1[1] + w[2] * p2[1] + w[3] * p3[1],
+                                ]
+                            }));
+                        }
+                    }
+                }
+                // No point twice in a row (an arc's end computed where the next piece
+                // starts), and a closed ring ends where it starts: once is enough. A
+                // segment of no length has no direction: drawn, its join juts out.
+                let same = |a: [f64; 2], b: [f64; 2]| {
+                    (a[0] - b[0]).abs() < SAME_POINT_MM && (a[1] - b[1]).abs() < SAME_POINT_MM
+                };
+                pts.dedup_by(|b, a| same(*a, *b));
+                while *closed && pts.len() > 2 && same(pts[0], pts[pts.len() - 1]) {
+                    pts.pop();
+                }
+                if pts.len() >= 2 {
+                    out.push((pts, *closed));
+                }
+            }
+            Item::Point(_) => {}
+        }
+    }
+    out
+}
 
 /// Paths and POINT entities of one DXF file, in mm, y up.
-fn read_dxf(path: &Path, units: Option<f64>) -> Result<(Vec<RawPath>, Vec<[f64; 2]>), String> {
+fn read_dxf(path: &Path, units: Option<f64>) -> Result<Vec<RawPath>, String> {
     let drawing = dxf::Drawing::load_file(path)
         .map_err(|e| tr!("CANNOT_READ_FILE", path = path.display(), e = e))?;
 
     // Raw paths in drawing units, y up.
     let mut raw: Vec<RawPath> = Vec::new();
-    let mut points = Vec::new();
     for entity in drawing.entities() {
         match &entity.specific {
-            EntityType::ModelPoint(p) => points.push([p.location.x, p.location.y]),
             EntityType::Polyline(pl) => {
                 // Skip 3D meshes and polyface meshes.
                 if pl.flags & (16 | 64) != 0 {
@@ -669,6 +999,12 @@ fn read_dxf(path: &Path, units: Option<f64>) -> Result<(Vec<RawPath>, Vec<[f64; 
                 pts.pop();
                 raw.push((pts, true));
             }
+            EntityType::Spline(s) => {
+                let ctrl: Vec<[f64; 2]> = s.control_points.iter().map(|p| [p.x, p.y]).collect();
+                let degree = s.degree_of_curve.max(1) as usize;
+                let pts = crate::template_geom::spline_points(degree, &s.knot_values, &ctrl);
+                raw.push((pts, s.is_closed()));
+            }
             EntityType::Arc(a) => raw.push((
                 arc_points(
                     [a.center.x, a.center.y],
@@ -682,28 +1018,31 @@ fn read_dxf(path: &Path, units: Option<f64>) -> Result<(Vec<RawPath>, Vec<[f64; 
         }
     }
     raw.retain(|(pts, _)| pts.len() >= 2);
-    let k = units.unwrap_or_else(|| units_to_mm(drawing.header.default_drawing_units));
-    for p in raw.iter_mut().flat_map(|(pts, _)| pts).chain(&mut points) {
+    let k = units.unwrap_or_else(|| mm_per_unit(&drawing));
+    for p in raw.iter_mut().flat_map(|(pts, _)| pts) {
         *p = [p[0] * k, p[1] * k];
     }
-    Ok((raw, points))
+    Ok(raw)
 }
 
-/// Anchor points of a DXF read as an anchors element: its points, then the center of the
-/// bounding box of each closed shape (a circle's center). Open lines give none.
-fn anchor_points(paths: &[RawPath], points: &[[f64; 2]]) -> Vec<[f64; 2]> {
-    let centers = paths.iter().filter(|(_, closed)| *closed).map(|(pts, _)| {
-        let (min, max) = pts
-            .iter()
-            .fold(([f64::MAX; 2], [f64::MIN; 2]), |(mn, mx), p| {
-                (
-                    [mn[0].min(p[0]), mn[1].min(p[1])],
-                    [mx[0].max(p[0]), mx[1].max(p[1])],
-                )
-            });
-        [(min[0] + max[0]) / 2.0, (min[1] + max[1]) / 2.0]
-    });
-    points.iter().copied().chain(centers).collect()
+/// The center of the bounding box of each closed shape (a circle's center). Open lines
+/// give none.
+pub(crate) fn centers(paths: &[RawPath]) -> Vec<[f64; 2]> {
+    paths
+        .iter()
+        .filter(|(_, closed)| *closed)
+        .map(|(pts, _)| {
+            let (min, max) = pts
+                .iter()
+                .fold(([f64::MAX; 2], [f64::MIN; 2]), |(mn, mx), p| {
+                    (
+                        [mn[0].min(p[0]), mn[1].min(p[1])],
+                        [mx[0].max(p[0]), mx[1].max(p[1])],
+                    )
+                });
+            [(min[0] + max[0]) / 2.0, (min[1] + max[1]) / 2.0]
+        })
+        .collect()
 }
 
 /// Endpoints closer than this (mm) are treated as the same point.
@@ -788,7 +1127,7 @@ fn join_paths(paths: Vec<RawPath>) -> Vec<RawPath> {
     out
 }
 
-/// Reads a template's DXF files into one frame: mm, y down, origin at the top-left of
+/// Reads a template's drawings into one frame: mm, y down, origin at the top-left of
 /// everything.
 pub fn load(entry: &TemplateEntry) -> Result<Template, String> {
     let units = match &entry.config.units {
@@ -801,20 +1140,20 @@ pub fn load(entry: &TemplateEntry) -> Result<Template, String> {
         })?),
         None => None,
     };
-    // (source, paths, anchor points) in drawing mm. Anchors have points and no paths.
+    // (source, paths, centers) in drawing mm.
     let mut elements = Vec::new();
     for src in &entry.sources {
-        let (paths, points) = read_dxf(&src.path, units)?;
-        let paths = drop_duplicates(join_paths(paths));
-        if src.kind.has_lines() {
-            elements.push((src, paths, Vec::new()));
+        let raw = if src.is_svg() {
+            item_paths(&crate::template_svg::read(&src.path, src.group.as_deref())?)
         } else {
-            elements.push((src, Vec::new(), anchor_points(&paths, &points)));
-        }
+            read_dxf(&src.path, units)?
+        };
+        let paths = drop_duplicates(join_paths(raw));
+        let centers = centers(&paths);
+        elements.push((src, paths, centers));
     }
 
-    // One frame for all elements: the bounding box of their lines. Anchors don't widen
-    // it, so adding them never moves the template.
+    // One frame for all elements: the bounding box of their lines.
     let (mut min, mut max) = ([f64::MAX; 2], [f64::MIN; 2]);
     for p in elements
         .iter()
@@ -836,7 +1175,7 @@ pub fn load(entry: &TemplateEntry) -> Result<Template, String> {
     let to_frame = |p: &[f64; 2]| [(p[0] - min[0]) as f32, (max[1] - p[1]) as f32];
     let elements = elements
         .into_iter()
-        .map(|(src, paths, anchors)| TemplateElement {
+        .map(|(src, paths, centers)| TemplateElement {
             kind: src.kind,
             name: src.name.clone(),
             color: src.color,
@@ -847,7 +1186,7 @@ pub fn load(entry: &TemplateEntry) -> Result<Template, String> {
                     closed,
                 })
                 .collect(),
-            anchors: anchors.iter().map(to_frame).collect(),
+            centers: centers.iter().map(to_frame).collect(),
         })
         .collect();
 
@@ -948,12 +1287,10 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn config_placement_is_read() {
+    fn config_is_read() {
         let e = fixture();
         assert!(e.config_error.is_none(), "{:?}", e.config_error);
         assert_eq!(e.name, "Test stick");
-        let p = e.config.placement.expect("fixture placement");
-        assert_eq!((p.rotation, p.flip_x, p.flip_y), (90, false, true));
     }
 
     #[test]
@@ -963,27 +1300,85 @@ pub(crate) mod tests {
         std::fs::copy(&fixture().sources[0].path, dir.join("a.dxf")).unwrap();
         std::fs::write(
             dir.join(CONFIG_FILE),
-            r#"{ "name": "My stick", "units": "inch" }"#,
+            // A placement, from an older version, is no error: left out.
+            r#"{ "name": "My stick", "units": "inch",
+                "placement": { "rotation": 90, "flip_y": true } }"#,
         )
         .unwrap();
         let mut e = read_entry(&dir).unwrap();
+        assert!(e.config_error.is_none(), "{:?}", e.config_error);
         assert_eq!(e.name, "My stick");
+        // A provided template is read only.
+        assert!(e.delete().is_err());
+        e.origin = Origin::User;
         // Without "elements", the folder's DXF is the outline.
         let t = load(&e).unwrap();
         assert_eq!(t.elements.len(), 1);
         assert_eq!(t.elements[0].kind, ElementKind::Outline);
-        let placement = TemplatePlacement {
-            rotation: 270,
-            flip_x: true,
-            flip_y: false,
-            offset_mm: [1.0, -2.0],
-        };
-        e.save_placement(placement).unwrap();
+        let mut config = e.config.clone();
+        config.version = Some("2".into());
+        write_config(&e.folder, &config).unwrap();
         let back = read_entry(&dir).unwrap();
-        assert_eq!(back.config.placement, Some(placement));
+        assert_eq!(back.config.version.as_deref(), Some("2"));
         assert_eq!(back.config.units.as_deref(), Some("inch"));
         assert_eq!(back.name, "My stick");
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn duplicate_goes_to_a_new_folder_with_the_new_name() {
+        let root = std::env::temp_dir().join(format!("artwork-dup-{}", std::process::id()));
+        let user = root.join("user");
+        let source = fixture();
+        let taken = vec![source.id.clone(), "Me - Stick".to_owned()];
+        let folder = source
+            .duplicate(&user, "Stick", Some("Me"), &taken)
+            .unwrap();
+        // "Me - Stick" is taken (by a provided template, say): the copy is numbered.
+        assert_eq!(folder, user.join("Me - Stick (2)"));
+        let all = scan_all(None, Some(&user));
+        assert_eq!(all.len(), 1);
+        let copy = &all[0];
+        assert_eq!(copy.origin, Origin::User);
+        assert_eq!(copy.full_name(), "Me - Stick");
+        assert_eq!(copy.sources.len(), source.sources.len());
+        let (a, b) = (load(&source).unwrap(), load(copy).unwrap());
+        assert_eq!(a.size_mm, b.size_mm);
+        copy.delete().unwrap();
+        assert!(!folder.exists());
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn user_template_hides_the_provided_one_of_the_same_folder() {
+        let root = std::env::temp_dir().join(format!("artwork-hide-{}", std::process::id()));
+        let dxf = &fixture().sources[0].path;
+        for (dir, name) in [("provided", "Shipped"), ("user", "Mine")] {
+            let folder = root.join(dir).join("stick");
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::copy(dxf, folder.join("a.dxf")).unwrap();
+            std::fs::write(
+                folder.join(CONFIG_FILE),
+                format!(r#"{{ "name": "{name}" }}"#),
+            )
+            .unwrap();
+        }
+        let all = scan_all(Some(&root.join("provided")), Some(&root.join("user")));
+        assert_eq!(all.len(), 1);
+        assert_eq!(
+            (all[0].name.as_str(), all[0].origin),
+            ("Mine", Origin::User)
+        );
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn folder_names_avoid_refused_characters() {
+        let dir = Path::new("/nonexistent-artwork-dir");
+        assert_eq!(unique_folder_name("A/B: c?. ", &[], dir), "A_B_ c_");
+        assert_eq!(unique_folder_name(" .. ", &[], dir), "template");
+        let taken = vec!["x".to_owned(), "X (2)".to_owned()];
+        assert_eq!(unique_folder_name("X", &taken, dir), "X (3)");
     }
 
     #[test]
@@ -1112,27 +1507,19 @@ pub(crate) mod tests {
     }
 
     #[test]
-    fn anchors_are_points_and_shape_centers_outside_the_frame() {
-        use dxf::Point;
-        use dxf::entities::{Entity, ModelPoint};
-        let dir = std::env::temp_dir().join(format!("artwork-anchors-{}", std::process::id()));
+    fn closed_shapes_give_their_centers_and_anchors_are_left_out() {
+        let dir = std::env::temp_dir().join(format!("artwork-centers-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let panel: &[[f64; 2]] = &[[0.0, 0.0], [100.0, 0.0], [100.0, 50.0], [0.0, 50.0]];
         write_dxf(&dir.join("edge.dxf"), &[panel], &[]);
-        // Two buttons; a square and an open line add an anchor and nothing.
+        // Two buttons and a square.
         let square: &[[f64; 2]] = &[[70.0, 10.0], [80.0, 10.0], [80.0, 20.0], [70.0, 20.0]];
         write_dxf(
             &dir.join("buttons.dxf"),
             &[square],
             &[([20.0, 30.0], 12.0), ([50.0, 30.0], 12.0)],
         );
-        // A POINT outside the panel must not widen the template.
-        let mut d = dxf::Drawing::new();
-        d.header.default_drawing_units = Units::Millimeters;
-        d.add_entity(Entity::new(EntityType::ModelPoint(ModelPoint::new(
-            Point::new(150.0, 25.0, 0.0),
-        ))));
-        d.save_file(dir.join("points.dxf")).unwrap();
+        // An anchors element, from an older version: left out, no error.
         std::fs::write(
             dir.join(CONFIG_FILE),
             r#"{
@@ -1140,25 +1527,23 @@ pub(crate) mod tests {
                 "elements": [
                     { "kind": "outline", "dxf": "edge.dxf" },
                     { "kind": "buttons", "dxf": "buttons.dxf" },
-                    { "kind": "anchors", "dxf": "buttons.dxf", "name": "Centers" },
-                    { "kind": "anchors", "dxf": "points.dxf" }
+                    { "kind": "anchors", "dxf": "buttons.dxf", "name": "Centers" }
                 ]
             }"#,
         )
         .unwrap();
-        let t = load(&read_entry(&dir).unwrap()).unwrap();
+        let entry = read_entry(&dir).unwrap();
+        assert!(entry.config_error.is_none(), "{:?}", entry.config_error);
+        let t = load(&entry).unwrap();
         std::fs::remove_dir_all(&dir).ok();
 
-        assert!((t.size_mm[0] - 100.0).abs() < 1e-3 && (t.size_mm[1] - 50.0).abs() < 1e-3);
-        assert!(t.has(ElementKind::Anchors));
-        let centers = &t.elements[2];
-        assert_eq!(
-            (centers.kind, centers.name.as_str()),
-            (ElementKind::Anchors, "Centers")
-        );
-        assert!(centers.polylines.is_empty());
+        assert_eq!(t.elements.len(), 2);
+        // The panel's middle.
+        let outline = &t.elements[0];
+        assert_eq!(outline.centers.len(), 1);
+        assert!((outline.centers[0][0] - 50.0).abs() < 1e-3);
         // y down from the top of the panel.
-        let mut got = centers.anchors.clone();
+        let mut got = t.elements[1].centers.clone();
         got.sort_by(|a, b| a[0].total_cmp(&b[0]));
         let want = [[20.0, 20.0], [50.0, 20.0], [75.0, 35.0]];
         assert_eq!(got.len(), 3, "{got:?}");
@@ -1168,14 +1553,130 @@ pub(crate) mod tests {
                 "{got:?}"
             );
         }
-        let points = &t.elements[3];
-        assert_eq!(
-            points.name, "ELEMENT_ANCHORS",
-            "named after the kind by default"
+    }
+
+    #[test]
+    fn outlines_have_no_point_twice_in_a_row() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("templates");
+        for entry in scan(&dir) {
+            let t = load(&entry).unwrap();
+            for e in &t.elements {
+                for p in &e.polylines {
+                    let n = p.points.len();
+                    let last = if p.closed { n } else { n - 1 };
+                    for i in 0..last {
+                        let (a, b) = (p.points[i], p.points[(i + 1) % n]);
+                        let d = (a[0] - b[0]).hypot(a[1] - b[1]);
+                        assert!(
+                            d > 1e-4,
+                            "{} {}: point {i} of {n} repeated",
+                            entry.id,
+                            e.name
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn template_json_is_written_in_the_same_order() {
+        let config: TemplateConfig = serde_json::from_str(
+            r##"{ "bindings_origin": [1, 2], "bindings": { "b-1": { "x": "a" } },
+                 "variables": [ { "name": "a", "kind": "length", "value": 1 } ],
+                 "elements": [ { "color": "#ff0000", "name": "Outline", "id": "outline",
+                                 "kind": "outline" } ],
+                 "page": { "orientation": "landscape", "size": "A4" },
+                 "source": { "version": "1.1", "vendor": "Cosmox", "name": "T16" },
+                 "version": "1.0", "vendor": "Cosmox", "name": "T16 copy" }"##,
+        )
+        .unwrap();
+        let json = serde_json::to_string(&config).unwrap();
+        let at = |key: &str| {
+            json.find(&format!("\"{key}\":"))
+                .unwrap_or_else(|| panic!("{key}"))
+        };
+        let keys = [
+            "name",
+            "vendor",
+            "version",
+            "source",
+            "page",
+            "elements",
+            "variables",
+            "bindings",
+            "bindings_origin",
+        ];
+        for pair in keys.windows(2) {
+            assert!(at(pair[0]) < at(pair[1]), "{} before {}", pair[0], pair[1]);
+        }
+        // Inside: an element's kind first, a source's name, a page's size.
+        assert!(
+            json.contains(
+                r##"{"kind":"outline","id":"outline","name":"Outline","color":"#ff0000"}"##
+            )
         );
-        assert_eq!(points.anchors.len(), 1);
-        assert!((points.anchors[0][0] - 150.0).abs() < 1e-3);
-        assert!((points.anchors[0][1] - 25.0).abs() < 1e-3);
+        assert!(json.contains(r#"{"name":"T16","vendor":"Cosmox","version":"1.1"}"#));
+        assert!(json.contains(r#"{"size":"A4","orientation":"landscape"}"#));
+        // Read and written again: the same text.
+        let again: TemplateConfig = serde_json::from_str(&json).unwrap();
+        assert_eq!(serde_json::to_string(&again).unwrap(), json);
+    }
+
+    #[test]
+    fn versions_are_two_whole_numbers() {
+        for v in ["1.0", "2.13", "0.1"] {
+            assert!(is_valid_version(v), "{v}");
+        }
+        for v in ["", "1", "1.", ".1", "1.0.2", "v1.0", "1.a", " 1.0"] {
+            assert!(!is_valid_version(v), "{v}");
+        }
+    }
+
+    #[test]
+    fn a_copy_names_its_source() {
+        let config: TemplateConfig = serde_json::from_str(
+            r#"{ "name": "T16 copy", "version": "1.2",
+                 "source": { "name": "T16", "vendor": "Cosmox", "version": "1.1" } }"#,
+        )
+        .unwrap();
+        let source = config.source.clone().unwrap();
+        assert_eq!(source.describe(), "Cosmox - T16 - v1.1");
+        // A source lacking its name or version, or with a blank one, is ignored.
+        for json in [
+            r#"{ "source": { "name": "T16", "vendor": "Cosmox" } }"#,
+            r#"{ "source": { "vendor": "Cosmox", "version": "1.1" } }"#,
+            r#"{ "source": { "name": " ", "vendor": "Cosmox", "version": "1.1" } }"#,
+            r#"{ "source": "T16" }"#,
+        ] {
+            let config: TemplateConfig = serde_json::from_str(json).unwrap();
+            assert_eq!(config.source, None, "{json}");
+        }
+        // Its vendor may be left out.
+        let bare: TemplateConfig = serde_json::from_str(
+            r#"{ "source": { "name": "T16", "vendor": " ", "version": "1.1" } }"#,
+        )
+        .unwrap();
+        let source = bare.source.unwrap();
+        assert_eq!(source.vendor, None);
+        assert_eq!(source.describe(), "T16 - v1.1");
+        let json = serde_json::to_value(&config).unwrap();
+        assert_eq!(
+            json["source"],
+            serde_json::json!({ "name": "T16", "vendor": "Cosmox", "version": "1.1" })
+        );
+        // Nothing written for what a template doesn't have.
+        assert!(json.get("variables").is_none() && json.get("bindings").is_none());
+    }
+
+    #[test]
+    fn settings_per_kind_of_an_older_version_still_read() {
+        // Outline, buttons, cutouts and anchors.
+        assert_eq!(
+            per_kind(&[false, true, true, false], [true; KINDS]),
+            [false, true, true]
+        );
+        assert_eq!(per_kind(&[false], [true; KINDS]), [false, true, true]);
     }
 
     #[test]

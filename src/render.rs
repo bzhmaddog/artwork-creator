@@ -16,8 +16,6 @@ use crate::text;
 
 /// Width of printed cut lines.
 pub const OUTLINE_WIDTH_MM: f32 = 0.25;
-/// Half the size of the cross marking a printed anchor.
-pub const ANCHOR_MARK_MM: f32 = 2.0;
 
 /// An image layer ready to draw.
 pub struct SceneLayer {
@@ -175,24 +173,14 @@ pub struct PlacedElement {
     pub kind: ElementKind,
     /// Its shapes in page mm.
     pub polylines: Vec<Polyline>,
-    /// Its anchor points in page mm (anchors only).
-    pub anchors: Vec<P2>,
+    /// The centers of its closed shapes in page mm, which images snap to. Not printed.
+    pub centers: Vec<P2>,
 }
 
 impl PlacedElement {
-    /// The lines to print: its shapes, then a small cross on each anchor.
+    /// The lines to print: its shapes.
     pub fn printed_lines(&self) -> impl Iterator<Item = std::borrow::Cow<'_, Polyline>> {
-        let d = ANCHOR_MARK_MM;
-        let crosses = self.anchors.iter().flat_map(move |&[x, y]| {
-            [[[x - d, y], [x + d, y]], [[x, y - d], [x, y + d]]].map(|seg| Polyline {
-                points: seg.to_vec(),
-                closed: false,
-            })
-        });
-        self.polylines
-            .iter()
-            .map(std::borrow::Cow::Borrowed)
-            .chain(crosses.map(std::borrow::Cow::Owned))
+        self.polylines.iter().map(std::borrow::Cow::Borrowed)
     }
 }
 
@@ -224,7 +212,7 @@ impl Cuts {
     /// Whether the inside of `kind` is left blank. The outline is never a hole.
     pub fn blanks(self, kind: ElementKind) -> bool {
         match kind {
-            ElementKind::Outline | ElementKind::Anchors => false,
+            ElementKind::Outline => false,
             ElementKind::Buttons => self.blank_buttons,
             ElementKind::Cutouts => self.blank_cutouts,
         }
@@ -352,7 +340,7 @@ impl Scene {
                 .iter_mut()
                 .flat_map(|p| &mut p.points)
                 .for_each(flip);
-            e.placed.anchors.iter_mut().for_each(flip);
+            e.placed.centers.iter_mut().for_each(flip);
         }
         self.marks
             .iter_mut()
@@ -406,7 +394,7 @@ pub fn placed_elements(doc: &Document, template: &Template) -> Vec<PlacedElement
                     closed: p.closed,
                 })
                 .collect(),
-            anchors: e.anchors.iter().map(|&q| m.apply(q)).collect(),
+            centers: e.centers.iter().map(|&q| m.apply(q)).collect(),
         })
         .collect()
 }
@@ -1194,6 +1182,7 @@ mod tests {
             opacity,
             expanded: true,
             children,
+            element: None,
         })
     }
 
@@ -1449,48 +1438,12 @@ mod tests {
         }
     }
 
-    #[test]
-    fn anchors_print_as_crosses() {
-        let placed = PlacedElement {
-            kind: ElementKind::Anchors,
-            polylines: Vec::new(),
-            anchors: vec![[50.0, 25.0]],
-        };
-        let lines: Vec<_> = placed.printed_lines().map(|p| p.into_owned()).collect();
-        let d = ANCHOR_MARK_MM;
-        assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0].points, [[50.0 - d, 25.0], [50.0 + d, 25.0]]);
-        assert_eq!(lines[1].points, [[50.0, 25.0 - d], [50.0, 25.0 + d]]);
-        assert!(lines.iter().all(|l| !l.closed));
-
-        let mut scene = Scene {
-            page_mm: [100.0, 50.0],
-            background: [255, 255, 255],
-            background_gradient: None,
-            layers: Vec::new(),
-            elements: vec![SceneElement {
-                placed,
-                color: [255, 0, 0],
-                print: true,
-            }],
-            cuts: Cuts::default(),
-            marks: Vec::new(),
-        };
-        let red = |pm: &Pixmap, x, y| pm.pixel(x, y).unwrap().green() < 50;
-        let pm = compose(&scene, 254.0, true).unwrap(); // 10 px per mm
-        assert!(red(&pm, 500, 250) && red(&pm, 515, 250) && red(&pm, 500, 235));
-        assert!(!red(&pm, 515, 235), "a cross, not a square");
-        scene.elements[0].print = false;
-        let pm = compose(&scene, 254.0, true).unwrap();
-        assert!(!red(&pm, 500, 250));
-    }
-
     fn element(kind: ElementKind, polylines: Vec<Polyline>, print: bool) -> SceneElement {
         SceneElement {
             placed: PlacedElement {
                 kind,
                 polylines,
-                anchors: Vec::new(),
+                centers: Vec::new(),
             },
             color: [0, 0, 0],
             print,
@@ -1624,7 +1577,7 @@ mod tests {
         let placed = vec![PlacedElement {
             kind: ElementKind::Outline,
             polylines: vec![open],
-            anchors: Vec::new(),
+            centers: Vec::new(),
         }];
         assert!(keep_mask(&placed, Cuts::default(), [0.0, 0.0], [10, 10], 1.0).is_none());
     }
@@ -1692,7 +1645,7 @@ mod tests {
                         points: vec![[60.0, 10.0], [90.0, 10.0], [90.0, 40.0]],
                         closed: true,
                     }],
-                    anchors: Vec::new(),
+                    centers: Vec::new(),
                 },
                 color: [255, 0, 0],
                 print: true,

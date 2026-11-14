@@ -1,10 +1,16 @@
 {
-  "vendor": "Maddog",
   "name": "Blank A4 landscape",
+  "vendor": "Maddog",
   "version": "1.0",
-  "units": "mm",
-  "page": { "size": "A4", "orientation": "landscape" },
+  "page": {
+    "size": "A4",
+    "orientation": "landscape"
+  },
   "elements": [
-    { "kind": "outline", "dxf": "outline.dxf", "name": "Outline" }
+    {
+      "kind": "outline",
+      "id": "outline",
+      "name": "Outline"
+    }
   ]
 }

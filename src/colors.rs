@@ -239,6 +239,7 @@ pub fn migrate_palette(doc: &mut Document) {
             renamed.insert(swatch.name, name.clone());
         }
         doc.variables.push(Variable {
+            formula: None,
             name,
             value: Value::Color(swatch.color),
         });
@@ -331,6 +332,7 @@ pub fn adopt_links(vars: &mut Vec<Variable>, node: &mut Node) {
             return false;
         }
         vars.push(Variable {
+            formula: None,
             name: name.clone(),
             value: Value::Color(c),
         });
@@ -665,6 +667,7 @@ pub fn button(
             {
                 // Saved and linked to at once; the app adds the variable.
                 let var = Variable {
+                    formula: None,
                     name: variables::new_name(&swatches.vars, Kind::Color),
                     value: Value::Color(*color),
                 };
@@ -817,6 +820,7 @@ pub fn in_use_ui(ui: &mut Ui, doc: &mut Document) -> bool {
         return false;
     };
     doc.variables.push(Variable {
+        formula: None,
         name: variables::new_name(&doc.variables, Kind::Color),
         value: Value::Color(c),
     });
@@ -831,6 +835,7 @@ mod tests {
     /// A color variable.
     fn cv(name: &str, c: [u8; 4]) -> Variable {
         Variable {
+            formula: None,
             name: name.into(),
             value: Value::Color(c),
         }
@@ -920,6 +925,7 @@ mod tests {
             opacity: 1.0,
             expanded: true,
             children: vec![Node::Layer(Box::new(outlined))],
+            element: None,
         });
         let doc = Document {
             background: [255, 255, 255],
@@ -981,6 +987,7 @@ mod tests {
             variables: vec![
                 cv("green", [10, 200, 10, 255]),
                 Variable {
+                    formula: None,
                     name: "color1".into(),
                     value: Value::Length(1.0),
                 },
@@ -1101,6 +1108,7 @@ mod tests {
         assert!(!save(&mut doc, cv("a", [4, 5, 6, 255])));
         assert!(save(&mut doc, cv("b", [1, 2, 3, 0])));
         doc.variables.push(Variable {
+            formula: None,
             name: "c".into(),
             value: Value::Number(1.0),
         });
@@ -1204,6 +1212,7 @@ mod tests {
 
         // A variable of another kind has the name: that link is dropped.
         let number = Variable {
+            formula: None,
             name: "shadow".into(),
             value: Value::Number(1.0),
         };

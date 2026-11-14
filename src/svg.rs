@@ -780,7 +780,7 @@ mod tests {
         let scene = Scene::new(
             &doc,
             None,
-            [[255, 0, 255]; crate::template::KINDS],
+            &[[255, 0, 255]; crate::template::KINDS],
             [true; crate::template::KINDS],
             Cuts::default(),
         );

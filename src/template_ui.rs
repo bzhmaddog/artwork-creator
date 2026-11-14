@@ -31,7 +31,7 @@ pub enum Dialog {
     EditCopy {
         /// The template's name, as shown.
         name: String,
-        /// The copy's.
+        /// The copy's, as the user may change it.
         copy: String,
         /// Provided with the app (else only the project has it).
         provided: bool,
@@ -52,8 +52,8 @@ pub enum Outcome {
     /// Delete the template being edited; the project, if it used it, uses `replacement`
     /// (`None`: no template).
     Delete { replacement: Option<String> },
-    /// Edit a copy of the template.
-    EditCopy,
+    /// Edit a copy of the template, of this name.
+    EditCopy { name: String },
 }
 
 impl Dialog {
@@ -88,6 +88,53 @@ fn text_field(ui: &mut Ui, text: &mut String, hint: &str) -> egui::Response {
             .hint_text(hint)
             .desired_width(FIELD_WIDTH.min(ui.available_width())),
     )
+}
+
+/// A one-line label cut to `max_width` with "…"; while the mouse is over a text too
+/// long, it scrolls to its end and back, marquee style, easing in and out.
+fn marquee_label(ui: &mut Ui, text: &str, max_width: f32) -> egui::Response {
+    const SPEED: f64 = 120.0; // average points per second
+    const DELAY: f64 = 0.5; // seconds before the first move
+    const HOLD: f64 = 2.0; // seconds held at each end
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let color = ui.visuals().text_color();
+    let full = ui
+        .painter()
+        .layout_no_wrap(text.to_owned(), font.clone(), color);
+    let width = full.size().x.min(max_width.max(0.0));
+    let (rect, response) =
+        ui.allocate_exact_size(egui::vec2(width, full.size().y), egui::Sense::hover());
+    let start_id = response.id.with("marquee_start");
+    if full.size().x > width && response.hovered() {
+        let now = ui.input(|i| i.time);
+        let start = ui.data_mut(|d| *d.get_temp_mut_or(start_id, now));
+        let overflow = (full.size().x - width) as f64;
+        let travel = (overflow / SPEED).max(0.3);
+        let ease = |t: f64| t * t * (3.0 - 2.0 * t);
+        let t = (now - start - DELAY).max(0.0) % (2.0 * (travel + HOLD));
+        let offset = if t < travel {
+            ease(t / travel) * overflow
+        } else if t < travel + HOLD {
+            overflow
+        } else if t < 2.0 * travel + HOLD {
+            (1.0 - ease((t - travel - HOLD) / travel)) * overflow
+        } else {
+            0.0
+        };
+        ui.painter().with_clip_rect(rect).galley(
+            rect.min - egui::vec2(offset as f32, 0.0),
+            full,
+            color,
+        );
+        ui.ctx().request_repaint();
+    } else {
+        ui.data_mut(|d| d.remove::<f64>(start_id));
+        let mut job = egui::text::LayoutJob::simple_singleline(text.to_owned(), font, color);
+        job.wrap = egui::text::TextWrapping::truncate_at_width(width);
+        let galley = ui.painter().layout_job(job);
+        ui.painter().galley(rect.min, galley, color);
+    }
+    response
 }
 
 /// Asks a new template's name and vendor.
@@ -179,9 +226,9 @@ fn delete_dialog(
     outcome
 }
 
-/// Says that editing the template `name` edits a copy named `copy`, saved into the
-/// user's templates; Edit a copy goes on.
-fn edit_copy_dialog(ctx: &egui::Context, name: &str, copy: &str, provided: bool) -> Outcome {
+/// Says that editing the template `name` edits a copy, saved into the user's templates,
+/// and asks the copy's name (`copy`, proposed); Edit a copy goes on.
+fn edit_copy_dialog(ctx: &egui::Context, name: &str, copy: &mut String, provided: bool) -> Outcome {
     let mut outcome = Outcome::Open;
     let response = dialog(ctx, "edit_template_copy").show(ctx, |ui| {
         ui.set_max_width(420.0);
@@ -194,11 +241,27 @@ fn edit_copy_dialog(ctx: &egui::Context, name: &str, copy: &str, provided: bool)
         };
         crate::callout::callout(ui, crate::callout::Tone::Info, &why);
         ui.add_space(4.0);
-        ui.label(tr!("EDIT_TEMPLATE_COPY_INFO", copy = copy));
+        ui.label(tr!("EDIT_TEMPLATE_COPY_INFO"));
+        ui.add_space(6.0);
+        let mut enter = false;
+        ui.horizontal(|ui| {
+            ui.label(tr!("TEMPLATE_NAME"));
+            let field = text_field(ui, copy, "");
+            if field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                enter = true;
+            }
+            // Typed over at once.
+            if ui.memory(|m| m.focused().is_none()) {
+                field.request_focus();
+            }
+        });
         ui.add_space(8.0);
-        let (ok, cancel) = crate::app::dialog_buttons(ui, tr!("EDIT_TEMPLATE_COPY_BUTTON"), true);
-        if ok {
-            outcome = Outcome::EditCopy;
+        let can = non_empty(copy).is_some();
+        let (ok, cancel) = crate::app::dialog_buttons(ui, tr!("EDIT_TEMPLATE_COPY_BUTTON"), can);
+        if (ok || (enter && can))
+            && let Some(name) = non_empty(copy)
+        {
+            outcome = Outcome::EditCopy { name };
         } else if cancel {
             outcome = Outcome::Canceled;
         }
@@ -371,7 +434,17 @@ impl PropertiesForm {
                 if let Some(source) = &self.config.source {
                     ui.label(tr!("TEMPLATE_SOURCE"));
                     ui.horizontal(|ui| {
-                        ui.label(source.describe())
+                        // Room left for the Compare button next to the label.
+                        let button = ui.painter().layout_no_wrap(
+                            tr!("COMPARE_TEMPLATE_SOURCE_BUTTON").to_owned(),
+                            egui::TextStyle::Button.resolve(ui.style()),
+                            egui::Color32::PLACEHOLDER,
+                        );
+                        let spacing = ui.spacing();
+                        let reserved = button.size().x
+                            + 2.0 * spacing.button_padding.x
+                            + spacing.item_spacing.x;
+                        marquee_label(ui, &source.describe(), ui.available_width() - reserved)
                             .on_hover_text(tr!("TEMPLATE_SOURCE_HINT"));
                         compare_clicked = ui
                             .add_enabled(
@@ -499,7 +572,7 @@ mod previews {
             "edit-copy",
             Dialog::EditCopy {
                 name: "Cosmox - T16".into(),
-                copy: "T16 copy".into(),
+                copy: "Copy of T16".into(),
                 provided: true,
             },
         )]);

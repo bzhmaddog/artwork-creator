@@ -321,7 +321,40 @@ pub struct Transform {
     /// undistorted, so moving, scaling, rotating and flipping keep the distortion.
     #[serde(default, skip_serializing_if = "is_undistorted")]
     pub distort: [P2; 4],
+    /// 3D tilt around the layer's horizontal axis, in degrees: positive takes its top
+    /// away from the viewer. Applied before `distort`.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub tilt_x_deg: f32,
+    /// 3D tilt around the layer's vertical axis, in degrees: positive takes its right
+    /// side away from the viewer.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub tilt_y_deg: f32,
+    /// How strong the depth of a tilted layer looks, 0 (none: parallel lines stay
+    /// parallel) to 1 (a camera as close as the layer is large).
+    #[serde(
+        default = "default_perspective",
+        skip_serializing_if = "is_default_perspective"
+    )]
+    pub perspective: f32,
 }
+
+fn is_zero(v: &f32) -> bool {
+    *v == 0.0
+}
+
+/// The perspective of a new layer.
+pub const DEFAULT_PERSPECTIVE: f32 = 0.5;
+
+fn default_perspective() -> f32 {
+    DEFAULT_PERSPECTIVE
+}
+
+fn is_default_perspective(v: &f32) -> bool {
+    *v == DEFAULT_PERSPECTIVE
+}
+
+/// Largest 3D tilt, in degrees: beyond it a layer is seen edge on.
+pub const MAX_TILT_DEG: f32 = 85.0;
 
 /// No corner has been moved.
 fn is_undistorted(d: &[P2; 4]) -> bool {
@@ -340,6 +373,9 @@ impl Default for Transform {
             flip_x: false,
             flip_y: false,
             distort: [[0.0; 2]; 4],
+            tilt_x_deg: 0.0,
+            tilt_y_deg: 0.0,
+            perspective: DEFAULT_PERSPECTIVE,
         }
     }
 }
@@ -347,15 +383,49 @@ impl Default for Transform {
 impl Transform {
     /// At least one corner has been moved.
     pub fn is_distorted(&self) -> bool {
-        !is_undistorted(&self.distort)
+        !is_undistorted(&self.distort) || self.is_tilted()
     }
 
-    /// The distorted corners in unit-square coordinates.
-    pub fn unit_quad(&self) -> [P2; 4] {
+    /// Tilted in 3D.
+    pub fn is_tilted(&self) -> bool {
+        self.tilt_x_deg != 0.0 || self.tilt_y_deg != 0.0
+    }
+
+    /// The corners of an image of `size_px` tilted in 3D, in unit-square coordinates:
+    /// the plane turned around its center, then seen through a camera in front of it
+    /// (`perspective`). The center stays where it is.
+    pub fn tilted_corners(&self, size_px: [u32; 2]) -> [P2; 4] {
+        if !self.is_tilted() {
+            return UNIT_CORNERS;
+        }
+        // In mm, centered: the tilt depends on the layer's proportions.
+        let w = (size_px[0].max(1) as f32 * self.scale[0]).abs().max(1e-6);
+        let h = (size_px[1].max(1) as f32 * self.scale[1]).abs().max(1e-6);
+        let lim = MAX_TILT_DEG.to_radians();
+        let (a, b) = (
+            self.tilt_x_deg.to_radians().clamp(-lim, lim),
+            self.tilt_y_deg.to_radians().clamp(-lim, lim),
+        );
+        let p = self.perspective.clamp(0.0, 1.0);
+        let camera = w.max(h) / p.max(1e-6);
+        UNIT_CORNERS.map(|[u, v]| {
+            let (x, y) = ((u - 0.5) * w, (v - 0.5) * h);
+            // Top away (y up is negative), then right side away.
+            let (y1, z1) = (y * a.cos(), -y * a.sin());
+            let (x2, z2) = (x * b.cos() - z1 * b.sin(), x * b.sin() + z1 * b.cos());
+            let k = if p > 0.0 { camera / (camera + z2) } else { 1.0 };
+            [x2 * k / w + 0.5, y1 * k / h + 0.5]
+        })
+    }
+
+    /// The corners of an image of `size_px`, tilted then distorted, in unit-square
+    /// coordinates.
+    pub fn unit_quad(&self, size_px: [u32; 2]) -> [P2; 4] {
+        let base = self.tilted_corners(size_px);
         std::array::from_fn(|i| {
             [
-                UNIT_CORNERS[i][0] + self.distort[i][0],
-                UNIT_CORNERS[i][1] + self.distort[i][1],
+                base[i][0] + self.distort[i][0],
+                base[i][1] + self.distort[i][1],
             ]
         })
     }
@@ -368,7 +438,7 @@ impl Transform {
         }
         let (w, h) = (size_px[0].max(1) as f32, size_px[1].max(1) as f32);
         Homography::from(Affine::scale(1.0 / w, 1.0 / h))
-            .then(Homography::unit_square_to(self.unit_quad()))
+            .then(Homography::unit_square_to(self.unit_quad(size_px)))
             .then_affine(Affine::scale(w, h).then(affine))
     }
 
@@ -552,7 +622,7 @@ impl Layer {
         let m = self.affine();
         let (w, h) = (self.size_px[0] as f32, self.size_px[1] as f32);
         self.transform
-            .unit_quad()
+            .unit_quad(self.size_px)
             .map(|q| m.apply([q[0] * w, q[1] * h]))
     }
 
@@ -820,6 +890,11 @@ pub struct Document {
     /// loaded, never saved with the project.
     #[serde(skip)]
     pub template_variables: Vec<crate::variables::Variable>,
+    /// The centers of the template's shapes that have an id, on the page (mm), which
+    /// layer positions can be linked to (see `variables::point_names`); set by the app
+    /// each frame, never saved.
+    #[serde(skip)]
+    pub template_points: Vec<(String, P2)>,
     /// Guide lines dragged out of the canvas' rulers, for lining things up; not printed.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub guides: Vec<Guide>,
@@ -843,6 +918,7 @@ impl Default for Document {
             old_palette: Vec::new(),
             variables: Vec::new(),
             template_variables: Vec::new(),
+            template_points: Vec::new(),
             guides: Vec::new(),
             next_id: 1,
         }
@@ -860,6 +936,18 @@ impl Document {
                 .filter(|t| self.variables.iter().all(|v| v.name != t.name))
                 .cloned(),
         );
+        // The template's points, as lengths: an x and a y each.
+        for (id, p) in &self.template_points {
+            for (name, v) in crate::variables::point_names(id).into_iter().zip(*p) {
+                if vars.iter().all(|w| w.name != name) {
+                    vars.push(crate::variables::Variable {
+                        formula: None,
+                        name,
+                        value: crate::variables::Value::Length(v),
+                    });
+                }
+            }
+        }
         vars
     }
 
@@ -1084,6 +1172,46 @@ mod tests {
 
     fn close(a: P2, b: P2) -> bool {
         (a[0] - b[0]).abs() < 1e-3 && (a[1] - b[1]).abs() < 1e-3
+    }
+
+    #[test]
+    fn a_tilt_turns_the_layer_in_3d() {
+        let size = [200, 100];
+        let mut t = Transform {
+            scale: [0.5, 0.5],
+            ..Default::default()
+        };
+        assert_eq!(t.tilted_corners(size), UNIT_CORNERS);
+        assert!(!t.is_distorted());
+        // Without perspective: only shorter, by the cosine.
+        t.tilt_x_deg = 60.0;
+        t.perspective = 0.0;
+        let q = t.tilted_corners(size);
+        assert!((q[3][1] - q[0][1] - 0.5).abs() < 1e-4, "{q:?}");
+        assert!((q[1][0] - q[0][0] - 1.0).abs() < 1e-4);
+        // With it: the top, away, is narrower than the bottom; the center stays.
+        t.perspective = 0.5;
+        let q = t.tilted_corners(size);
+        let (top, bottom) = (q[1][0] - q[0][0], q[2][0] - q[3][0]);
+        assert!(top < bottom, "{top} {bottom}");
+        assert!(t.is_distorted());
+        let m = t.to_homography(size);
+        let c = m.apply([100.0, 50.0]);
+        let c0 = t.to_affine(size).apply([100.0, 50.0]);
+        assert!(close(c, c0), "{c:?} {c0:?}");
+        // The right side away: shorter than the left.
+        let t = Transform {
+            scale: [0.5, 0.5],
+            tilt_y_deg: 40.0,
+            ..Default::default()
+        };
+        let q = t.tilted_corners(size);
+        assert!(q[2][1] - q[1][1] < q[3][1] - q[0][1]);
+        // Saved only when used; an older project opens untilted.
+        let json = serde_json::to_string(&Transform::default()).unwrap();
+        assert!(!json.contains("tilt") && !json.contains("perspective"));
+        let old: Transform = serde_json::from_str(&json).unwrap();
+        assert_eq!(old.perspective, DEFAULT_PERSPECTIVE);
     }
 
     #[test]

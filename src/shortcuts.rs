@@ -70,6 +70,7 @@ pub enum Command {
     OpenTemplateFolder,
     CheckTemplate,
     CompareTemplateSource,
+    ChooseReference,
     SelectTool,
     PencilTool,
     BrushTool,
@@ -127,7 +128,7 @@ const NONE: Modifiers = Modifiers::NONE;
 
 impl Command {
     /// In the order of the window.
-    pub const ALL: [Command; 47] = [
+    pub const ALL: [Command; 48] = [
         Command::NewProject,
         Command::OpenProject,
         Command::Save,
@@ -169,6 +170,7 @@ impl Command {
         Command::OpenTemplateFolder,
         Command::CheckTemplate,
         Command::CompareTemplateSource,
+        Command::ChooseReference,
         Command::SelectTool,
         Command::PencilTool,
         Command::BrushTool,
@@ -221,6 +223,7 @@ impl Command {
             Command::OpenTemplateFolder => tr_noop!("OPEN_TEMPLATE_FOLDER"),
             Command::CheckTemplate => tr_noop!("CHECK_TEMPLATE"),
             Command::CompareTemplateSource => tr_noop!("COMPARE_TEMPLATE_SOURCE"),
+            Command::ChooseReference => tr_noop!("CHOOSE_TEMPLATE_REFERENCE"),
             Command::SelectTool => tr_noop!("TOOL_SELECT"),
             Command::PencilTool => tr_noop!("TOOL_PENCIL"),
             Command::BrushTool => tr_noop!("TOOL_BRUSH"),
@@ -272,7 +275,8 @@ impl Command {
             | Command::DeleteTemplate
             | Command::OpenTemplateFolder
             | Command::CheckTemplate
-            | Command::CompareTemplateSource => Group::Templates,
+            | Command::CompareTemplateSource
+            | Command::ChooseReference => Group::Templates,
             Command::SelectTool
             | Command::PencilTool
             | Command::BrushTool
@@ -368,6 +372,7 @@ impl Command {
             Command::OpenTemplateFolder => "open_template_folder",
             Command::CheckTemplate => "check_template",
             Command::CompareTemplateSource => "compare_template_source",
+            Command::ChooseReference => "choose_template_reference",
             Command::SelectTool => "select_tool",
             Command::PencilTool => "pencil_tool",
             Command::BrushTool => "brush_tool",

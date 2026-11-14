@@ -12,6 +12,7 @@
 //! handles the drag.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use egui::{Color32, Id, Pos2, Rect, Response, Sense, Stroke, Ui, Vec2, pos2, vec2};
 use serde::{Deserialize, Serialize};
@@ -70,6 +71,10 @@ impl PanelId {
     ];
 
     pub fn title(self) -> &'static str {
+        // While a template is edited, the Layers panel lists its elements.
+        if self == PanelId::Layers && TEMPLATE_EDITING.load(Ordering::Relaxed) {
+            return translate(tr_noop!("ELEMENTS_SECTION"));
+        }
         translate(match self {
             PanelId::TemplateSettings => tr_noop!("TEMPLATE_PROPERTIES_TITLE"),
             PanelId::TemplateCheck => tr_noop!("TEMPLATE_CHECK_TITLE"),
@@ -226,6 +231,9 @@ struct Runtime {
     hidden: Vec<PanelId>,
 }
 
+/// A template is being edited: set by the app each frame, read by [`PanelId::title`].
+static TEMPLATE_EDITING: AtomicBool = AtomicBool::new(false);
+
 #[derive(Serialize, Deserialize)]
 pub struct Layout {
     /// In order: docked panels are shown top to bottom in this order.
@@ -332,6 +340,12 @@ impl Layout {
 
     pub fn is_open(&self, id: PanelId) -> bool {
         self.entry(id).open
+    }
+
+    /// Says whether a template is being edited, which renames some panels (see
+    /// [`PanelId::title`]).
+    pub fn set_template_editing(editing: bool) {
+        TEMPLATE_EDITING.store(editing, Ordering::Relaxed);
     }
 
     /// Leaves out `ids` (shown again with an empty list), keeping whether they are open.

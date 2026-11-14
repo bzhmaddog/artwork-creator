@@ -717,7 +717,7 @@ pub fn layer_items(layer: &Layer) -> Vec<Item> {
     let Some(s) = layer.shape.as_deref() else {
         return Vec::new();
     };
-    let distorted = layer.transform.distort != [[0.0; 2]; 4];
+    let distorted = layer.transform.is_distorted();
     let at = |p: P2| shape::to_page(layer, p);
     if distorted {
         // Not a similarity any more: its curves, cut in short lines.

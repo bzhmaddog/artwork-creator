@@ -12,14 +12,12 @@ use std::hash::{Hash, Hasher};
 use crate::canvas_points;
 pub use crate::canvas_points::{Drawing, PointEdit};
 use crate::canvas_text;
-use crate::document::{
-    Affine, Document, Guide, Homography, Layer, Node, P2, Transform, UNIT_CORNERS, is_convex,
-};
+use crate::document::{Affine, Document, Guide, Homography, Layer, Node, P2, Transform, is_convex};
 use crate::i18n::tr;
 use crate::layers_ui;
 use crate::render::{self, SceneNode};
 use crate::render::{Cuts, PlacedElement};
-use crate::template::{ElementKind, KINDS};
+use crate::template::ElementKind;
 
 /// Screen points per mm when the page is shown at real size on a 96 DPI screen.
 pub const REAL_SIZE_ZOOM: f32 = 96.0 / 25.4;
@@ -109,7 +107,13 @@ enum DragKind {
     Distort(usize),
     /// Stretches along one image axis from the middle of an edge: top, right, bottom, left.
     Stretch(usize),
+    /// Turns the layer in 3D (Ctrl+drag on it): up and down tilt its top, left and right
+    /// its sides.
+    Tilt,
 }
+
+/// Degrees of 3D tilt per screen pixel dragged.
+const TILT_DEG_PER_PX: f32 = 0.5;
 
 /// Middles of the image edges in unit-square coordinates: top, right, bottom, left.
 const EDGE_MIDS: [P2; 4] = [[0.5, 0.0], [1.0, 0.5], [0.5, 1.0], [0.0, 0.5]];
@@ -120,7 +124,17 @@ struct Drag {
     /// Layers being moved with their starting placement. Scale and rotate use only one.
     layers: Vec<(u64, Transform)>,
     start_mouse: P2,
+    /// Moving a layer whose position is linked: it stays linked until released. Released
+    /// within `LINK_HOLD_RADIUS` of where it started (`held`), it goes back; farther, it
+    /// is unlinked.
+    linked: bool,
+    /// The linked layer is within `LINK_HOLD_RADIUS` of where it started.
+    held: bool,
 }
+
+/// How far a layer whose position is linked can be dragged and released without
+/// unlinking it, in screen points.
+const LINK_HOLD_RADIUS: f32 = 40.0;
 
 /// A semi-transparent group rendered offscreen, so that its children blend with each
 /// other first and the group's opacity applies once, as in the export.
@@ -155,10 +169,10 @@ pub struct CanvasState {
     pub fit_pending: bool,
     /// Draw the template's lines at all.
     pub show_template: bool,
-    /// Per element kind (`ElementKind::index`): lines shown, and their color.
-    pub element_show: [bool; KINDS],
-    /// Line color per element kind.
-    pub element_color: [Color32; KINDS],
+    /// Per template element, in the template's order: lines shown, and their color
+    /// (the element's own, set when the template is loaded).
+    pub element_show: Vec<bool>,
+    pub element_color: Vec<Color32>,
     /// Cover and hatch what is cut out of the panel: outside the outline, inside the
     /// holes.
     pub preview_cuts: bool,
@@ -186,6 +200,9 @@ pub struct CanvasState {
     pub snap_to_centers: bool,
     /// The center the dragged image snapped to this frame, in page mm, to highlight it.
     snapped: Option<P2>,
+    /// A layer just dropped on a template point: the app offers to link its position
+    /// to it, and takes this.
+    pub link_offer: Option<LinkOffer>,
     /// Edges and centers of layers snap to the page's and the template outline's edges
     /// while moved or resized. Holding Alt turns it off for the drag.
     pub snap_to_edges: bool,
@@ -256,11 +273,8 @@ impl Default for CanvasState {
             },
             fit_pending: true,
             show_template: true,
-            element_show: [true; KINDS],
-            element_color: ElementKind::ALL.map(|k| {
-                let [r, g, b] = k.default_color();
-                Color32::from_rgb(r, g, b)
-            }),
+            element_show: Vec::new(),
+            element_color: Vec::new(),
             preview_cuts: true,
             cuts: Cuts::default(),
             preview_bleed: true,
@@ -273,6 +287,7 @@ impl Default for CanvasState {
             distort_mode: false,
             snap_to_centers: true,
             snapped: None,
+            link_offer: None,
             snap_to_edges: true,
             snapped_guides: [None; 2],
             show_rulers: true,
@@ -304,12 +319,27 @@ impl Default for CanvasState {
     }
 }
 
+/// A layer dropped on a template shape's center, whose position can be linked to it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LinkOffer {
+    pub layer: u64,
+    /// The shape's id in the template.
+    pub point: String,
+    /// The layer's center less the shape's, in mm.
+    pub offset: P2,
+}
+
 /// Another version of the template, compared with the project's on the canvas.
 pub struct Compare {
     /// Its elements, placed on the page.
     pub elements: Vec<PlacedElement>,
+    /// Their line colors, set in that template (see `element_colors`).
+    pub colors: Vec<Color32>,
     /// What each side shows, written at the top of the canvas: left, then right.
     pub labels: [String; 2],
+    /// It is shown left of the divider (else right): the older version left, the newer
+    /// right.
+    pub on_left: bool,
 }
 
 /// The guide whose position is being typed: its index in `Document::guides`, and the
@@ -358,6 +388,15 @@ impl Default for Previews {
 const PREVIEWS_KEY: &str = "canvas_previews";
 
 impl CanvasState {
+    /// The layers whose linked position a drag holds until it is released:
+    /// [`crate::variables::apply`] leaves them alone.
+    pub fn held_layers(&self) -> Vec<u64> {
+        match &self.drag {
+            Some(d) if d.linked => d.layers.iter().map(|(id, _)| *id).collect(),
+            _ => Vec::new(),
+        }
+    }
+
     /// The canvas with the display settings saved by a previous session.
     pub fn load(storage: Option<&dyn eframe::Storage>) -> Self {
         let p: Previews = storage
@@ -552,7 +591,7 @@ fn snap_axis(guides: &[f32], values: &[f32], reach: f32) -> Option<(f32, f32)> {
 fn corners_of(t: Transform, size_px: [u32; 2]) -> [P2; 4] {
     let m = t.to_affine(size_px);
     let (w, h) = (size_px[0] as f32, size_px[1] as f32);
-    t.unit_quad().map(|q| m.apply([q[0] * w, q[1] * h]))
+    t.unit_quad(size_px).map(|q| m.apply([q[0] * w, q[1] * h]))
 }
 
 /// Screen positions of the edge-middle handles (top, right, bottom, left), on the drawn
@@ -688,8 +727,16 @@ pub fn show(
     let mut on_divider = false;
     if state.compare.is_some() {
         let x = rect.left() + rect.width() * state.compare_split;
-        let zone = Rect::from_x_y_ranges(x - DIVIDER_GRAB..=x + DIVIDER_GRAB, rect.y_range());
-        let r = ui.interact(zone, ui.scope_id().with("compare_divider"), Sense::drag());
+        // Along the line, and a dead area around the handle wider than it: there, the
+        // divider takes the press (click or drag), never what is drawn under it.
+        let line = Rect::from_x_y_ranges(x - DIVIDER_GRAB..=x + DIVIDER_GRAB, rect.y_range());
+        let handle = Rect::from_center_size(
+            pos2(x, rect.center().y),
+            Vec2::splat(2.0 * HANDLE_DEAD_ZONE),
+        );
+        let id = ui.scope_id().with("compare_divider");
+        let r = ui.interact(line, id, Sense::click_and_drag())
+            | ui.interact(handle, id.with("handle"), Sense::click_and_drag());
         if r.dragged()
             && let Some(p) = r.interact_pointer_pos()
         {
@@ -933,9 +980,20 @@ pub fn show(
                 state.panning = false;
             } else if let Some(origin) = origin {
                 let m = cam.to_mm(rect, origin);
+                // Ctrl+drag on the selected layer turns it in 3D (not the template's
+                // reference, whose tilt isn't saved).
+                let tilt = ui.input(|i| i.modifiers.command && !i.modifiers.alt);
+                let tiltable = |id: u64| {
+                    doc.layer(id).is_some()
+                        && !doc.effectively_locked(id)
+                        && !crate::template_edit::is_reference(doc, id)
+                };
                 let (ids, kind) = match handle_at(doc, *selected, origin) {
                     Some((id, kind)) => (vec![id], kind),
                     None => match (topmost_hit(doc, m), *selected) {
+                        (Some(hit), Some(sel)) if tilt && hit == sel && tiltable(sel) => {
+                            (vec![sel], DragKind::Tilt)
+                        }
                         // Dragging a member of the selected group moves the whole group.
                         (Some(hit), Some(sel)) if hit != sel && doc.is_within(hit, sel) => {
                             (layers_ui::movable_layers(doc, sel), DragKind::Move)
@@ -972,10 +1030,21 @@ pub fn show(
                         }
                     }
                 }
+                // A linked position is held a moment before the drag unlinks it.
+                let linked = kind == DragKind::Move
+                    && layers.iter().any(|(id, _)| {
+                        doc.layer(*id).is_some_and(|l| {
+                            l.bindings.contains_key(&crate::variables::Field::X)
+                                || l.bindings.contains_key(&crate::variables::Field::Y)
+                        })
+                    });
+
                 state.drag = (!layers.is_empty()).then_some(Drag {
                     kind,
                     layers,
                     start_mouse: m,
+                    linked,
+                    held: linked,
                 });
                 // Nothing grabbed: this drag pans the view.
                 state.panning = state.drag.is_none();
@@ -1067,6 +1136,24 @@ pub fn show(
             .and_then(|p| guide_under(doc, p))
     });
 
+    // A linked position near where it started: a release there puts it back, with a
+    // warning meanwhile; farther, a release unlinks it.
+    if let Some(drag) = &mut state.drag
+        && drag.linked
+    {
+        drag.held = drag.layers.iter().all(|(id, start)| {
+            doc.layer(*id).is_none_or(|l| {
+                let c = l.transform.center;
+                let d = [c[0] - start.center[0], c[1] - start.center[1]];
+                len(d) * cam.zoom <= LINK_HOLD_RADIUS
+            })
+        });
+        if drag.held
+            && let Some(p) = ui.ctx().pointer_hover_pos()
+        {
+            linked_drag_hint(ui, p);
+        }
+    }
     if let Some(drag) = &state.drag {
         if response.dragged_by(PointerButton::Primary)
             && let Some(p) = response.interact_pointer_pos()
@@ -1133,6 +1220,33 @@ pub fn show(
             let t = &mut layer.transform;
             match drag.kind {
                 DragKind::Move => {}
+                DragKind::Tilt => {
+                    // Screen pixels dragged, in the layer's own frame: up is toward its
+                    // top, whatever its rotation and flips.
+                    let d = [
+                        (m[0] - drag.start_mouse[0]) * cam.zoom,
+                        (m[1] - drag.start_mouse[1]) * cam.zoom,
+                    ];
+                    let r = -s.rotation_deg.to_radians();
+                    let mut dx = d[0] * r.cos() - d[1] * r.sin();
+                    let mut dy = d[0] * r.sin() + d[1] * r.cos();
+                    if s.flip_x {
+                        dx = -dx;
+                    }
+                    if s.flip_y {
+                        dy = -dy;
+                    }
+                    // Dragged up, the top goes away; right, the right side.
+                    let mut x = s.tilt_x_deg - dy * TILT_DEG_PER_PX;
+                    let mut y = s.tilt_y_deg + dx * TILT_DEG_PER_PX;
+                    if shift {
+                        x = (x / 15.0).round() * 15.0;
+                        y = (y / 15.0).round() * 15.0;
+                    }
+                    t.tilt_x_deg = crate::variables::clamp_tilt(x);
+                    t.tilt_y_deg = crate::variables::clamp_tilt(y);
+                    ui.ctx().set_cursor_icon(CursorIcon::AllScroll);
+                }
                 DragKind::Stretch(edge) => {
                     // The opposite edge stays put; with Alt, both move (center fixed).
                     let (dir, extent) = edge_axis(s, layer.size_px, edge);
@@ -1261,13 +1375,14 @@ pub fn show(
                             if let Some((_, anchor)) = nearest_snap(&anchors, &[p], reach)
                                 && let Some(u) = layer.page_to_unit(anchor)
                             {
-                                d[i] = [u[0] - UNIT_CORNERS[i][0], u[1] - UNIT_CORNERS[i][1]];
+                                let base = s.tilted_corners(layer.size_px)[i];
+                                d[i] = [u[0] - base[0], u[1] - base[1]];
                                 snapped = Some(anchor);
                             }
                         }
                         t2.distort = d;
                         // A corner dragged across the others would fold the image.
-                        if is_convex(t2.unit_quad()) {
+                        if is_convex(t2.unit_quad(layer.size_px)) {
                             layer.transform.distort = d;
                         }
                     }
@@ -1284,6 +1399,35 @@ pub fn show(
             changed = true;
         }
         if response.drag_stopped() || !ui.input(|i| i.pointer.primary_down()) {
+            // Released near where it started: it goes back, still linked. Farther, it
+            // stays, and is unlinked once the drag is over (see `held_layers`).
+            if drag.held {
+                for (id, start) in &drag.layers {
+                    if let Some(layer) = doc.layer_mut(*id) {
+                        layer.transform = *start;
+                    }
+                }
+            }
+            // A single layer moved onto a template point: offer to link it there.
+            let held = drag.held;
+            let offer = match (drag.kind, drag.layers.as_slice(), state.snapped) {
+                _ if held => None,
+                (DragKind::Move, [(id, _)], Some(a)) => doc
+                    .template_points
+                    .iter()
+                    .find(|(_, p)| (p[0] - a[0]).abs() < 1e-3 && (p[1] - a[1]).abs() < 1e-3)
+                    .zip(doc.layer(*id))
+                    .map(|((point, p), layer)| LinkOffer {
+                        layer: *id,
+                        point: point.clone(),
+                        offset: [
+                            layer.transform.center[0] - p[0],
+                            layer.transform.center[1] - p[1],
+                        ],
+                    }),
+                _ => None,
+            };
+            state.link_offer = offer.or(state.link_offer.take());
             state.drag = None;
             snapped = None;
             snapped_guides = [None; 2];
@@ -1313,6 +1457,14 @@ pub fn show(
             Some(_) => ui.ctx().set_cursor_icon(CursorIcon::Crosshair),
             None if let Some(g) = hovered_guide => {
                 ui.ctx().set_cursor_icon(guide_cursor(g.vertical))
+            }
+            // Ctrl over the selected layer: a drag turns it in 3D.
+            None if ui.input(|i| i.modifiers.command && !i.modifiers.alt)
+                && selected.is_some()
+                && topmost_hit(doc, cam.to_mm(rect, p)) == *selected
+                && selected.is_some_and(|id| doc.layer(id).is_some()) =>
+            {
+                ui.ctx().set_cursor_icon(CursorIcon::AllScroll)
             }
             None if topmost_hit(doc, cam.to_mm(rect, p)).is_some() => {
                 ui.ctx().set_cursor_icon(CursorIcon::Move)
@@ -1353,22 +1505,38 @@ pub fn show(
     changed
 }
 
+/// Line colors of `template`'s elements, in its order: each element's own, or its kind's.
+pub fn element_colors(template: &crate::template::Template) -> Vec<Color32> {
+    template
+        .elements
+        .iter()
+        .map(|e| {
+            let [r, g, b] = e.color.unwrap_or(e.kind.default_color());
+            Color32::from_rgb(r, g, b)
+        })
+        .collect()
+}
+
 /// The template's lines and their shapes' centers, and the safe-area guide, as the
 /// canvas shows them.
 fn paint_template(
     painter: &egui::Painter,
     elements: &[PlacedElement],
+    colors: &[Color32],
     state: &mut CanvasState,
     rect: Rect,
     width_mm: Option<f32>,
 ) {
     let cam = state.camera;
-    for e in elements.iter().filter(|_| state.show_template) {
-        let k = e.kind.index();
-        if !state.element_show[k] {
+    for (i, e) in elements.iter().enumerate().filter(|_| state.show_template) {
+        if !state.element_show.get(i).copied().unwrap_or(true) {
             continue;
         }
-        let stroke = Stroke::new(1.2, state.element_color[k]);
+        let color = colors.get(i).copied().unwrap_or_else(|| {
+            let [r, g, b] = e.kind.default_color();
+            Color32::from_rgb(r, g, b)
+        });
+        let stroke = Stroke::new(1.2, color);
         let line = Stroke {
             width: width_mm.map_or(stroke.width, |w| w * cam.zoom),
             ..stroke
@@ -1405,9 +1573,39 @@ fn swap_compare_caches(state: &mut CanvasState) {
     std::mem::swap(&mut state.safe_area, &mut state.compare_safe_area);
 }
 
+/// Next to the pointer, while a layer whose position is linked is dragged: says that
+/// going on unlinks it and that releasing puts it back.
+fn linked_drag_hint(ui: &egui::Ui, at: Pos2) {
+    let painter = ui.ctx().layer_painter(egui::LayerId::new(
+        egui::Order::Tooltip,
+        egui::Id::unique("linked_drag_hint"),
+    ));
+    let visuals = ui.visuals();
+    let galley = painter.layout(
+        tr!("LINKED_POSITION_DRAG_HINT").to_owned(),
+        egui::FontId::proportional(13.0),
+        visuals.text_color(),
+        260.0,
+    );
+    let size = galley.size() + vec2(16.0, 10.0);
+    let chip = Rect::from_min_size(at + vec2(16.0, 16.0), size);
+    painter.rect(
+        chip,
+        4.0,
+        visuals.extreme_bg_color,
+        Stroke::new(1.5, visuals.warn_fg_color),
+        StrokeKind::Inside,
+    );
+    painter.galley(chip.min + vec2(8.0, 5.0), galley, visuals.text_color());
+}
+
 /// Half the width of the zone where the comparison's divider is grabbed, in screen
 /// points.
 const DIVIDER_GRAB: f32 = 6.0;
+
+/// Half the size of the square around the divider's handle (a circle of radius 12)
+/// where a press grabs the divider, in screen points.
+const HANDLE_DEAD_ZONE: f32 = 24.0;
 
 /// The divider between the two versions of the template at `x`, a round handle in its
 /// middle, and what each side shows at the top.
@@ -2075,7 +2273,7 @@ fn paint_safe_area(
         };
         let mut guide = crate::print::offset(&rings(&|k| k == ElementKind::Outline), -margin);
         guide.extend(crate::print::offset(
-            &rings(&|k| matches!(k, ElementKind::Buttons | ElementKind::Cutouts)),
+            &rings(&|k| k == ElementKind::Holes),
             margin,
         ));
         state.safe_area = Some((key, guide));
@@ -2136,16 +2334,22 @@ fn paint(
         None => state.background = None,
     }
 
-    // While comparing, the project's template right of the divider, the other one left.
+    // While comparing, the project's template on one side of the divider (`own`), the
+    // other one on the other side (`theirs`).
     let split = state
         .compare
         .as_ref()
-        .map(|_| rect.left() + rect.width() * state.compare_split);
-    let right = split.map_or(rect, |x| Rect::from_min_max(pos2(x, rect.top()), rect.max));
-    let left = split.map(|x| Rect::from_min_max(rect.min, pos2(x, rect.bottom())));
-    // In the template editor, the layers are the template compared: right of it too.
+        .map(|c| (rect.left() + rect.width() * state.compare_split, c.on_left));
+    let left_of = |x: f32| Rect::from_min_max(rect.min, pos2(x, rect.bottom()));
+    let right_of = |x: f32| Rect::from_min_max(pos2(x, rect.top()), rect.max);
+    let own = split.map_or(
+        rect,
+        |(x, on_left)| if on_left { right_of(x) } else { left_of(x) },
+    );
+    let theirs = split.map(|(x, on_left)| if on_left { left_of(x) } else { right_of(x) });
+    // In the template editor, the layers are the template compared: on its side too.
     let layers_painter = if doc.edited_template.is_some() {
-        painter.with_clip_rect(right)
+        painter.with_clip_rect(own)
     } else {
         painter.clone()
     };
@@ -2183,23 +2387,16 @@ fn paint(
     // Previews not drawn this frame are dropped with their textures.
     state.group_previews = painting.used;
 
-    let painter_right = painter.with_clip_rect(right);
-    paint_cuts(
-        ui.ctx(),
-        &painter_right,
-        doc.page_mm(),
-        elements,
-        state,
-        rect,
-    );
+    let painter_own = painter.with_clip_rect(own);
+    paint_cuts(ui.ctx(), &painter_own, doc.page_mm(), elements, state, rect);
     let compare = state.compare.take();
     // In the template editor, both sides are plain lines: no cut preview on the source.
-    if let (Some(left), Some(other), None) = (left, &compare, &doc.edited_template) {
+    if let (Some(theirs), Some(other), None) = (theirs, &compare, &doc.edited_template) {
         swap_compare_caches(state);
-        let painter_left = painter.with_clip_rect(left);
+        let painter_theirs = painter.with_clip_rect(theirs);
         paint_cuts(
             ui.ctx(),
-            &painter_left,
+            &painter_theirs,
             doc.page_mm(),
             &other.elements,
             state,
@@ -2227,8 +2424,9 @@ fn paint(
         StrokeKind::Outside,
     );
 
-    paint_template(&painter_right, elements, state, rect, None);
-    if let (Some(left), Some(other)) = (left, &compare) {
+    let colors = state.element_color.clone();
+    paint_template(&painter_own, elements, &colors, state, rect, None);
+    if let (Some(theirs), Some(other)) = (theirs, &compare) {
         swap_compare_caches(state);
         // In the template editor, as wide as the shapes it is compared with.
         let width = doc
@@ -2236,15 +2434,16 @@ fn paint(
             .is_some()
             .then_some(crate::template_edit::LINE_WIDTH_MM);
         paint_template(
-            &painter.with_clip_rect(left),
+            &painter.with_clip_rect(theirs),
             &other.elements,
+            &other.colors,
             state,
             rect,
             width,
         );
         swap_compare_caches(state);
     }
-    if let (Some(x), Some(other)) = (split, &compare) {
+    if let (Some((x, _)), Some(other)) = (split, &compare) {
         paint_divider(ui, &painter, rect, x, &other.labels);
     }
     state.compare = compare;
@@ -2996,12 +3195,10 @@ mod tests {
                 .unwrap()
         };
         let (outline, _) = of_kind(&doc, ElementKind::Outline);
-        for kind in [ElementKind::Buttons, ElementKind::Cutouts] {
-            let (hole, at) = of_kind(&doc, kind);
-            assert_eq!(super::layer_to_select(&doc, at), Some(hole), "{kind:?}");
-        }
+        let (hole, at) = of_kind(&doc, ElementKind::Holes);
+        assert_eq!(super::layer_to_select(&doc, at), Some(hole));
         // In a project, the topmost layer: the outline, at the top of the list.
-        let (_, at) = of_kind(&doc, ElementKind::Buttons);
+        let (_, at) = of_kind(&doc, ElementKind::Holes);
         doc.edited_template = None;
         assert_eq!(super::layer_to_select(&doc, at), Some(outline));
     }
@@ -3021,7 +3218,7 @@ mod tests {
         };
         let elements = [
             element(ElementKind::Outline, rect_poly([10.0, 10.0], [90.0, 40.0])),
-            element(ElementKind::Buttons, rect_poly([20.0, 20.0], [30.0, 30.0])),
+            element(ElementKind::Holes, rect_poly([20.0, 20.0], [30.0, 30.0])),
         ];
         let ctx = egui::Context::default();
         let mut state = CanvasState::default();
@@ -3639,7 +3836,9 @@ mod tests {
             crate::shape::sync(ui.ctx(), &mut doc, true);
             state.compare = Some(Compare {
                 elements: outline([30.0, 30.0], [267.0, 180.0]),
-                labels: ["Installed (1.1)".into(), "Project (1.0)".into()],
+                colors: Vec::new(),
+                labels: ["Project (1.0)".into(), "Installed (1.1)".into()],
+                on_left: false,
             });
             let mut sel = None;
             show(
@@ -3674,7 +3873,7 @@ mod tests {
             .iter()
             .find(|l| {
                 crate::template_edit::element_of(&doc, l.layer.id)
-                    .is_some_and(|t| t.kind == crate::template::ElementKind::Buttons)
+                    .is_some_and(|t| t.kind == crate::template::ElementKind::Holes)
             })
             .map(|l| l.layer.id)
             .unwrap();
@@ -3699,7 +3898,9 @@ mod tests {
             crate::shape::sync(ui.ctx(), &mut doc, true);
             state.compare = Some(Compare {
                 elements: elements.clone(),
+                colors: Vec::new(),
                 labels: ["Source (Cosmox - T16 - v1.1)".into(), "Being edited".into()],
+                on_left: true,
             });
             let mut sel = None;
             show(ui, &mut doc, &[], &mut sel, &mut state);
@@ -3779,7 +3980,7 @@ mod tests {
         };
         let elements = vec![
             element(ElementKind::Outline, square([100.0, 80.0], 50.0)),
-            element(ElementKind::Buttons, square([100.0, 80.0], 15.0)),
+            element(ElementKind::Holes, square([100.0, 80.0], 15.0)),
         ];
         let state = std::cell::RefCell::new(CanvasState::default());
         // Each theme is drawn with a context of its own: textures are made again.
@@ -4138,7 +4339,7 @@ mod tests {
     /// A template element with only the given shape centers.
     fn anchors(points: &[P2]) -> Vec<PlacedElement> {
         vec![PlacedElement {
-            kind: ElementKind::Buttons,
+            kind: ElementKind::Holes,
             polylines: Vec::new(),
             centers: points.to_vec(),
         }]
@@ -4889,6 +5090,50 @@ mod tests {
         canvas_drag(&mut doc, [100.0, 125.0], [100.0, 40.0], none);
         let t = doc.layer(1).unwrap().transform;
         assert!((t.scale[1] * 50.0 - MIN_STRETCH_MM).abs() < 1e-4, "{t:?}");
+    }
+
+    #[test]
+    fn ctrl_drag_on_the_layer_tilts_it_in_3d() {
+        let doc = |rotation: f32| {
+            let mut l = Layer::new(1, "l".into(), "x.png".into());
+            l.size_px = [100, 50];
+            l.transform.center = [100.0, 100.0];
+            l.transform.rotation_deg = rotation;
+            Document {
+                layers: vec![Node::Layer(Box::new(l))],
+                ..Default::default()
+            }
+        };
+        let ctrl = egui::Modifiers::COMMAND;
+        let tilt = |d: &Document| {
+            let t = d.layer(1).unwrap().transform;
+            (t.tilt_x_deg, t.tilt_y_deg, t.center)
+        };
+        // Up: the top goes away; it doesn't move.
+        let mut d = doc(0.0);
+        canvas_drag(&mut d, [100.0, 100.0], [100.0, 90.0], ctrl);
+        let (x, y, c) = tilt(&d);
+        assert!(x > 1.0 && y == 0.0 && c == [100.0, 100.0], "{x} {y} {c:?}");
+        // Right: the right side goes away.
+        let mut d = doc(0.0);
+        canvas_drag(&mut d, [100.0, 100.0], [110.0, 100.0], ctrl);
+        let (x, y, _) = tilt(&d);
+        assert!(x == 0.0 && y > 1.0, "{x} {y}");
+        // Turned a quarter, dragging down the page is toward its right side.
+        let mut d = doc(90.0);
+        canvas_drag(&mut d, [100.0, 100.0], [100.0, 110.0], ctrl);
+        let (x, y, _) = tilt(&d);
+        assert!(x.abs() < 1e-3 && y > 1.0, "{x} {y}");
+        // Without Ctrl it moves, untilted.
+        let mut d = doc(0.0);
+        canvas_drag(
+            &mut d,
+            [100.0, 100.0],
+            [110.0, 100.0],
+            egui::Modifiers::NONE,
+        );
+        let (x, y, c) = tilt(&d);
+        assert!(x == 0.0 && y == 0.0 && c != [100.0, 100.0]);
     }
 
     #[test]

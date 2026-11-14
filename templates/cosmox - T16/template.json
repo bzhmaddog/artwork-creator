@@ -10,22 +10,169 @@
     {
       "kind": "outline",
       "id": "outline",
-      "name": "Outline"
+      "name": "Outline",
+      "color": "#ff00ff"
     },
     {
-      "kind": "buttons",
+      "kind": "holes",
       "id": "action-buttons",
-      "name": "Action buttons"
+      "name": "Action buttons",
+      "color": "#00aaff"
     },
     {
-      "kind": "buttons",
+      "kind": "holes",
       "id": "menu-buttons",
-      "name": "Menu buttons"
+      "name": "Menu buttons",
+      "color": "#000000"
     },
     {
-      "kind": "cutouts",
+      "kind": "holes",
       "id": "fastener-holes",
-      "name": "Fastener holes"
+      "name": "Fastener holes",
+      "color": "#ff8c00"
     }
+  ],
+  "variables": [
+    {
+      "name": "actionButtonDiameter",
+      "kind": "length",
+      "value": 28.0
+    },
+    {
+      "name": "menuButtonDiameter",
+      "kind": "length",
+      "value": 7.0
+    },
+    {
+      "name": "screwHoleDiameter",
+      "kind": "length",
+      "value": 3.6
+    }
+  ],
+  "bindings": {
+    "action-buttons-1": {
+      "width": "actionButtonDiameter",
+      "height": "actionButtonDiameter"
+    },
+    "action-buttons-10": {
+      "width": "actionButtonDiameter",
+      "height": "actionButtonDiameter"
+    },
+    "action-buttons-11": {
+      "width": "actionButtonDiameter",
+      "height": "actionButtonDiameter"
+    },
+    "action-buttons-12": {
+      "width": "actionButtonDiameter",
+      "height": "actionButtonDiameter"
+    },
+    "action-buttons-13": {
+      "width": "actionButtonDiameter",
+      "height": "actionButtonDiameter"
+    },
+    "action-buttons-14": {
+      "width": "actionButtonDiameter",
+      "height": "actionButtonDiameter"
+    },
+    "action-buttons-15": {
+      "width": "actionButtonDiameter",
+      "height": "actionButtonDiameter"
+    },
+    "action-buttons-16": {
+      "width": "actionButtonDiameter",
+      "height": "actionButtonDiameter"
+    },
+    "action-buttons-2": {
+      "width": "actionButtonDiameter",
+      "height": "actionButtonDiameter"
+    },
+    "action-buttons-3": {
+      "width": "actionButtonDiameter",
+      "height": "actionButtonDiameter"
+    },
+    "action-buttons-4": {
+      "width": "actionButtonDiameter",
+      "height": "actionButtonDiameter"
+    },
+    "action-buttons-5": {
+      "width": "actionButtonDiameter",
+      "height": "actionButtonDiameter"
+    },
+    "action-buttons-6": {
+      "width": "actionButtonDiameter",
+      "height": "actionButtonDiameter"
+    },
+    "action-buttons-7": {
+      "width": "actionButtonDiameter",
+      "height": "actionButtonDiameter"
+    },
+    "action-buttons-8": {
+      "width": "actionButtonDiameter",
+      "height": "actionButtonDiameter"
+    },
+    "action-buttons-9": {
+      "width": "actionButtonDiameter",
+      "height": "actionButtonDiameter"
+    },
+    "fastener-holes-22": {
+      "width": "screwHoleDiameter",
+      "height": "screwHoleDiameter * 0.9997"
+    },
+    "fastener-holes-23": {
+      "width": "screwHoleDiameter",
+      "height": "screwHoleDiameter"
+    },
+    "fastener-holes-24": {
+      "width": "screwHoleDiameter",
+      "height": "screwHoleDiameter"
+    },
+    "fastener-holes-25": {
+      "width": "screwHoleDiameter",
+      "height": "screwHoleDiameter"
+    },
+    "fastener-holes-26": {
+      "width": "screwHoleDiameter",
+      "height": "screwHoleDiameter"
+    },
+    "fastener-holes-27": {
+      "width": "screwHoleDiameter",
+      "height": "screwHoleDiameter"
+    },
+    "fastener-holes-28": {
+      "width": "screwHoleDiameter",
+      "height": "screwHoleDiameter"
+    },
+    "fastener-holes-29": {
+      "width": "screwHoleDiameter",
+      "height": "screwHoleDiameter * 0.9997"
+    },
+    "fastener-holes-30": {
+      "width": "screwHoleDiameter",
+      "height": "screwHoleDiameter * 0.9997"
+    },
+    "menu-buttons-17": {
+      "width": "menuButtonDiameter",
+      "height": "menuButtonDiameter"
+    },
+    "menu-buttons-18": {
+      "width": "menuButtonDiameter",
+      "height": "menuButtonDiameter"
+    },
+    "menu-buttons-19": {
+      "width": "menuButtonDiameter",
+      "height": "menuButtonDiameter"
+    },
+    "menu-buttons-20": {
+      "width": "menuButtonDiameter",
+      "height": "menuButtonDiameter"
+    },
+    "menu-buttons-21": {
+      "width": "menuButtonDiameter",
+      "height": "menuButtonDiameter"
+    }
+  },
+  "bindings_origin": [
+    0.5240326,
+    7.0193024
   ]
 }

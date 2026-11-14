@@ -14,6 +14,8 @@ pub enum Purpose {
     AddImages,
     /// SVG files whose shapes are added as path layers.
     ImportSvg,
+    /// The template's reference: a drawing, photo or PDF to draw it over.
+    TemplateReference,
     OpenProject,
     SaveProject,
     Export,

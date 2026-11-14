@@ -341,6 +341,10 @@ pub enum Field {
     TextSize,
     /// Clockwise rotation, in degrees.
     Rotation,
+    /// 3D tilt around the horizontal axis, in degrees.
+    TiltX,
+    /// 3D tilt around the vertical axis, in degrees.
+    TiltY,
 }
 
 impl Field {
@@ -354,7 +358,7 @@ impl Field {
             | Field::StrokeWidth
             | Field::CornerRadius => Kind::Length,
             Field::TextSize => Kind::Size,
-            Field::Rotation => Kind::Angle,
+            Field::Rotation | Field::TiltX | Field::TiltY => Kind::Angle,
         }
     }
 }
@@ -546,6 +550,42 @@ impl Parser<'_> {
     }
 }
 
+/// The names of the x and y of the template shape of SVG id `id`, as formulas use them:
+/// `action-buttons-3` gives `action_buttons_3_x` and `action_buttons_3_y`.
+pub fn point_names(id: &str) -> [String; 2] {
+    let mut base: String = id
+        .chars()
+        .map(|c| if name_char(c) { c } else { '_' })
+        .collect();
+    if !base.starts_with(name_start) {
+        base.insert(0, '_');
+    }
+    [format!("{base}_x"), format!("{base}_y")]
+}
+
+/// The family a template point's variable belongs to, for the formula editor to fold
+/// them: `action_buttons` for `action_buttons_3_x`; `None` for a name not shaped so.
+fn point_family(name: &str) -> Option<&str> {
+    let base = name
+        .strip_suffix("_x")
+        .or_else(|| name.strip_suffix("_y"))?;
+    let (family, number) = base.rsplit_once('_')?;
+    (!family.is_empty() && !number.is_empty() && number.chars().all(|c| c.is_ascii_digit()))
+        .then_some(family)
+}
+
+/// The formula linking a position to the variable `name`, `offset` mm away.
+pub fn offset_formula(name: &str, offset: f32) -> String {
+    let d = (offset * 100.0).round() / 100.0;
+    if d == 0.0 {
+        name.to_owned()
+    } else if d > 0.0 {
+        format!("{name} + {d}")
+    } else {
+        format!("{name} - {}", -d)
+    }
+}
+
 /// The value of `formula` with these variables, for a field taking variables of `kind`.
 pub fn eval(formula: &str, vars: &[Variable], kind: Kind) -> Result<f64, FormulaError> {
     let tokens = tokenize(formula)?;
@@ -620,6 +660,8 @@ fn raw(layer: &Layer, field: Field) -> Option<f32> {
             .map(|s| s.corner_radius),
         Field::TextSize => layer.text.is_some().then(|| text::size_pt(layer)),
         Field::Rotation => Some(layer.transform.rotation_deg),
+        Field::TiltX => Some(layer.transform.tilt_x_deg),
+        Field::TiltY => Some(layer.transform.tilt_y_deg),
     }
 }
 
@@ -627,6 +669,12 @@ fn raw(layer: &Layer, field: Field) -> Option<f32> {
 pub fn wrap_degrees(deg: f32) -> f32 {
     let d = (deg + 180.0).rem_euclid(360.0) - 180.0;
     if d == -180.0 && deg > 0.0 { 180.0 } else { d }
+}
+
+/// `deg` within the 3D tilt's range.
+pub fn clamp_tilt(deg: f32) -> f32 {
+    let max = crate::document::MAX_TILT_DEG;
+    deg.clamp(-max, max)
 }
 
 /// Sets `field` to the value `v` (in the field's unit). Returns its new raw number.
@@ -654,6 +702,8 @@ fn set(layer: &mut Layer, field: Field, v: f32) -> Option<f32> {
         }
         Field::TextSize => text::set_size_pt(layer, v.clamp(1.0, 2000.0)),
         Field::Rotation => layer.transform.rotation_deg = wrap_degrees(v),
+        Field::TiltX => layer.transform.tilt_x_deg = clamp_tilt(v),
+        Field::TiltY => layer.transform.tilt_y_deg = clamp_tilt(v),
     }
     raw(layer, field)
 }
@@ -693,11 +743,13 @@ fn apply_inherited(doc: &mut Document) -> bool {
 /// then every linked field to its formula's value, and unlinks those changed by hand
 /// since the last call. A formula with an error leaves its field as it is. Returns true
 /// if the document changed.
-pub fn apply(doc: &mut Document, applied: &mut Applied) -> bool {
+/// The layers `held` are left as they are, neither updated nor unlinked: a drag holds
+/// them for a moment (see `view::CanvasState::held_layers`).
+pub fn apply(doc: &mut Document, applied: &mut Applied, held: &[u64]) -> bool {
     let mut changed = apply_inherited(doc);
     let vars = doc.all_variables();
     doc.for_each_layer_mut(|layer| {
-        if layer.bindings.is_empty() {
+        if layer.bindings.is_empty() || held.contains(&layer.id) {
             return;
         }
         let id = layer.id;
@@ -905,6 +957,9 @@ fn formula_field<'a>(
 /// Width of the formula editor's contents, in points.
 const FORMULA_EDITOR_WIDTH: f32 = 260.0;
 
+/// Height of the formula editor's variable list, in points: longer lists scroll.
+const VARIABLE_LIST_HEIGHT: f32 = 240.0;
+
 /// The formula editor of a [`field`], opened by its fx button `fx`: the formula, its
 /// result (or what is wrong with it), the variables the field takes (a click inserts
 /// one at the cursor), then Unlink (the field keeps its value), Cancel and OK. OK with a
@@ -922,12 +977,14 @@ fn formula_editor(
     let popup_id = fx.id.with("editor");
     let draft_id = popup_id.with("draft");
     let edit_id = popup_id.with("edit");
+    let filter_id = popup_id.with("filter");
     if fx.clicked() {
         let draft = formula
             .clone()
             .unwrap_or_else(|| format!("{}", (value * 1000.0).round() / 1000.0));
         ui.data_mut(|d| {
             d.insert_temp(draft_id, draft);
+            d.insert_temp(filter_id, String::new());
             // Ready to type once the editor shows.
             d.insert_temp(popup_id.with("focus"), true);
         });
@@ -980,17 +1037,74 @@ fn formula_editor(
                     tr!("NO_COMPATIBLE_VARIABLES"),
                 );
             }
-            for v in compatible {
-                let text = format!("{}   {}", v.name, v.value.short_text());
-                let clicked = ui
-                    .horizontal(|ui| {
-                        v.value.kind().icon(ui);
-                        ui.selectable_label(false, text).clicked()
-                    })
-                    .inner;
-                if clicked {
-                    insert_at_cursor(ui.ctx(), edit_id, &mut draft, &v.name);
-                }
+            if !compatible.is_empty() {
+                let mut filter: String = ui.data(|d| d.get_temp(filter_id)).unwrap_or_default();
+                ui.scope(|ui| {
+                    crate::layers_ui::field_frames(ui);
+                    ui.add_sized(
+                        size,
+                        egui::TextEdit::singleline(&mut filter)
+                            .hint_text(tr!("FILTER_VARIABLES_HINT")),
+                    );
+                });
+                let needle = filter.trim().to_lowercase();
+                egui::ScrollArea::vertical()
+                    .max_height(VARIABLE_LIST_HEIGHT)
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        let row = |ui: &mut Ui, v: &Variable| {
+                            let text = format!("{}   {}", v.name, v.value.short_text());
+                            ui.horizontal(|ui| {
+                                v.value.kind().icon(ui);
+                                ui.selectable_label(false, text).clicked()
+                            })
+                            .inner
+                            .then(|| v.name.clone())
+                        };
+                        let mut picked = None;
+                        if needle.is_empty() {
+                            // Template points folded by family, plain variables first.
+                            let mut families: Vec<(&str, Vec<&Variable>)> = Vec::new();
+                            for &v in &compatible {
+                                match point_family(&v.name) {
+                                    Some(f) => match families.iter_mut().find(|(g, _)| *g == f) {
+                                        Some((_, list)) => list.push(v),
+                                        None => families.push((f, vec![v])),
+                                    },
+                                    None => {
+                                        if let Some(n) = row(ui, v) {
+                                            picked = Some(n);
+                                        }
+                                    }
+                                }
+                            }
+                            for (family, list) in families {
+                                let points = list.len().div_ceil(2);
+                                egui::CollapsingHeader::new(format!("{family} ({points})"))
+                                    .id_salt(popup_id.with(family))
+                                    .show(ui, |ui| {
+                                        for v in list {
+                                            if let Some(n) = row(ui, v) {
+                                                picked = Some(n);
+                                            }
+                                        }
+                                    });
+                            }
+                        } else {
+                            for &v in compatible
+                                .iter()
+                                .filter(|v| v.name.to_lowercase().contains(&needle))
+                            {
+                                if let Some(n) = row(ui, v) {
+                                    picked = Some(n);
+                                }
+                            }
+                        }
+                        if let Some(name) = picked {
+                            insert_at_cursor(ui.ctx(), edit_id, &mut draft, &name);
+                        }
+                    });
+                ui.data_mut(|d| d.insert_temp(filter_id, filter));
             }
             ui.add_space(4.0);
             let enter = edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
@@ -1773,6 +1887,57 @@ mod tests {
     use super::*;
 
     #[test]
+    fn layers_linked_to_a_template_point_follow_it() {
+        assert_eq!(
+            point_names("action-buttons-3"),
+            [
+                "action_buttons_3_x".to_owned(),
+                "action_buttons_3_y".to_owned()
+            ]
+        );
+        assert_eq!(point_names("3d")[0], "_3d_x");
+        assert_eq!(point_family("action_buttons_12_x"), Some("action_buttons"));
+        assert_eq!(point_family("menu_buttons_3_y"), Some("menu_buttons"));
+        assert_eq!(point_family("display_x"), None);
+        assert_eq!(point_family("ButtonSize"), None);
+        assert_eq!(offset_formula("p_x", 0.001), "p_x");
+        assert_eq!(offset_formula("p_x", 2.5), "p_x + 2.5");
+        assert_eq!(offset_formula("p_y", -1.25), "p_y - 1.25");
+
+        let mut layer = crate::shape::new_layer(1, crate::shape::ShapeKind::Ellipse, [0.0, 0.0]);
+        layer.bindings.insert(Field::X, "b_1_x + 5".into());
+        layer.bindings.insert(Field::Y, "b_1_y".into());
+        let mut doc = Document {
+            layers: vec![crate::document::Node::Layer(Box::new(layer))],
+            template_points: vec![("b-1".into(), [40.0, 60.0])],
+            ..Default::default()
+        };
+        let mut applied = Applied::new();
+        assert!(apply(&mut doc, &mut applied, &[]));
+        assert_eq!(doc.layer(1).unwrap().transform.center, [45.0, 60.0]);
+        // The template changed: the shape moved, the layer goes with it.
+        doc.template_points = vec![("b-1".into(), [50.0, 70.0])];
+        assert!(apply(&mut doc, &mut applied, &[]));
+        assert_eq!(doc.layer(1).unwrap().transform.center, [55.0, 70.0]);
+        // Moved by a drag that holds it: neither unlinked nor put back; released, put back
+        // by the drag, it is still linked.
+        doc.layer_mut(1).unwrap().transform.center = [80.0, 90.0];
+        assert!(!apply(&mut doc, &mut applied, &[1]));
+        assert_eq!(doc.layer(1).unwrap().transform.center, [80.0, 90.0]);
+        doc.layer_mut(1).unwrap().transform.center = [55.0, 70.0];
+        apply(&mut doc, &mut applied, &[]);
+        assert_eq!(doc.layer(1).unwrap().bindings.len(), 2);
+        // The shape is gone: the layer stays, its links shown broken.
+        doc.template_points.clear();
+        assert!(!apply(&mut doc, &mut applied, &[]));
+        assert_eq!(doc.layer(1).unwrap().transform.center, [55.0, 70.0]);
+        assert_eq!(
+            broken_links(doc.layer(1).unwrap(), &doc.all_variables()).len(),
+            2
+        );
+    }
+
+    #[test]
     fn project_layers_follow_their_template_variables() {
         let mut doc = Document {
             variables: vec![var("gap", Value::Length(2.0))],
@@ -1789,7 +1954,7 @@ mod tests {
         layer.bindings.insert(Field::Width, "button + gap".into());
         doc.layers.push(Node::Layer(Box::new(layer)));
         let mut applied = Applied::new();
-        assert!(apply(&mut doc, &mut applied));
+        assert!(apply(&mut doc, &mut applied, &[]));
         let Node::Layer(l) = &doc.layers[0] else {
             unreachable!()
         };
@@ -1816,7 +1981,7 @@ mod tests {
         layer.bindings.insert(Field::Width, "wide".into());
         doc.layers.push(Node::Layer(Box::new(layer)));
         let mut applied = Applied::new();
-        assert!(apply(&mut doc, &mut applied));
+        assert!(apply(&mut doc, &mut applied, &[]));
         assert_eq!(doc.variables[0].value, Value::Length(43.0));
         assert_eq!(doc.variables[1].value, Value::Length(5.0));
         assert_eq!(
@@ -1836,7 +2001,7 @@ mod tests {
         assert!(!plain.contains("formula"), "{plain}");
         // Another template without `button`: an error, and the last value is kept.
         doc.template_variables = vec![var("panel", Value::Length(10.0))];
-        assert!(!apply(&mut doc, &mut applied));
+        assert!(!apply(&mut doc, &mut applied, &[]));
         assert_eq!(doc.variables[0].value, Value::Length(43.0));
         assert_eq!(
             inherited(&doc.variables[0], &doc.template_variables),
@@ -1844,7 +2009,7 @@ mod tests {
         );
         // Back with a new value: followed again.
         doc.template_variables = vec![var("button", Value::Length(20.0))];
-        assert!(apply(&mut doc, &mut applied));
+        assert!(apply(&mut doc, &mut applied, &[]));
         assert_eq!(doc.variables[0].value, Value::Length(22.0));
     }
 
@@ -1974,7 +2139,7 @@ mod tests {
         l.bindings.insert(Field::Rotation, "tilt * 7".into());
         let mut doc = doc_with(l);
         let mut applied = Applied::new();
-        assert!(apply(&mut doc, &mut applied));
+        assert!(apply(&mut doc, &mut applied, &[]));
         let l = doc.layer(1).unwrap();
         assert!(same(l.size_mm()[0], 32.0) && same(l.size_mm()[1], 50.0));
         assert_eq!(
@@ -1986,10 +2151,10 @@ mod tests {
             l.transform.rotation_deg, -150.0,
             "210° turned into the range"
         );
-        assert!(!apply(&mut doc, &mut applied), "nothing more to do");
+        assert!(!apply(&mut doc, &mut applied, &[]), "nothing more to do");
 
         doc.variables[0].value = Value::Length(40.0);
-        assert!(apply(&mut doc, &mut applied));
+        assert!(apply(&mut doc, &mut applied, &[]));
         let l = doc.layer(1).unwrap();
         assert!(same(l.size_mm()[0], 42.0));
         assert_eq!(l.transform.center[0], 80.0);
@@ -1997,7 +2162,7 @@ mod tests {
         // Moved by hand: x is unlinked and stays; the width is still linked.
         doc.layer_mut(1).unwrap().transform.center[0] = 5.0;
         doc.variables[0].value = Value::Length(50.0);
-        apply(&mut doc, &mut applied);
+        apply(&mut doc, &mut applied, &[]);
         let l = doc.layer(1).unwrap();
         assert_eq!(l.transform.center[0], 5.0);
         assert!(!l.bindings.contains_key(&Field::X));
@@ -2015,7 +2180,7 @@ mod tests {
         s.bindings.insert(Field::CornerRadius, "100".into());
         s.bindings.insert(Field::StrokeWidth, "marge_é".into());
         let mut doc = doc_with(s);
-        apply(&mut doc, &mut Applied::new());
+        apply(&mut doc, &mut Applied::new(), &[]);
         let shape = doc.layer(1).unwrap().shape.as_deref().unwrap();
         assert!(same(shape.geometry_size()[1], 30.0));
         assert_eq!(shape.stroke_width, 2.5);
@@ -2025,7 +2190,7 @@ mod tests {
         let mut t = text::new_layer(1, "Hi", "Sans".into(), [0.0, 0.0]);
         t.bindings.insert(Field::TextSize, "marge_é * 6".into());
         let mut doc = doc_with(t);
-        apply(&mut doc, &mut Applied::new());
+        apply(&mut doc, &mut Applied::new(), &[]);
         assert!(same(text::size_pt(doc.layer(1).unwrap()), 15.0));
     }
 
@@ -2235,7 +2400,7 @@ mod tests {
             l.bindings = bindings.clone();
             l.transform.center[0] = *x;
             d.layers = vec![Node::Layer(Box::new(l))];
-            apply(&mut d, &mut Applied::default());
+            apply(&mut d, &mut Applied::default(), &[]);
             *x = d.layer(1).unwrap().transform.center[0];
             let texts: Vec<(String, egui::Pos2)> = out
                 .shapes

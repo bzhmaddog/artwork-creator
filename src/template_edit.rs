@@ -33,6 +33,21 @@ pub struct EditedTemplate {
     /// The size of its frame in mm, as opened: the shapes are placed on the page from
     /// that frame (its top-left corner at 0, y down) as `Document::template_affine` says.
     pub size_mm: P2,
+    /// The id each shape layer has in the template's SVG, by layer id: kept from save to
+    /// save, as project layers link their position to it (see `save`).
+    #[serde(default)]
+    pub shape_ids: std::collections::BTreeMap<u64, String>,
+    /// The id of the reference layer: the image at the bottom of the list the shapes are
+    /// drawn over (see `template_reference`).
+    #[serde(default)]
+    pub reference: Option<u64>,
+}
+
+/// What `save` wrote: the template's settings, and the id of each shape in its SVG, by
+/// layer id, which the editor keeps for the next save.
+pub struct Saved {
+    pub config: TemplateConfig,
+    pub shape_ids: std::collections::BTreeMap<u64, String>,
 }
 
 /// The template's settings in the editor's document.
@@ -134,6 +149,8 @@ pub fn new_document(config: TemplateConfig) -> Document {
     doc.edited_template = Some(Box::new(EditedTemplate {
         config,
         size_mm: [NEW_PAGE_MM[0] - margin, NEW_PAGE_MM[1] - margin],
+        shape_ids: Default::default(),
+        reference: None,
     }));
     place(&mut doc);
     let kind = ElementKind::Outline;
@@ -230,6 +247,7 @@ pub fn open(entry: &TemplateEntry, config: TemplateConfig) -> Result<Document, S
     // In the template's frame first, as `template::load` makes it.
     let frame = Frame::for_bounds(bounds, 0.0);
     let mut doc = Document::default();
+    let mut shape_ids = std::collections::BTreeMap::new();
     let size = [
         (bounds.1[0] - bounds.0[0]) as f32,
         (bounds.1[1] - bounds.0[1]) as f32,
@@ -244,6 +262,9 @@ pub fn open(entry: &TemplateEntry, config: TemplateConfig) -> Result<Document, S
                 if let Some(b) = id.as_ref().and_then(|id| config.bindings.get(id)) {
                     layer.bindings = b.clone();
                 }
+                if let Some(id) = id {
+                    shape_ids.insert(layer.id, id.clone());
+                }
                 g.children.push(Node::Layer(Box::new(layer)));
             }
         }
@@ -256,6 +277,29 @@ pub fn open(entry: &TemplateEntry, config: TemplateConfig) -> Result<Document, S
             doc.layers.push(Node::Layer(Box::new(layer)));
         }
     }
+    // The reference, at the bottom of the list. A file that can't be read leaves a
+    // crossed-out frame of its size.
+    let mut reference = None;
+    if let Some(r) = &config.reference {
+        let id = doc.alloc_id();
+        let path = entry.folder.join(&r.file);
+        let mut l = crate::template_reference::layer(id, &path).unwrap_or_else(|_| {
+            let mut l = Layer::new(id, tr!("REFERENCE_LAYER_NAME", file = r.file), path);
+            l.broken = true;
+            l
+        });
+        if l.broken {
+            l.size_px = [1, 1];
+        }
+        let [w, h] = l.size_px.map(|v| v as f32);
+        l.transform.scale = [r.size[0] / w, r.size[1] / h];
+        l.transform.center = r.center;
+        l.transform.rotation_deg = r.rotation;
+        l.opacity = r.opacity;
+        l.visible = r.visible;
+        doc.layers.insert(0, Node::Layer(Box::new(l)));
+        reference = Some(id);
+    }
     // The variables and links live in the document while it is edited.
     let mut config = config;
     doc.variables = std::mem::take(&mut config.variables);
@@ -264,6 +308,8 @@ pub fn open(entry: &TemplateEntry, config: TemplateConfig) -> Result<Document, S
     doc.edited_template = Some(Box::new(EditedTemplate {
         config,
         size_mm: size,
+        shape_ids,
+        reference,
     }));
     place(&mut doc);
     // Linked positions are page positions as they were saved: moved by as much as the
@@ -326,7 +372,7 @@ fn group_id(name: &str, taken: &[String]) -> String {
 /// element (in mm, in the template's frame), and `template.json`, its settings. The DXF
 /// files the old `template.json` listed (an older template's) are deleted. Returns the new
 /// settings.
-pub fn save(doc: &Document, folder: &Path) -> Result<TemplateConfig, String> {
+pub fn save(doc: &Document, folder: &Path) -> Result<Saved, String> {
     let config = config(doc).cloned().unwrap_or_default();
     let config = &config;
     match config.version.as_deref().map(str::trim) {
@@ -345,6 +391,9 @@ pub fn save(doc: &Document, folder: &Path) -> Result<TemplateConfig, String> {
     let mut stray = Vec::new();
     let mut elements: Vec<(&Group, Vec<&Layer>)> = Vec::new();
     for node in doc.layers.iter().rev() {
+        if is_reference(doc, node.id()) {
+            continue;
+        }
         let mut layers = Vec::new();
         layers_of(node, &mut layers);
         match node {
@@ -375,6 +424,26 @@ pub fn save(doc: &Document, folder: &Path) -> Result<TemplateConfig, String> {
     let mut ids: Vec<String> = Vec::new();
     let mut drawn = Vec::new();
     let mut bindings = std::collections::BTreeMap::new();
+    // Every shape drawn in one piece has an id, which the template's links are listed by
+    // and project layers link their position to: the one it had, kept from save to save,
+    // or a new one. One drawn in several pieces (a path of several outlines) can't be
+    // told apart from them once read again: it has none, and loses its links.
+    let known = doc
+        .edited_template
+        .as_ref()
+        .map(|e| e.shape_ids.clone())
+        .unwrap_or_default();
+    let one_piece = |l: &Layer| template_geom::layer_items(l).len() == 1;
+    let mut shape_ids = std::collections::BTreeMap::new();
+    let mut used = std::collections::HashSet::new();
+    for l in elements.iter().flat_map(|(_, layers)| layers) {
+        if one_piece(l)
+            && let Some(id) = known.get(&l.id)
+            && used.insert(id.clone())
+        {
+            shape_ids.insert(l.id, id.clone());
+        }
+    }
     for (g, layers) in elements {
         let Some(tag) = g.element else { continue };
         let id = group_id(&g.name, &ids);
@@ -385,25 +454,34 @@ pub fn save(doc: &Document, folder: &Path) -> Result<TemplateConfig, String> {
             id: Some(id.clone()),
             dxf: None,
             name: Some(g.name.clone()),
-            color: (tag.color != tag.kind.default_color())
-                .then(|| format!("#{r:02x}{gr:02x}{b:02x}")),
+            color: Some(format!("#{r:02x}{gr:02x}{b:02x}")),
         });
-        // A shape with linked fields gets an id, its links listed by it; one drawn in
-        // several pieces (a path of several outlines) can't be told apart from them once
-        // read again, and loses its links.
         let mut items = Vec::new();
-        let mut shape_ids = Vec::new();
+        let mut item_ids = Vec::new();
         for l in &layers {
             let mine = template_geom::layer_items(l);
-            let shape_id = (!l.bindings.is_empty() && mine.len() == 1).then(|| {
-                let shape_id = format!("{id}-{}", bindings.len() + 1);
-                bindings.insert(shape_id.clone(), l.bindings.clone());
-                shape_id
+            let shape_id = (mine.len() == 1).then(|| {
+                shape_ids
+                    .entry(l.id)
+                    .or_insert_with(|| {
+                        let new = (1..)
+                            .map(|n| format!("{id}-{n}"))
+                            .find(|c| !used.contains(c))
+                            .expect("some number is free");
+                        used.insert(new.clone());
+                        new
+                    })
+                    .clone()
             });
-            shape_ids.extend(std::iter::repeat_n(shape_id, mine.len()));
+            if let Some(shape_id) = &shape_id
+                && !l.bindings.is_empty()
+            {
+                bindings.insert(shape_id.clone(), l.bindings.clone());
+            }
+            item_ids.extend(std::iter::repeat_n(shape_id, mine.len()));
             items.extend(mine);
         }
-        drawn.push((g, tag, items, shape_ids));
+        drawn.push((g, tag, items, item_ids));
     }
     // Where the SVG's top-left corner (that of all its items) is on the page.
     let origin = template_geom::items_bounds(drawn.iter().flat_map(|(_, _, i, _)| i))
@@ -428,22 +506,27 @@ pub fn save(doc: &Document, folder: &Path) -> Result<TemplateConfig, String> {
     new.variables = variables;
     new.bindings_origin = (!bindings.is_empty()).then_some(origin).flatten();
     new.bindings = bindings;
+    new.reference = save_reference(doc, config.reference.as_ref(), folder)?;
     let json = serde_json::to_string_pretty(&new).map_err(|e| e.to_string())?;
     let path = folder.join(CONFIG_FILE);
     std::fs::write(&path, json + "\n")
         .map_err(|e| tr!("CANNOT_WRITE_FILE", path = path.display(), e = e))?;
-    // The DXF files of an older template, now in the SVG; only plain names in the
-    // folder.
+    // The DXF files of an older template, now in the SVG, and a reference replaced or
+    // removed; only plain names in the folder.
+    let old_reference = config
+        .reference
+        .as_ref()
+        .map(|r| r.file.clone())
+        .filter(|f| new.reference.as_ref().is_none_or(|r| r.file != *f));
     let old = config
         .elements
         .iter()
         .filter_map(|e| e.dxf.clone())
-        .chain(config.dxf.clone());
+        .chain(config.dxf.clone())
+        .chain(old_reference);
     for f in old {
         let p = Path::new(&f);
-        if p.components().count() == 1
-            && p.extension().is_some_and(|x| x.eq_ignore_ascii_case("dxf"))
-        {
+        if p.components().count() == 1 {
             let _ = std::fs::remove_file(folder.join(p));
         }
     }
@@ -451,7 +534,10 @@ pub fn save(doc: &Document, folder: &Path) -> Result<TemplateConfig, String> {
     new.variables.clear();
     new.bindings.clear();
     new.bindings_origin = None;
-    Ok(new)
+    Ok(Saved {
+        config: new,
+        shape_ids,
+    })
 }
 
 /// Line color of the shapes in no element: an error, shown in red.
@@ -507,7 +593,11 @@ fn give_look(l: &mut Layer, [r, g, b]: [u8; 3]) -> bool {
 /// changed.
 pub fn sync(doc: &mut Document) -> bool {
     let mut changed = false;
+    let reference = reference_id(doc);
     for node in &mut doc.layers {
+        if Some(node.id()) == reference {
+            continue;
+        }
         let color = match node {
             Node::Group(g) => g.element.map_or(ORPHAN_COLOR, |t| t.color),
             Node::Layer(_) => ORPHAN_COLOR,
@@ -521,6 +611,7 @@ pub fn sync(doc: &mut Document) -> bool {
 /// of the layer list without being an element.
 pub fn is_orphan(doc: &Document, id: u64) -> bool {
     doc.edited_template.is_some()
+        && !is_reference(doc, id)
         && doc
             .layers
             .iter()
@@ -546,6 +637,84 @@ pub fn fits_in(doc: &Document, id: u64, parent: &[usize]) -> bool {
                     .is_some_and(|g| g.element.is_some())
         }
     }
+}
+
+/// The id of the reference layer, when there is one: at the bottom of the list.
+fn reference_id(doc: &Document) -> Option<u64> {
+    let id = doc.edited_template.as_ref()?.reference?;
+    (doc.layers.first()?.id() == id).then_some(id)
+}
+
+/// The template's reference layer.
+pub fn reference(doc: &Document) -> Option<&Layer> {
+    doc.layer(reference_id(doc)?)
+}
+
+/// The template's reference layer, to change.
+pub fn reference_mut(doc: &mut Document) -> Option<&mut Layer> {
+    let id = reference_id(doc)?;
+    doc.layer_mut(id)
+}
+
+/// Whether node `id` is the template's reference.
+pub fn is_reference(doc: &Document, id: u64) -> bool {
+    reference_id(doc) == Some(id)
+}
+
+/// Makes `layer` the template's reference, in place of the one it had: at the bottom of
+/// the list, centered on the template. Returns its id.
+pub fn set_reference(doc: &mut Document, mut layer: Layer) -> u64 {
+    if let Some(id) = reference_id(doc) {
+        doc.remove(id);
+    }
+    let size = doc.edited_template.as_ref().map_or([0.0; 2], |e| e.size_mm);
+    let [x, y] = frame_origin(doc);
+    layer.transform.center = [x + size[0] / 2.0, y + size[1] / 2.0];
+    let id = layer.id;
+    doc.layers.insert(0, Node::Layer(Box::new(layer)));
+    if let Some(e) = &mut doc.edited_template {
+        e.reference = Some(id);
+    }
+    id
+}
+
+/// Copies the reference's file into the template's folder, as `reference.<extension>`,
+/// and says where it lies (`doc` is in the template's frame). A reference whose file
+/// couldn't be read stays as it was (`old`).
+fn save_reference(
+    doc: &Document,
+    old: Option<&template::ReferenceConfig>,
+    folder: &Path,
+) -> Result<Option<template::ReferenceConfig>, String> {
+    let Some(l) = reference_id(doc).and_then(|id| doc.layer(id)) else {
+        return Ok(None);
+    };
+    if l.broken {
+        return Ok(old.cloned());
+    }
+    let ext = l
+        .source
+        .extension()
+        .map(|x| x.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    let file = format!("reference.{ext}");
+    let to = folder.join(&file);
+    let same = |a: &Path, b: &Path| match (a.canonicalize(), b.canonicalize()) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => false,
+    };
+    if !same(&l.source, &to) {
+        std::fs::copy(&l.source, &to)
+            .map_err(|e| tr!("CANNOT_WRITE_FILE", path = to.display(), e = e))?;
+    }
+    Ok(Some(template::ReferenceConfig {
+        file,
+        center: l.transform.center,
+        size: l.size_mm(),
+        rotation: l.transform.rotation_deg,
+        opacity: l.opacity,
+        visible: l.visible,
+    }))
 }
 
 /// Adds an element of `kind` at the top of the layer list, named after its kind, and
@@ -600,7 +769,7 @@ mod tests {
 
         let dir = std::env::temp_dir().join(format!("artwork-edit-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let config = save(&doc, &dir).unwrap();
+        let config = save(&doc, &dir).unwrap().config;
         assert_eq!(config.elements.len(), groups.len());
         let saved = crate::template::read_entry(&dir).unwrap();
         // All in template.svg, each element a group of it.
@@ -636,6 +805,98 @@ mod tests {
         let count = |d: &Document| d.leaves().len();
         assert_eq!(count(&doc), count(&again));
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn the_reference_is_saved_with_the_template_and_opens_where_it_was() {
+        let source = crate::template::tests::fixture();
+        let mut doc = open(&source, source.config.clone()).unwrap();
+        let dir = std::env::temp_dir().join(format!("artwork-reference-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("plan.svg");
+        std::fs::write(
+            &file,
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="60mm" height="40mm"><rect width="10" height="10"/></svg>"#,
+        )
+        .unwrap();
+        let folder = dir.join("template");
+        let layer = crate::template_reference::layer(doc.alloc_id(), &file).unwrap();
+        let id = set_reference(&mut doc, layer);
+        // At the bottom, no orphan, no problem.
+        assert_eq!(doc.layers[0].id(), id);
+        assert!(is_reference(&doc, id) && !is_orphan(&doc, id));
+        let problems = crate::template_check::check_document(&doc);
+        assert!(problems.iter().all(|p| p.layer != Some(id)));
+        assert!(!sync(&mut doc), "keeps its own look");
+        let l = reference_mut(&mut doc).unwrap();
+        l.transform.center[0] += 12.0;
+        l.transform.rotation_deg = 30.0;
+        l.opacity = 0.5;
+        let before = (l.transform.center, l.size_mm());
+
+        let saved = save(&doc, &folder).unwrap().config;
+        let r = saved.reference.clone().unwrap();
+        assert_eq!(r.file, "reference.svg");
+        assert!(folder.join("reference.svg").is_file());
+        assert_eq!((r.rotation, r.opacity, r.visible), (30.0, 0.5, true));
+
+        let entry = crate::template::read_entry(&folder).unwrap();
+        let again = open(&entry, entry.config.clone()).unwrap();
+        let l = reference(&again).expect("opened with its reference");
+        assert!(!l.broken);
+        let close = |a: P2, b: P2| (a[0] - b[0]).abs() < 0.01 && (a[1] - b[1]).abs() < 0.01;
+        assert!(
+            close(l.transform.center, before.0),
+            "{:?}",
+            l.transform.center
+        );
+        assert!(close(l.size_mm(), before.1));
+        assert_eq!(l.opacity, 0.5);
+
+        // Removed: its file goes with the next save.
+        let mut again = again;
+        let id = reference(&again).unwrap().id;
+        again.remove(id);
+        let saved = save(&again, &folder).unwrap().config;
+        assert!(saved.reference.is_none());
+        assert!(!folder.join("reference.svg").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn every_shape_has_an_id_kept_from_save_to_save() {
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("templates");
+        let source = crate::template::scan(&dir)
+            .into_iter()
+            .find(|t| t.id.contains("T16"))
+            .expect("Cosmox T16");
+        let doc = open(&source, source.config.clone()).unwrap();
+        let out = std::env::temp_dir().join(format!("artwork-ids-{}", std::process::id()));
+        let saved = save(&doc, &out).unwrap();
+        let ids = |dir: &Path| -> Vec<Option<String>> {
+            template_svg::read_with_ids(&dir.join(SVG_FILE), None)
+                .unwrap()
+                .into_iter()
+                .map(|(id, _)| id)
+                .collect()
+        };
+        let first = ids(&out);
+        // The outline had none: it has one now; the buttons kept theirs.
+        assert!(first.iter().all(Option::is_some), "{first:?}");
+        assert!(first.contains(&Some("outline-1".into())));
+        assert!(first.contains(&Some("action-buttons-1".into())));
+        // Saved again with the ids given: the same ones.
+        let mut doc = doc;
+        if let Some(e) = &mut doc.edited_template {
+            e.shape_ids = saved.shape_ids;
+        }
+        save(&doc, &out).unwrap();
+        let mut again = ids(&out);
+        let mut first = first;
+        again.sort();
+        first.sort();
+        assert_eq!(again, first);
+        std::fs::remove_dir_all(&out).ok();
     }
 
     #[test]
@@ -686,7 +947,7 @@ mod tests {
             let before = serde_json::to_string(&doc).unwrap();
             let mut applied = crate::variables::Applied::new();
             for _ in 0..2 {
-                crate::variables::apply(&mut doc, &mut applied);
+                crate::variables::apply(&mut doc, &mut applied, &[]);
                 crate::colors::apply(&mut doc);
                 crate::text_links::apply(&mut doc);
                 crate::shape::sync(&ctx, &mut doc, true);
@@ -709,7 +970,13 @@ mod tests {
         let button = doc
             .leaves()
             .iter()
-            .find(|l| element_of(&doc, l.layer.id).is_some_and(|t| t.kind == ElementKind::Buttons))
+            .find(|l| {
+                element_of(&doc, l.layer.id).is_some_and(|t| t.kind == ElementKind::Holes)
+                    && l.layer
+                        .shape
+                        .as_deref()
+                        .is_some_and(|s| s.kind == crate::shape::ShapeKind::Ellipse)
+            })
             .map(|l| (l.layer.id, l.layer.transform.center[0]))
             .unwrap();
         doc.variables = vec![
@@ -724,16 +991,18 @@ mod tests {
                 value: Value::Length(20.0),
             },
         ];
+        // Only this link, not the ones the template comes with.
         doc.for_each_layer_mut(|l| {
+            l.bindings.clear();
             if l.id == button.0 {
                 l.bindings.insert(Field::X, "col".into());
                 l.bindings.insert(Field::Width, "d".into());
             }
         });
         let mut applied = variables::Applied::new();
-        assert!(variables::apply(&mut doc, &mut applied));
+        assert!(variables::apply(&mut doc, &mut applied, &[]));
         let out = std::env::temp_dir().join(format!("artwork-vars-{}", std::process::id()));
-        let config = save(&doc, &out).unwrap();
+        let config = save(&doc, &out).unwrap().config;
         // Kept in the document, not in its settings.
         assert!(config.variables.is_empty() && config.bindings.is_empty());
         let mut saved = crate::template::read_entry(&out).unwrap();
@@ -759,7 +1028,7 @@ mod tests {
         assert_eq!(linked[0].bindings[&Field::Width], "d");
         assert_ne!(linked[0].bindings[&Field::X], "col");
         let mut applied = variables::Applied::new();
-        variables::apply(&mut again, &mut applied);
+        variables::apply(&mut again, &mut applied, &[]);
         let after = again
             .leaves()
             .into_iter()
@@ -916,7 +1185,7 @@ mod previews {
 
     /// The Cosmox T16 opened in the editor: its layer list and the canvas, in both
     /// themes: `TEMPLATE_EDITOR_PREVIEW=out.png cargo test template_editor_preview --
-    /// --ignored`.
+    /// --ignored`. `TEMPLATE_EDITOR_REFERENCE=<file>` gives it that reference, selected.
     #[test]
     #[ignore]
     fn template_editor_preview() {
@@ -928,7 +1197,20 @@ mod previews {
             .into_iter()
             .find(|t| t.id.contains("T16"))
             .expect("Cosmox T16");
-        let doc = RefCell::new(open(&entry, entry.config.clone()).unwrap());
+        let mut opened = open(&entry, entry.config.clone()).unwrap();
+        let reference = std::env::var("TEMPLATE_EDITOR_REFERENCE").ok().map(|file| {
+            let mut l =
+                crate::template_reference::layer(opened.alloc_id(), Path::new(&file)).unwrap();
+            l.opacity = 0.6;
+            // Folded, to see the last row.
+            for n in &mut opened.layers {
+                if let Node::Group(g) = n {
+                    g.expanded = false;
+                }
+            }
+            set_reference(&mut opened, l)
+        });
+        let doc = RefCell::new(opened);
         let state = RefCell::new(crate::view::CanvasState::default());
         let panel = RefCell::new(crate::layers_ui::LayersPanel {
             template_mode: true,
@@ -940,12 +1222,26 @@ mod previews {
             let mut state = state.borrow_mut();
             if last.borrow().as_ref() != Some(ui.ctx()) {
                 doc.for_each_layer_mut(|l| l.pixmap = None);
+                if let Some(l) = reference_mut(&mut doc) {
+                    let img = image::load_from_memory(l.data.as_ref().unwrap())
+                        .unwrap()
+                        .to_rgba8();
+                    let side = ui.input(|i| i.max_texture_side) as u32;
+                    let img = crate::render::downscale(&img, side);
+                    let size = [img.width() as usize, img.height() as usize];
+                    let color = egui::ColorImage::from_rgba_unmultiplied(size, img.as_raw());
+                    l.texture = Some(ui.ctx().load_texture(
+                        "reference",
+                        color,
+                        egui::TextureOptions::LINEAR,
+                    ));
+                }
                 *state = crate::view::CanvasState::default();
                 state.fit_pending = true;
                 *last.borrow_mut() = Some(ui.ctx().clone());
             }
             crate::shape::sync(ui.ctx(), &mut doc, true);
-            let mut sel = doc.layers.last().map(|n| n.id());
+            let mut sel = reference.or(doc.layers.last().map(|n| n.id()));
             ui.horizontal_top(|ui| {
                 ui.vertical(|ui| {
                     ui.set_width(300.0);

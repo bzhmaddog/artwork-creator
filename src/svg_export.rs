@@ -9,7 +9,7 @@ use std::path::Path;
 use base64::Engine as _;
 use tiny_skia::{FillRule, PathSegment};
 
-use crate::document::{Affine, Homography, P2};
+use crate::document::{Affine, BlendMode, Homography, P2};
 use crate::gradient::{Geometry as GradientGeometry, Gradient, Ink};
 use crate::i18n::{tr, translate};
 use crate::print;
@@ -27,6 +27,18 @@ fn num(v: f32) -> String {
 }
 
 /// An affine map as an SVG `matrix(...)`, at full precision: its scales may be small.
+/// The same map as an `Affine`.
+fn affine(t: tiny_skia::Transform) -> Affine {
+    Affine {
+        a: t.sx,
+        b: t.ky,
+        c: t.kx,
+        d: t.sy,
+        e: t.tx,
+        f: t.ty,
+    }
+}
+
 fn matrix(m: Affine) -> String {
     format!("matrix({} {} {} {} {} {})", m.a, m.b, m.c, m.d, m.e, m.f)
 }
@@ -174,12 +186,44 @@ impl Writer {
 
     /// A clip path of path data `d`, filled under `rule`; its id.
     fn clip(&mut self, d: &str, rule: &str) -> String {
+        self.clip_paths(&[(d.to_owned(), rule)], None)
+    }
+
+    /// A clipping path made of several paths together, each with its rule, and cut by
+    /// the clipping path `within` if any; its id.
+    fn clip_paths(&mut self, paths: &[(String, &str)], within: Option<&str>) -> String {
         let id = self.id("clip");
+        let paths: String = paths
+            .iter()
+            .map(|(d, rule)| format!(r#"<path d="{d}" clip-rule="{rule}"/>"#))
+            .collect();
+        let within = within
+            .map(|c| format!(r#" clip-path="url(#{c})""#))
+            .unwrap_or_default();
         let _ = writeln!(
             self.defs,
-            r#"<clipPath id="{id}"><path d="{d}" clip-rule="{rule}"/></clipPath>"#
+            r#"<clipPath id="{id}"{within}>{paths}</clipPath>"#
         );
         id
+    }
+
+    /// A pattern of `tile`, `transform` taking its pixels to a layer's units and `map`
+    /// those to page mm; its id.
+    fn pattern(
+        &mut self,
+        tile: &tiny_skia::Pixmap,
+        transform: tiny_skia::Transform,
+        map: Affine,
+    ) -> Result<String, String> {
+        let id = self.id("pattern");
+        let (w, h) = (tile.width(), tile.height());
+        let _ = writeln!(
+            self.defs,
+            r#"<pattern id="{id}" patternUnits="userSpaceOnUse" width="{w}" height="{h}" patternTransform="{}"><image width="{w}" height="{h}" preserveAspectRatio="none" xlink:href="{}"/></pattern>"#,
+            matrix(affine(transform).then(map)),
+            png_data_url(tile, false, 72.0)?
+        );
+        Ok(id)
     }
 
     /// A gradient laid out in a layer's units, `map` taking them to page mm; its id.
@@ -292,10 +336,32 @@ fn artwork(w: &mut Writer, scene: &Scene, parts: &[Part], dpi: f32) -> Result<()
     } else {
         Default::default()
     };
-    let mut clipped = false;
+    // The clipping paths in force, innermost last. Each part above the page goes in a
+    // group cut by the innermost one, which is cut by those it is in: a group around
+    // several parts would keep the blend modes of those inside from reaching the page.
+    let mut clips: Vec<String> = Vec::new();
     for (i, part) in parts.iter().enumerate() {
+        let blend = match part {
+            Part::Raster { blend, .. } => *blend,
+            Part::Vector(l) => l.blend,
+            _ => BlendMode::Normal,
+        };
+        let wrapped = matches!(part, Part::Raster { .. } | Part::Vector(_))
+            && (!clips.is_empty() || !blend.is_normal());
+        if wrapped {
+            let clip = clips
+                .last()
+                .map(|c| format!(r#" clip-path="url(#{c})""#))
+                .unwrap_or_default();
+            let style = if blend.is_normal() {
+                String::new()
+            } else {
+                format!(r#" style="mix-blend-mode:{}""#, blend.css())
+            };
+            let _ = writeln!(w.body, "<g{clip}{style}>");
+        }
         match part {
-            Part::Raster { pixmap, origin } => {
+            Part::Raster { pixmap, origin, .. } => {
                 let _ = writeln!(
                     w.body,
                     r#"<image x="{}" y="{}" width="{}" height="{}" preserveAspectRatio="none" xlink:href="{}"/>"#,
@@ -307,7 +373,9 @@ fn artwork(w: &mut Writer, scene: &Scene, parts: &[Part], dpi: f32) -> Result<()
                 );
             }
             Part::Vector(layer) => {
-                let Some(v) = layer.vector() else { continue };
+                let Some(v) = layer.vector() else {
+                    unreachable!("vector parts have shapes")
+                };
                 // The strokes painted inside a shape are cut off at its outline.
                 let clip = v
                     .clip
@@ -328,6 +396,15 @@ fn artwork(w: &mut Writer, scene: &Scene, parts: &[Part], dpi: f32) -> Result<()
                     }
                     let opacity = layer.opacity.clamp(0.0, 1.0);
                     let (fill, alpha) = match ink {
+                        Ink::Pattern { tile, transform } => {
+                            let Some(map) = v.map.as_affine() else {
+                                continue;
+                            };
+                            (
+                                format!("url(#{})", w.pattern(tile, *transform, map)?),
+                                opacity,
+                            )
+                        }
                         Ink::Solid(c) => (hex([c[0], c[1], c[2]]), c[3] as f32 / 255.0 * opacity),
                         Ink::Gradient { gradient, frame } => {
                             let Some(map) = v.map.as_affine() else {
@@ -354,15 +431,30 @@ fn artwork(w: &mut Writer, scene: &Scene, parts: &[Part], dpi: f32) -> Result<()
                     w.body.push_str("</g>\n");
                 }
             }
+            // Cut by the outline of the layer they are clipped to: its shapes together.
+            Part::ClipBegin(layer) => {
+                let Some(v) = layer.clip_outline() else {
+                    continue;
+                };
+                let paths: Vec<(String, &str)> = v
+                    .fills
+                    .iter()
+                    .map(|(path, _, r)| (path_data(path, v.map), rule(*r)))
+                    .filter(|(d, _)| !d.is_empty())
+                    .collect();
+                let id = w.clip_paths(&paths, clips.last().map(String::as_str));
+                clips.push(id);
+            }
+            Part::ClipEnd => {
+                clips.pop();
+            }
+        }
+        if wrapped {
+            w.body.push_str("</g>\n");
         }
         if i == 0 && !outline.is_empty() {
-            let id = w.clip(&rings_data(&outline), "nonzero");
-            let _ = writeln!(w.body, r#"<g clip-path="url(#{id})">"#);
-            clipped = true;
+            clips.push(w.clip(&rings_data(&outline), "nonzero"));
         }
-    }
-    if clipped {
-        w.body.push_str("</g>\n");
     }
     if !holes.is_empty() {
         let _ = writeln!(
@@ -484,6 +576,55 @@ mod tests {
 
     fn parse(svg: &str) -> usvg::Tree {
         usvg::Tree::from_str(svg, &usvg::Options::default()).unwrap()
+    }
+
+    #[test]
+    fn svg_blend_modes_mix_with_the_page() {
+        let mut scene = text_scene(false);
+        let crate::render::SceneNode::Image(l) = &mut scene.layers[1] else {
+            panic!("the text layer")
+        };
+        l.blend = BlendMode::Multiply;
+        let svg = svg_of(&scene);
+        // In a group of its own, cut by the outline, not inside one around all parts.
+        let text = svg
+            .lines()
+            .position(|l| l.contains("#c80000"))
+            .expect("the text");
+        let lines: Vec<&str> = svg.lines().collect();
+        assert!(
+            lines[text - 1].starts_with(r#"<g clip-path="url(#clip"#)
+                && lines[text - 1].ends_with(r#" style="mix-blend-mode:multiply">"#),
+            "{}",
+            lines[text - 1]
+        );
+        parse(&svg);
+    }
+
+    #[test]
+    fn svg_patterns_are_svg_patterns() {
+        let scene = crate::render::tests::pattern_scene(10.0);
+        let parts = render::compose_parts(&scene, 254.0, true, &mut |_| true).unwrap();
+        let svg = document(&scene, &parts, 254.0, scene.page_mm, None).unwrap();
+        assert!(svg.contains(r#"<pattern id="pattern"#));
+        assert!(svg.contains(r#"fill="url(#pattern"#));
+        parse(&svg);
+    }
+
+    #[test]
+    fn svg_clips_to_a_shape_with_its_paths() {
+        let scene = crate::render::tests::clip_to_shape_scene(1.0);
+        let parts = render::compose_parts(&scene, 254.0, true, &mut |_| true).unwrap();
+        let svg = document(&scene, &parts, 254.0, scene.page_mm, None).unwrap();
+        // The rectangle's fill and stroke together cut the clipped square.
+        let clip = svg
+            .lines()
+            .find(|l| l.starts_with("<clipPath ") && l.matches("<path ").count() == 2)
+            .expect("a clipping path of both shapes");
+        let id = clip.split('"').nth(1).unwrap();
+        let start = svg.find(&format!(r#"<g clip-path="url(#{id})">"#)).unwrap();
+        assert!(svg[start..].contains("<image "), "the square inside it");
+        parse(&svg);
     }
 
     #[test]

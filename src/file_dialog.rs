@@ -16,6 +16,8 @@ pub enum Purpose {
     ImportSvg,
     /// The template's reference: a drawing, photo or PDF to draw it over.
     TemplateReference,
+    /// The image of a pattern fill.
+    Pattern(crate::pattern::Target),
     OpenProject,
     SaveProject,
     Export,

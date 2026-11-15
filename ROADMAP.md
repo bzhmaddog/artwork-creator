@@ -7,11 +7,7 @@ work goes on.
 
 ### Template creator
 
-- Buttons: place holes by standard size (24 mm, 30 mm, custom), one by one or from layout
-  presets, with numeric position, spacing and alignment.
 - Publish template to a repository
-- Import DXF, PDF and DWG drawings into an element of the template being edited (the
-  template itself is kept as `template.svg`).
 
 ## Further features
 
@@ -21,12 +17,6 @@ work goes on.
 
 ### Editing
 
-- **Clipping masks**: clip a layer to the shape of the layer below it, or to a group.
-- **Blend modes** (multiply, screen, overlay...).
-- **Pattern fills** for shapes, text and the background.
-- **Background color** layer filling the whole outline.
-- **Flip** layers horizontally and vertically.
-- **Eyedropper** to pick a color from the canvas.
 - **Copy and paste effects** from one layer to others.
 
 ### Files and safety

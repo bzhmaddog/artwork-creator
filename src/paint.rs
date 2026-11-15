@@ -920,7 +920,8 @@ mod tests {
             tip: Tip::Round,
         };
         let mut pm = tiny_skia::Pixmap::new(40, 40).unwrap();
-        let paint = crate::gradient::Ink::Solid(s.color).paint();
+        let ink = crate::gradient::Ink::Solid(s.color);
+        let paint = ink.paint();
         let ts = tiny_skia::Transform::from_translate(10.0, 15.0);
         pm.fill_path(
             &s.outline().unwrap(),
@@ -938,7 +939,8 @@ mod tests {
     /// Filled pixels of `s` drawn 4 pixels per mm, moved by `at` mm.
     fn ink(s: &PaintStroke, at: P2, size: u32) -> tiny_skia::Pixmap {
         let mut pm = tiny_skia::Pixmap::new(size, size).unwrap();
-        let paint = crate::gradient::Ink::Solid(s.color).paint();
+        let ink = crate::gradient::Ink::Solid(s.color);
+        let paint = ink.paint();
         let ts = tiny_skia::Transform::from_translate(at[0], at[1]).post_scale(4.0, 4.0);
         pm.fill_path(
             &s.outline().unwrap(),

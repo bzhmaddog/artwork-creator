@@ -48,8 +48,10 @@ pub enum Command {
     AddText,
     AddShape,
     AddCanvas,
+    AddBackground,
     Group,
     Ungroup,
+    Clip,
     FitPage,
     RealSize,
     ShowTemplate,
@@ -75,6 +77,7 @@ pub enum Command {
     PencilTool,
     BrushTool,
     EraserTool,
+    EyedropperTool,
     ClearPaint,
     About,
 }
@@ -124,11 +127,12 @@ const fn sc(modifiers: Modifiers, key: Key) -> KeyboardShortcut {
 
 const CMD: Modifiers = Modifiers::COMMAND;
 const CMD_SHIFT: Modifiers = Modifiers::COMMAND.plus(Modifiers::SHIFT);
+const CMD_ALT: Modifiers = Modifiers::COMMAND.plus(Modifiers::ALT);
 const NONE: Modifiers = Modifiers::NONE;
 
 impl Command {
     /// In the order of the window.
-    pub const ALL: [Command; 48] = [
+    pub const ALL: [Command; 51] = [
         Command::NewProject,
         Command::OpenProject,
         Command::Save,
@@ -148,8 +152,10 @@ impl Command {
         Command::AddText,
         Command::AddShape,
         Command::AddCanvas,
+        Command::AddBackground,
         Command::Group,
         Command::Ungroup,
+        Command::Clip,
         Command::FitPage,
         Command::RealSize,
         Command::ShowTemplate,
@@ -175,6 +181,7 @@ impl Command {
         Command::PencilTool,
         Command::BrushTool,
         Command::EraserTool,
+        Command::EyedropperTool,
         Command::ClearPaint,
         Command::About,
     ];
@@ -201,8 +208,10 @@ impl Command {
             Command::AddText => tr_noop!("ADD_TEXT_LAYER"),
             Command::AddShape => tr_noop!("COMMAND_ADD_SHAPE"),
             Command::AddCanvas => tr_noop!("COMMAND_ADD_CANVAS"),
+            Command::AddBackground => tr_noop!("ADD_BACKGROUND_LAYER"),
             Command::Group => tr_noop!("COMMAND_GROUP"),
             Command::Ungroup => tr_noop!("UNGROUP_LAYERS"),
+            Command::Clip => tr_noop!("CLIP_TO_LAYER_BELOW"),
             Command::FitPage => tr_noop!("FIT_PAGE_IN_VIEW"),
             Command::RealSize => tr_noop!("ZOOM_REAL_SIZE"),
             Command::ShowTemplate => tr_noop!("SHOW_TEMPLATE_LINES"),
@@ -228,6 +237,7 @@ impl Command {
             Command::PencilTool => tr_noop!("TOOL_PENCIL"),
             Command::BrushTool => tr_noop!("TOOL_BRUSH"),
             Command::EraserTool => tr_noop!("TOOL_ERASER"),
+            Command::EyedropperTool => tr_noop!("TOOL_EYEDROPPER"),
             Command::ClearPaint => tr_noop!("CLEAR_PAINT"),
             Command::About => tr_noop!("MENU_ABOUT"),
         })
@@ -254,8 +264,10 @@ impl Command {
             | Command::AddText
             | Command::AddShape
             | Command::AddCanvas
+            | Command::AddBackground
             | Command::Group
-            | Command::Ungroup => Group::Layers,
+            | Command::Ungroup
+            | Command::Clip => Group::Layers,
             Command::FitPage
             | Command::RealSize
             | Command::ShowTemplate
@@ -281,6 +293,7 @@ impl Command {
             | Command::PencilTool
             | Command::BrushTool
             | Command::EraserTool
+            | Command::EyedropperTool
             | Command::ClearPaint => Group::Tools,
             Command::About => Group::Help,
         }
@@ -302,13 +315,16 @@ impl Command {
             Command::AddText => vec![sc(CMD, Key::T)],
             Command::AddShape => vec![sc(CMD, Key::R)],
             Command::AddCanvas => vec![sc(CMD, Key::K)],
+            Command::AddBackground => vec![sc(CMD, Key::B)],
             Command::Group => vec![sc(CMD, Key::G)],
             Command::Ungroup => vec![sc(CMD_SHIFT, Key::G)],
+            Command::Clip => vec![sc(CMD_ALT, Key::G)],
             Command::FitPage => vec![sc(NONE, Key::F)],
             Command::SelectTool => vec![sc(NONE, Key::V)],
             Command::PencilTool => vec![sc(NONE, Key::P)],
             Command::BrushTool => vec![sc(NONE, Key::B)],
             Command::EraserTool => vec![sc(NONE, Key::E)],
+            Command::EyedropperTool => vec![sc(NONE, Key::I)],
             Command::ClearPaint => vec![sc(CMD_SHIFT, Key::Delete)],
             _ => fixed(self),
         }
@@ -349,8 +365,10 @@ impl Command {
             Command::AddText => "add_text",
             Command::AddShape => "add_shape",
             Command::AddCanvas => "add_canvas",
+            Command::AddBackground => "add_background",
             Command::Group => "group",
             Command::Ungroup => "ungroup",
+            Command::Clip => "clip_to_layer_below",
             Command::FitPage => "fit_page",
             Command::RealSize => "real_size",
             Command::ShowTemplate => "show_template",
@@ -377,6 +395,7 @@ impl Command {
             Command::PencilTool => "pencil_tool",
             Command::BrushTool => "brush_tool",
             Command::EraserTool => "eraser_tool",
+            Command::EyedropperTool => "eyedropper_tool",
             Command::ClearPaint => "clear_paint",
             Command::About => "about",
         }

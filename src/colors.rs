@@ -139,6 +139,8 @@ fn opacity_percent(a: u8) -> u8 {
 struct Swatches {
     /// All the variables: the colors to show, the names to avoid for a new one.
     vars: Vec<Variable>,
+    /// The colors added with the eyedropper, then the other colors in use.
+    picked: Vec<[u8; 4]>,
     used: Vec<[u8; 4]>,
 }
 
@@ -159,13 +161,24 @@ fn saved_id() -> Id {
     Id::unique("project_colors_saved")
 }
 
-/// Makes the project's colors available to the color buttons drawn this frame.
-pub fn publish(ctx: &egui::Context, doc: &Document) {
+/// Makes the project's colors available to the color buttons drawn this frame, with
+/// `picked`, the colors added with the eyedropper (last first), first among the colors
+/// in use.
+pub fn publish(ctx: &egui::Context, doc: &Document, picked: &[[u8; 4]]) {
     let swatches = Arc::new(Swatches {
         vars: doc.variables.clone(),
-        used: used(doc),
+        picked: picked.to_vec(),
+        used: in_use(doc, picked),
     });
     ctx.data_mut(|d| d.insert_temp(swatches_id(), swatches));
+}
+
+/// The colors in use but `picked`, the colors added with the eyedropper, shown before
+/// them.
+fn in_use(doc: &Document, picked: &[[u8; 4]]) -> Vec<[u8; 4]> {
+    let mut used = used(doc);
+    used.retain(|u| !picked.contains(u));
+    used
 }
 
 /// Color variables made from a picker's "Save this color" button since the last call.
@@ -508,7 +521,7 @@ pub fn linked_button<K: Ord>(
     alpha: bool,
 ) -> Response {
     let mut link = links.remove(&key);
-    let response = button(ui, color, alpha, &mut link);
+    let response = button(ui, color, alpha, Some(&mut link));
     if let Some(name) = link {
         links.insert(key, name);
     }
@@ -518,15 +531,19 @@ pub fn linked_button<K: Ord>(
 /// A color button whose picker also shows the project's color variables and used
 /// colors. `color` is straight RGBA; with `alpha` false it stays opaque. `link` is the
 /// name of the color variable it is linked to: a click on a color variable links it,
-/// any other change unlinks it. The button is a square swatch; linked, a chain link is
+/// any other change unlinks it. Without `link`, the color can't be linked: a color
+/// variable clicked gives its color, and there is no "Save this color". The button is a square swatch; linked, a chain link is
 /// drawn inside it (the variable's name is in its tooltip); linked to a variable that
 /// no longer exists, a broken chain.
 pub fn button(
     ui: &mut Ui,
     color: &mut [u8; 4],
     alpha: bool,
-    link: &mut Option<String>,
+    link: Option<&mut Option<String>>,
 ) -> Response {
+    let linkable = link.is_some();
+    let mut unlinked = None;
+    let link = link.unwrap_or(&mut unlinked);
     let popup_id = ui.auto_id_with("color_popup");
     let open = Popup::is_id_open(ui.ctx(), popup_id);
     // Square, as tall as a field.
@@ -613,15 +630,23 @@ pub fn button(
                 .data(|d| d.get_temp::<Arc<Swatches>>(swatches_id()))
                 .unwrap_or_default();
             let mut picked = None;
-            // The colors in use, right below the sliders.
+            // The colors in use, right below the sliders: those added with the
+            // eyedropper, a thin line, then the others.
             ui.add_space(4.0);
-            let grid: Vec<_> = swatches
-                .used
-                .iter()
-                .map(|&c| (c, link.is_none() && c == *color, describe(c)))
-                .collect();
-            if let Some(i) = swatch_grid(ui, &grid, false) {
-                picked = Some((swatches.used[i], None));
+            for (n, colors) in [&swatches.picked, &swatches.used].into_iter().enumerate() {
+                if colors.is_empty() {
+                    continue;
+                }
+                if n == 1 && !swatches.picked.is_empty() {
+                    ui.separator();
+                }
+                let grid: Vec<_> = colors
+                    .iter()
+                    .map(|&c| (c, link.is_none() && c == *color, describe(c)))
+                    .collect();
+                if let Some(i) = swatch_grid(ui, &grid, false) {
+                    picked = Some((colors[i], None));
+                }
             }
             ui.separator();
             ui.label(RichText::new(tr!("COLOR_VARIABLES")).small());
@@ -657,14 +682,26 @@ pub fn button(
                     }
                 }
             }
-            // Only when there is something to save: a color no variable has.
+            // Always there, so the picker keeps its size; grayed out when there is nothing
+            // to save: a color a variable has already. At the right, under the picker.
             let is_saved = saved.iter().any(|&(_, c)| c == *color);
-            if !is_saved
+            let save = linkable
                 && ui
-                    .add(egui::Button::new(tr!("SAVE_COLOR_AS_VARIABLE")).small())
-                    .on_hover_text(tr!("SAVE_COLOR_AS_VARIABLE_HINT"))
-                    .clicked()
-            {
+                    // As wide as the picker above: the popup doesn't widen.
+                    .allocate_ui_with_layout(
+                        vec2(ui.min_rect().width(), 0.0),
+                        egui::Layout::right_to_left(egui::Align::Center),
+                        |ui| {
+                            ui.add_enabled(
+                                !is_saved,
+                                egui::Button::new(tr!("SAVE_COLOR_AS_VARIABLE")).small(),
+                            )
+                            .on_hover_text(tr!("SAVE_COLOR_AS_VARIABLE_HINT"))
+                            .clicked()
+                        },
+                    )
+                    .inner;
+            if save {
                 // Saved and linked to at once; the app adds the variable.
                 let var = Variable {
                     formula: None,
@@ -720,6 +757,10 @@ fn code_fields(ui: &mut Ui, popup_id: Id, color: &mut [u8; 4], alpha: bool) -> b
                 // In line with the label: the text sits at the top of its box otherwise.
                 .align(egui::Align2::LEFT_CENTER),
         );
+        // In capitals, as typed too.
+        if r.changed() {
+            draft = draft.to_uppercase();
+        }
         if r.lost_focus() {
             let text = draft.trim();
             let text = if text.starts_with('#') {
@@ -766,10 +807,11 @@ fn in_use_text(c: [u8; 4]) -> String {
 }
 
 /// The Colors in use section's body: the colors in use, one per row, each with its
-/// swatch and its code. A double click on one adds a color variable of that color,
-/// even if one already has it. Returns true if the document changed.
-pub fn in_use_ui(ui: &mut Ui, doc: &mut Document) -> bool {
-    let mut picked = None;
+/// swatch and its code: `picked` (the eyedropper's), a thin line, then the others. A
+/// double click on one adds a color variable of that color, even if one already has it.
+/// Returns true if the document changed.
+pub fn in_use_ui(ui: &mut Ui, doc: &mut Document, picked: &[[u8; 4]]) -> bool {
+    let mut saved = None;
     // Monospace, so the columns line up, and small enough for a whole row to fit the
     // panel: every row has as many characters as the widest possible one.
     let mut font = egui::TextStyle::Monospace.resolve(ui.style());
@@ -779,7 +821,11 @@ pub fn in_use_ui(ui: &mut Ui, doc: &mut Document) -> bool {
     if advance > 0.0 {
         font.size = font.size.min(room / (chars * advance)).max(7.0);
     }
-    for c in used(doc) {
+    let used = in_use(doc, picked);
+    for (i, &c) in picked.iter().chain(&used).enumerate() {
+        if i == picked.len() && i > 0 {
+            ui.separator();
+        }
         let height = ui.spacing().interact_size.y;
         let (rect, response) =
             ui.allocate_exact_size(vec2(ui.available_width(), height), Sense::click());
@@ -813,10 +859,10 @@ pub fn in_use_ui(ui: &mut Ui, doc: &mut Document) -> bool {
             .on_hover_text(tr!("SAVE_COLOR_IN_USE"))
             .double_clicked()
         {
-            picked = Some(c);
+            saved = Some(c);
         }
     }
-    let Some(c) = picked else {
+    let Some(c) = saved else {
         return false;
     };
     doc.variables.push(Variable {
@@ -894,6 +940,36 @@ mod tests {
     }
 
     #[test]
+    fn the_colors_picked_come_first_among_the_colors_in_use() {
+        let mut text = Layer::new(1, "t".into(), "".into());
+        text.text = Some(Box::new(crate::text::Text {
+            color: [10, 20, 30, 255],
+            outline: false,
+            ..Default::default()
+        }));
+        let doc = Document {
+            layers: vec![Node::Layer(Box::new(text))],
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        let used = |picked: &[[u8; 4]]| {
+            publish(&ctx, &doc, picked);
+            let s = ctx
+                .data(|d| d.get_temp::<Arc<Swatches>>(swatches_id()))
+                .unwrap();
+            (s.picked.clone(), s.used.clone())
+        };
+        let (_, before) = used(&[]);
+        let picked = [[1, 2, 3, 255], [4, 5, 6, 255]];
+        assert_eq!(used(&picked), (picked.to_vec(), before.clone()));
+        // A color already in use is shown with the picked ones only.
+        let (first, rest) = used(&[[10, 20, 30, 255]]);
+        assert_eq!(first, [[10, 20, 30, 255]]);
+        assert!(!rest.contains(&[10, 20, 30, 255]));
+        assert_eq!(rest.len() + 1, before.len());
+    }
+
+    #[test]
     fn used_colors_come_once_each_in_stack_order_without_switched_off_ones() {
         let mut text = Layer::new(1, "t".into(), "".into());
         let mut t = crate::text::Text {
@@ -923,6 +999,8 @@ mod tests {
             visible: true,
             locked: false,
             opacity: 1.0,
+            clip: false,
+            blend: crate::document::BlendMode::Normal,
             expanded: true,
             children: vec![Node::Layer(Box::new(outlined))],
             element: None,
@@ -1010,9 +1088,9 @@ mod tests {
                 ..Default::default()
             };
             let mut out = ctx.run_ui(input, |ui| {
-                publish(ui.ctx(), doc);
+                publish(ui.ctx(), doc, &[]);
                 let mut link = link.borrow_mut();
-                changed.set(changed.get() | button(ui, color, true, &mut link).changed());
+                changed.set(changed.get() | button(ui, color, true, Some(&mut link)).changed());
             });
             out.textures_delta.clear();
             out.shapes
@@ -1056,9 +1134,10 @@ mod tests {
         assert!(changed.get());
 
         // A click on the variable it is linked to unlinks the color, which stays as it
-        // is. "Save this color" isn't offered for a color a variable has.
+        // is. "Save this color" stays, grayed out, for a color a variable has: the
+        // picker keeps its size.
         let shapes = frame(Vec::new(), &mut color, &doc);
-        assert!(!shapes.iter().any(|s| matches!(&s.shape,
+        assert!(shapes.iter().any(|s| matches!(&s.shape,
             egui::Shape::Text(t) if t.galley.text() == "Save this color")));
         for events in click(green[0]) {
             frame(events, &mut color, &doc);
@@ -1247,7 +1326,7 @@ mod tests {
                 ..Default::default()
             };
             let mut changed = false;
-            let mut out = ctx.run_ui(input, |ui| changed = in_use_ui(ui, doc));
+            let mut out = ctx.run_ui(input, |ui| changed = in_use_ui(ui, doc, &[]));
             out.textures_delta.clear();
             let row = out.shapes.iter().find_map(|s| match &s.shape {
                 egui::Shape::Text(t) if t.galley.text() == "#C80A0A 100%" => {
@@ -1388,9 +1467,9 @@ mod tests {
             let mut rect = egui::Rect::NOTHING;
             let mut side = 0.0;
             let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
-                publish(ui.ctx(), &doc);
+                publish(ui.ctx(), &doc, &[]);
                 side = ui.spacing().interact_size.y;
-                rect = button(ui, &mut c, true, &mut link).rect;
+                rect = button(ui, &mut c, true, Some(&mut link)).rect;
             });
             out.textures_delta.clear();
             assert_eq!(c, color, "it keeps its color");
@@ -1505,7 +1584,7 @@ mod tests {
             ..Default::default()
         };
         crate::preview::render(&path, vec2(260.0, 140.0), |ui| {
-            publish(ui.ctx(), &doc);
+            publish(ui.ctx(), &doc, &[]);
             egui::Grid::new("g").show(ui, |ui| {
                 for (label, link, c) in [
                     ("Fill", None, [200, 60, 60, 255]),
@@ -1516,7 +1595,7 @@ mod tests {
                     ui.label(label);
                     let mut c = c;
                     let mut link = link.map(str::to_owned);
-                    button(ui, &mut c, true, &mut link);
+                    button(ui, &mut c, true, Some(&mut link));
                     ui.end_row();
                 }
             });
@@ -1558,7 +1637,7 @@ mod tests {
         });
         // As narrow as the left panel.
         crate::preview::render(&path, vec2(230.0, 200.0), |ui| {
-            in_use_ui(ui, &mut doc.borrow_mut());
+            in_use_ui(ui, &mut doc.borrow_mut(), &[]);
         });
     }
 }

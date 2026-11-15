@@ -134,6 +134,9 @@ pub struct ArtworkApp {
     effect_cache: EffectCache,
     /// Installed fonts, for text layers.
     fonts: FontLibrary,
+    /// The outline grown by the bleed, which background layers fill (see `background`),
+    /// with the hash of what it was made from.
+    background_rings: (u64, Option<Vec<Vec<P2>>>),
     messages: Vec<String>,
     title: String,
     /// Native dialogs when the system has them, otherwise the built-in browser.
@@ -829,6 +832,7 @@ impl ArtworkApp {
             export_preview: None,
             effect_cache: EffectCache::default(),
             fonts: FontLibrary::new(),
+            background_rings: (0, None),
             messages,
             title: String::new(),
             native_dialogs: file_dialog::native_available(),
@@ -1729,6 +1733,7 @@ impl ArtworkApp {
         self.canvas.points = None;
         self.canvas.drawing = None;
         self.canvas.brushes.tool = None;
+        self.canvas.eyedropper = false;
         self.layers_panel.edit_points = None;
         self.layers_panel.template_mode = editing;
         self.comparing = None;
@@ -2233,6 +2238,48 @@ impl ArtworkApp {
     /// half its shorter side across) and centered like a new text (see `new_layer_center`), with the Select
     /// tool in hand. A polygon is drawn point by point on the canvas instead, as from
     /// the Shape menu.
+    /// The outline grown by the bleed, made again only when either changes.
+    fn background_rings(&mut self, elements: &[PlacedElement]) -> Option<Vec<Vec<P2>>> {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let bleed = self.cuts().bleed_mm;
+        bleed.to_bits().hash(&mut h);
+        for e in elements.iter().filter(|e| e.kind == ElementKind::Outline) {
+            for p in &e.polylines {
+                p.closed.hash(&mut h);
+                p.points
+                    .iter()
+                    .flatten()
+                    .for_each(|v| v.to_bits().hash(&mut h));
+            }
+        }
+        let key = h.finish();
+        if self.background_rings.0 != key {
+            self.background_rings = (key, crate::background::rings(elements, bleed));
+        }
+        self.background_rings.1.clone()
+    }
+
+    /// Adds a background layer at the bottom of the stack, filling the outline grown by
+    /// the bleed, and selects it.
+    fn add_background(&mut self) {
+        if self.editing.is_some() {
+            return;
+        }
+        let elements = self.elements();
+        let Some(rings) = self.background_rings(&elements) else {
+            self.messages
+                .push(tr!("BACKGROUND_NEEDS_OUTLINE").to_owned());
+            return;
+        };
+        let id = self.doc.alloc_id();
+        let name = tr!("BACKGROUND_LAYER_NAME").to_owned();
+        let layer = crate::background::new_layer(id, name, &rings, &self.doc);
+        self.doc.insert(&[0], Node::Layer(Box::new(layer)));
+        self.selected = Some(id);
+        self.dirty = true;
+    }
+
     fn add_canvas(&mut self, ctx: &egui::Context, kind: ShapeKind) {
         self.layers_panel.canvas_kind = kind;
         self.canvas.brushes.tool = None;
@@ -2389,6 +2436,7 @@ impl ArtworkApp {
                 return;
             }
             Purpose::TemplateReference => return self.set_template_reference(ctx, &chosen),
+            Purpose::Pattern(target) => return self.set_pattern(target, chosen),
             Purpose::OpenProject => return self.open_project_path(ctx, chosen),
             Purpose::SaveProject => project_save_path(chosen.clone()),
             Purpose::Export => chosen.clone(),
@@ -2425,6 +2473,7 @@ impl ArtworkApp {
             Purpose::AddImages
             | Purpose::ImportSvg
             | Purpose::TemplateReference
+            | Purpose::Pattern(_)
             | Purpose::OpenProject => {}
         }
     }
@@ -2518,6 +2567,55 @@ impl ArtworkApp {
         }
         self.selected = Some(crate::template_edit::set_reference(&mut self.doc, layer));
         self.dirty = true;
+    }
+
+    /// Opens the dialog choosing the image of a pattern fill.
+    fn pick_pattern(&mut self, ctx: &egui::Context, target: crate::pattern::Target) {
+        self.request_file(
+            ctx,
+            Request {
+                purpose: Purpose::Pattern(target),
+                title: tr!("PATTERN_DIALOG_TITLE"),
+                save: false,
+                multiple: false,
+                filters: IMAGE_FILTERS,
+                default_name: String::new(),
+            },
+        );
+    }
+
+    /// Fills `target` with a pattern of the image at `path`. A pattern it already has
+    /// keeps its tile's width, turn and offset; a new one gets the image's own size.
+    fn set_pattern(&mut self, target: crate::pattern::Target, path: PathBuf) {
+        use crate::pattern::{Pattern, Target};
+        let (slot, units_per_mm) = match target {
+            Target::Background => (Some(&mut self.doc.background_pattern), 1.0),
+            Target::Layer(id) => match self.doc.layer_mut(id) {
+                Some(l) => {
+                    // A text's units are its scale's mm.
+                    let k = 1.0 / l.transform.scale[1].abs().max(1e-6);
+                    match (&mut l.shape, &mut l.text) {
+                        (Some(s), _) => (Some(&mut s.fill_pattern), 1.0),
+                        (None, Some(t)) => (Some(&mut t.pattern), k),
+                        (None, None) => (None, 1.0),
+                    }
+                }
+                None => (None, 1.0),
+            },
+        };
+        let Some(slot) = slot else {
+            return;
+        };
+        match Pattern::open(path, units_per_mm) {
+            Ok(mut new) => {
+                if let Some(old) = slot.take() {
+                    (new.size, new.angle_deg, new.offset) = (old.size, old.angle_deg, old.offset);
+                }
+                *slot = Some(new);
+                self.dirty = true;
+            }
+            Err(e) => self.messages.push(e),
+        }
     }
 
     /// Opens the dialog to add image layers.
@@ -2721,6 +2819,12 @@ impl ArtworkApp {
                     if Self::load_image(ctx, layer).is_err() {
                         layer.broken = true;
                         missing.push(layer.source.display().to_string());
+                    }
+                });
+                // Pattern tiles; a missing one leaves its color or gradient.
+                self.doc.for_each_pattern_mut(|p| {
+                    if p.load().is_err() {
+                        missing.push(p.source.display().to_string());
                     }
                 });
                 if !missing.is_empty() {
@@ -3080,6 +3184,13 @@ impl ArtworkApp {
                 }
             });
             ui.menu_button(tr!("MENU_TOOLS"), |ui| {
+                let keys = self.shortcuts.texts(ui.ctx());
+                let c = Command::EyedropperTool;
+                let entry = menu_entry(c.label(), keys.get(&c));
+                if ui.add_enabled(self.editing.is_none(), entry).clicked() {
+                    self.run_command(ui.ctx(), c);
+                    ui.close();
+                }
                 ui.menu_button(tr!("MENU_TEMPLATES"), |ui| {
                     let keys = self.shortcuts.texts(ui.ctx());
                     let idle = self.editing.is_none();
@@ -3209,7 +3320,8 @@ impl ArtworkApp {
             self.canvas.fit_pending = true;
             self.dirty = true;
         }
-        // One color, or a gradient over the whole page; opaque, the page being so.
+        // One color, a gradient over the whole page or a pattern; opaque, the page being
+        // so.
         let doc = &mut self.doc;
         let [r, g, b] = doc.background;
         let mut color = [r, g, b, 255];
@@ -3217,7 +3329,10 @@ impl ArtworkApp {
             color: &mut color,
             link: &mut doc.background_link,
             gradient: &mut doc.background_gradient,
+            pattern: Some(&mut doc.background_pattern),
+            units_per_mm: 1.0,
             alpha: false,
+            pick_pattern: false,
         };
         let mut changed = false;
         panel_grid(ui, "page-background").show(ui, |ui| {
@@ -3228,8 +3343,12 @@ impl ArtworkApp {
             ui.end_row();
         });
         changed |= crate::gradient_ui::rows(ui, "background", &mut fill);
+        let pick = fill.pick_pattern;
         doc.background = [color[0], color[1], color[2]];
         self.dirty |= changed;
+        if pick {
+            self.pick_pattern(ui.ctx(), crate::pattern::Target::Background);
+        }
     }
 
     /// The View panel: how the canvas shows the template and what is cut out of the
@@ -3359,7 +3478,9 @@ impl ArtworkApp {
                 };
                 self.dirty |= variables::variables_ui(ui, &mut self.doc, kinds)
             }
-            PanelId::ColorsInUse => self.dirty |= crate::colors::in_use_ui(ui, &mut self.doc),
+            PanelId::ColorsInUse => {
+                self.dirty |= crate::colors::in_use_ui(ui, &mut self.doc, &self.canvas.picked)
+            }
             PanelId::Layers => {
                 self.layers_panel.can_paste = self.clipboard.has_content();
                 let out = layers_ui::show(
@@ -3383,6 +3504,9 @@ impl ArtworkApp {
                     &self.fonts,
                 );
                 self.layers_output(ui.ctx(), out);
+                if let Some(id) = self.layers_panel.pick_pattern.take() {
+                    self.pick_pattern(ui.ctx(), crate::pattern::Target::Layer(id));
+                }
             }
         }
         None
@@ -3399,6 +3523,9 @@ impl ArtworkApp {
         }
         if let Some(kind) = out.add_canvas {
             self.add_canvas(ctx, kind);
+        }
+        if out.add_background {
+            self.add_background();
         }
         if let Some(kind) = out.add_shape {
             self.add_shape(ctx, kind);
@@ -3476,8 +3603,15 @@ impl ArtworkApp {
                     ui.checkbox(&mut self.canvas.element_show[k], "")
                         .on_hover_text(tr!("SHOW_ELEMENT_LINES"));
                 });
-                ui.color_edit_button_srgba(&mut self.canvas.element_color[k])
-                    .on_hover_text(tr!("ELEMENT_LINE_COLOR"));
+                let line = &mut self.canvas.element_color[k];
+                let mut c = line.to_srgba_unmultiplied();
+                if crate::colors::button(ui, &mut c, true, None)
+                    .on_hover_text(tr!("ELEMENT_LINE_COLOR"))
+                    .changed()
+                {
+                    let [r, g, b, a] = c;
+                    *line = egui::Color32::from_rgba_unmultiplied(r, g, b, a);
+                }
                 ui.label(translate(&e.name));
                 ui.weak(tr_n!("SHAPE_COUNT", e.polylines.len()));
             });
@@ -4356,6 +4490,11 @@ impl ArtworkApp {
                     layer.broken = true;
                     missing.push(layer.source.display().to_string());
                 }
+                for p in layer.patterns_mut() {
+                    if p.tile.is_none() && p.load().is_err() {
+                        missing.push(p.source.display().to_string());
+                    }
+                }
             });
         }
         if !missing.is_empty() {
@@ -4461,8 +4600,10 @@ impl ArtworkApp {
                 | Command::AddImages
                 | Command::AddText
                 | Command::AddCanvas
+                | Command::AddBackground
                 | Command::Group
                 | Command::Ungroup
+                | Command::Clip
                 | Command::ShowTemplate
                 | Command::PreviewCuts
                 | Command::PreviewBleed
@@ -4473,6 +4614,7 @@ impl ArtworkApp {
                 | Command::PencilTool
                 | Command::BrushTool
                 | Command::EraserTool
+                | Command::EyedropperTool
                 | Command::ClearPaint
         )
     }
@@ -4517,10 +4659,12 @@ impl ArtworkApp {
             Command::AddText => self.add_text(ctx),
             Command::AddShape => self.add_shape(ctx, self.layers_panel.shape_kind),
             Command::AddCanvas => self.add_canvas(ctx, self.layers_panel.canvas_kind),
+            Command::AddBackground => self.add_background(),
             Command::Group => self.dirty |= layers_ui::group(&mut self.doc, &mut self.selected),
             Command::Ungroup => {
                 self.dirty |= layers_ui::ungroup(&mut self.doc, &mut self.selected);
             }
+            Command::Clip => self.dirty |= layers_ui::toggle_clip(&mut self.doc, self.selected),
             Command::FitPage => self.canvas.fit_pending = true,
             Command::RealSize => self.canvas.set_zoom(REAL_SIZE_ZOOM),
             Command::ShowTemplate => self.canvas.show_template ^= true,
@@ -4552,11 +4696,16 @@ impl ArtworkApp {
             Command::CompareTemplateSource => self.toggle_source_compare(),
             Command::ChooseReference => self.pick_template_reference(ctx),
             Command::About => self.about = true,
-            Command::SelectTool => self.canvas.brushes.tool = None,
+            Command::SelectTool => {
+                self.canvas.brushes.tool = None;
+                self.canvas.eyedropper = false;
+            }
+            Command::EyedropperTool => self.canvas.eyedropper = true,
             Command::ClearPaint => self.dirty |= view::clear_paint(&mut self.doc, self.selected),
             // Only while a closed shape is selected, to paint in.
             Command::PencilTool | Command::BrushTool | Command::EraserTool => {
                 if view::can_paint(&self.doc, self.selected) {
+                    self.canvas.eyedropper = false;
                     self.canvas.brushes.tool = view::TOOLS
                         .iter()
                         .find(|(c, _)| *c == command)
@@ -4752,7 +4901,7 @@ impl eframe::App for ArtworkApp {
             self.add_dropped(&ctx, dropped);
         }
         self.guard_close(&ctx);
-        crate::colors::publish(&ctx, &self.doc);
+        crate::colors::publish(&ctx, &self.doc, &self.canvas.picked);
         // The template's points on the page, which layer positions can be linked to.
         self.doc.template_points = match (&self.template, &self.editing) {
             (Some(t), None) => {
@@ -4802,7 +4951,11 @@ impl eframe::App for ArtworkApp {
 
         // Settings may have moved the template this frame.
         let elements = self.elements();
-        self.canvas.distort_mode = self.layers_panel.distort;
+        // Background layers stay on the outline grown by the bleed.
+        if self.editing.is_none() {
+            let rings = self.background_rings(&elements);
+            crate::background::sync(&mut self.doc, rings.as_deref());
+        }
         self.layers_panel.min_dpi = self.export_settings.min_image_dpi as f32;
         // The panel is cut along the outline and through every hole, whatever the export
         // prints there.

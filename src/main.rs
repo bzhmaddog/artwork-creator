@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
+mod background;
 mod callout;
 mod canvas_points;
 mod canvas_text;
@@ -19,6 +20,7 @@ mod i18n;
 mod layers_ui;
 mod paint;
 mod panels;
+mod pattern;
 #[cfg(test)]
 mod preview;
 mod print;
@@ -66,6 +68,23 @@ const APP_ID: &str = "artwork-creator";
 /// The app's data folder, the one eframe keeps the settings in; it may not exist yet.
 pub fn data_dir() -> Option<std::path::PathBuf> {
     eframe::storage_dir(APP_ID)
+}
+
+/// Finds a folder the app ships with (`templates`, `plugins`): next to the executable
+/// first, then in `../share/artwork-creator/` from it (where the Linux packages install
+/// it), then in the working directory.
+pub fn shipped_dir(name: &str) -> Option<std::path::PathBuf> {
+    let mut candidates = Vec::new();
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        candidates.push(dir.join(name));
+        candidates.push(dir.join("../share").join(APP_ID).join(name));
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join(name));
+    }
+    candidates.into_iter().find(|p| p.is_dir())
 }
 
 /// Starts the app, opening the project file given on the command line, if any.

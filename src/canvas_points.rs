@@ -104,6 +104,8 @@ impl Drawing {
 fn editable(doc: &Document, selected: Option<u64>, id: u64) -> Option<&Layer> {
     doc.layer(id)
         .filter(|l| l.shape.as_ref().is_some_and(|s| s.kind.has_points()))
+        // A background's points are the outline's.
+        .filter(|l| !crate::background::is_fixed(l))
         .filter(|_| selected == Some(id))
         .filter(|_| !doc.effectively_locked(id) && doc.effectively_visible(id))
 }

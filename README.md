@@ -34,6 +34,26 @@ layers panel on the right](doc/capture.png)
   is named with two random words, an adjective and a noun (Swift Otter, Golden Comet...),
   a name the project doesn't use yet; a new text says such a name, selected to be typed over, and is named after its text until
   renamed.
+- **Clipping masks**: **Clip to layer below** (in a layer's right-click menu, its
+  Properties, or Alt+click on the line between two layers in the list) shows a layer or
+  group only where the one right under it in the list, its base, shows, and as much as
+  it shows: soft edges, opacity and effects included. Several layers in a row can be
+  clipped to the same base, an image, a text, a shape or a group; a bent arrow before
+  their thumbnail marks them. Hiding the base hides them too; at the bottom of a list,
+  with nothing below, the setting does nothing. Grouping a clipped layer clips the new
+  group instead, and ungrouping a clipped group clips its layers. In PDF and SVG
+  exports, layers clipped to a text or shape layer are clipped by its outline as vectors
+  when that is what its pixels show (no effects, opaque); otherwise the base and its
+  clipped layers are exported as one image.
+- **Blend modes**: a layer's or group's **Blend mode** in Properties (Multiply, Screen,
+  Overlay, Darken, Lighten, Color dodge and burn, Soft and Hard light, Difference,
+  Exclusion, Hue, Saturation, Color, Luminosity) sets how its colors mix with what lies
+  below it, the page background included. A group in Normal mode lets each of its
+  layers mix with what lies below the group; in another mode, its layers are put
+  together first and the group mixes as a whole. A layer clipped to another mixes with
+  it. PDF and SVG exports keep the modes (PDF blend modes, SVG `mix-blend-mode`), so
+  text and shapes stay vectors; a text or shape made of several shapes (an outline, a
+  fill and a stroke) is exported as an image when in another mode than normal.
 - **Text layers**: typed in place on the canvas, in any installed font, bold and italic,
   multi-line text aligned left, centered or right, letter and line spacing, color and
   outline. Text layers move, scale, rotate, distort and take effects like images, and are
@@ -67,7 +87,7 @@ layers panel on the right](doc/capture.png)
   masks, clipping and patterns are left out (the app says which), and nothing the file
   points to is ever loaded.
 - **Painting**: any closed shape (rectangle, ellipse, polygon, star, closed path) can be
-  painted in. While one is selected, a tool bar at the canvas' top left has Select, Pencil, Brush and Eraser; the tool picked last comes back
+  painted in. While one is selected, a tool bar at the canvas' top left has Select, Pencil, Brush, Eraser and the eyedropper; the tool picked last comes back
   whenever such a shape is selected. The pencil paints an even line; each tool has its
   color and width (in mm) on the tool bar. The brush comes in several kinds, picked in
   the menu its tool bar button opens (its icon shows the kind in use): **round** (thinning out at both ends),
@@ -92,6 +112,13 @@ layers panel on the right](doc/capture.png)
   the dots it passes over. **Clear the paint**, next to the tools on the tool bar, empties the selected shape of all its strokes at once (Undo
   brings them back). With a pen on Windows, the width follows its pressure. Esc
   goes back to selecting.
+- **Eyedropper**: on the canvas' tool bar (always there, with Select, when no closed
+  shape is selected) and in **Tools > Eyedropper**. With it in hand, a swatch next to
+  the pointer shows the artwork's color under it and its code (the page and its layers,
+  without the template's lines, guides or handles); a click takes it:
+  it becomes the paint's color and its hex code is copied to the clipboard. A Ctrl+click
+  also adds it to the colors in use, first (each one before those added earlier, a thin
+  line below them), in the Colors in use panel and in every color picker. Esc goes back to selecting.
 - **Gradients**: a shape's fill and stroke, a text's letters and the page background can
   each be one color or a linear or radial gradient (Solid / Linear gradient / Radial
   gradient, next to its color). A linear gradient runs at an angle, from one corner of
@@ -99,6 +126,24 @@ layers panel on the right](doc/capture.png)
   radius can be set) in an ellipse the shape of the box. Its colors sit on a bar: click
   the bar to add one, drag one along it, right-click it to remove it (two always stay).
   Each color has its own opacity and can be linked to a color variable.
+- **Pattern fills**: a shape's fill, a text's letters and the page background can be an
+  image repeated side by side: pick **Pattern** in the fill's switch, then the image
+  (PNG, JPEG, WebP, BMP, GIF); a click on its name chooses another. **Tile** sets the
+  width of one copy (its height follows the image), **Angle** turns the copies and
+  **Offset** moves where they start. A new pattern's tile is the image's size printed at
+  300 dpi. The pattern moves and turns with its layer, and keeps its tile's size when a
+  shape is resized; a text's grows with the text. The image is saved in the project
+  file. In PDF and SVG exports the shape's or text's outline stays vector: SVG gets an
+  SVG pattern, PDF the image repeated under the outline; a layer that is distorted, or
+  would need over 4000 copies of the image, is exported as pixels.
+- **Background layers**: **Background** in the Shape button's menu (Ctrl+B) adds, at the
+  bottom of the stack, a shape filling the template's outline grown by the bleed, so the
+  print has no white rim where the cut drifts. It starts with the page background's
+  color, gradient or pattern, and its fill, opacity, blend mode and effects change as
+  any shape's; unlike the page background, it can go anywhere in the stack, be hidden,
+  or have layers clipped to it. It follows the outline: another template, a new version
+  or another bleed redraws it, and it can't be moved, turned or reshaped by hand (nudging,
+  aligning, flipping or turning a group leaves it where it is).
 - **Transform on the canvas**: move, scale, rotate, stretch width or height on its own, and
   drag single corners to fake perspective.
 - **Effects** on each image layer: brightness / contrast, hue / saturation, grayscale,
@@ -161,7 +206,8 @@ layers panel on the right](doc/capture.png)
     picker has the color's **Hex** code, to type or copy (`#RRGGBBAA` sets the opacity
     too), and its **Opacity** in %; hovering a color button or swatch shows its code and
     opacity. **Save this color** in a picker makes a color variable of the color and
-    links to it.
+    links to it (only for a color that can be linked: not the paint color, a color
+    variable's own or a template element's line color).
   - A text layer's text is linked to a text variable with the link button at the top
     right of its text box: it then shows the variable's text and follows when it
     changes, so one variable can fill several layers. Typing in the text, in the panel
@@ -208,6 +254,15 @@ layers panel on the right](doc/capture.png)
   hides the rulers and the guides, turns snapping to guides on or off, locks the guides
   so they can't be moved by accident, and clears them all.
 - **Align** layers or groups to the page or to the template.
+- **Flip** layers or groups (**Flip H**, **Flip V** in Properties). A layer is mirrored
+  in place; a group is mirrored as a whole around its middle, its layers swapping sides
+  and mirrored too (locked ones stay as they are; a linked position or rotation keeps
+  its formula's value).
+- **Rotate a group** as a whole around its middle: with the rotation handle above its
+  dashed box on the canvas (**Shift** snaps to 15° steps), a quarter turn with **-90°**
+  / **+90°** in its Properties, or by an exact angle with **Rotate by** and **Rotate**.
+  Its layers go around the middle and turn with it; as for Flip, locked ones stay
+  put. A group has no angle of its own: each turn is added to its layers'.
 - **Undo / redo** for every change to the project.
 - **Templates** made of several elements, each a layer of the template's SVG, with its own color and
   visibility. The **Template** panel picks the template and shows or hides each
@@ -370,7 +425,19 @@ make windows    # Windows .exe only
 make test       # run the tests
 make plugins    # build the example plugins into plugins/ (.so and .dll)
 make dist       # package each build with the templates folder into dist/
+make deb        # Linux .deb package into dist/ (needs cargo-deb)
+make appimage   # Linux AppImage into dist/
+make windows-setup  # Windows installer into dist/ (Inno Setup in a Docker/Podman container)
 ```
+
+Each release also has installers, built by the Release workflow: a setup `.exe` for
+Windows ([Inno Setup](https://jrsoftware.org/isinfo.php), from
+[`installer/artwork-creator.iss`](installer/artwork-creator.iss)), with a Start menu entry
+and `.artwork` files opened with the app; a `.deb` (settings in `Cargo.toml`, made with
+[cargo-deb](https://github.com/kornelski/cargo-deb)) and an AppImage
+([`scripts/appimage.sh`](scripts/appimage.sh)) for Linux. Installed, the app finds its
+templates in `../share/artwork-creator/` from the executable when there are none next to
+it.
 
 The app's icon is in [`assets/icon`](assets/icon): the SVG it is drawn from, PNGs from 16
 to 1024 px and the Windows `.ico`. `build.rs` builds the `.ico` into the Windows
@@ -642,6 +709,7 @@ The default keys:
 | Add a text layer | Ctrl+T |
 | Add a shape layer (the kind added last; others from the Shape button, Path... importing SVG files) | Ctrl+R, or drop SVG files on the window |
 | Add a canvas to paint in (the kind added last; others from the Canvas button) | Ctrl+K |
+| Add a background layer filling the outline | Ctrl+B |
 | Type in a text layer on the canvas | Double-click it (straight text only); Esc or a click outside it to stop |
 | Finish drawing a polyline or polygon | Double-click, Enter, Esc or right-click; a click on the first point closes it |
 | Edit the points of a line, polyline, polygon or path | Double-click it; Esc or selecting something else to stop |
@@ -652,12 +720,15 @@ The default keys:
 | Cut / Copy / Paste layer | Ctrl+X / Ctrl+C / Ctrl+V |
 | Duplicate | Ctrl+D |
 | Group / Ungroup | Ctrl+G / Ctrl+Shift+G |
+| Clip to layer below (on or off) | Ctrl+Alt+G, or Alt+click on the line between two layers in the list |
 | Delete layer | Del or Backspace |
 | Nudge by 1 mm (10 mm with Shift) | Arrow keys |
 | Tilt the selected layer in 3D (Shift: 15° steps) | Ctrl+drag on it |
+| Distort the selected layer (move one corner) | Ctrl+drag a corner handle |
 | Select the layer above / below (the layer list clicked last) | Up / Down |
 | Fit page in view | F |
 | Select / Pencil / Brush / Eraser tool (with a closed shape selected) | V / P / B / E (Esc: back to Select) |
+| Eyedropper | I (Esc: back to Select) |
 | Clear the paint in the selected shape | Ctrl+Shift+Delete |
 | Add a guide | Drag from a ruler |
 | Move / delete a guide | Drag it / drag it off the canvas |
@@ -668,8 +739,8 @@ The default keys:
 On the canvas, with a layer selected:
 
 - **Corner handles** scale; **Shift** scales width and height freely.
-- **Distort** (in Properties) makes corner handles move one corner at a time, for
-  perspective. **Holding Ctrl** swaps between resizing and distorting while you drag.
+- **Ctrl+drag on a corner handle** moves that corner alone, distorting the layer for
+  perspective; **Reset distortion** in Properties puts the corners back.
 - **3D tilt** (in Properties, under Rotation) turns a layer in 3D around its center: **x**
   takes its top away from you, **y** its right side (negative values bring them toward
   you), up to 85°. On the canvas, **Ctrl+drag on the selected layer** tilts it: up and down
@@ -677,9 +748,11 @@ On the canvas, with a layer selected:
   **Perspective** sets how strong the depth looks, from 0 (parallel
   lines stay parallel) to 1. Effects such as a halftone are applied before, so they
   recede with the layer. The tilts can be linked to variables like the rotation;
-  Distort's corners move on top of the tilt, and **Reset** clears both.
+  corners moved with Ctrl move on top of the tilt, and **Reset** clears both; **Reset 3D
+  tilt** (next to Reset distortion) clears only the tilt and its perspective.
 - **Edge handles** stretch one side; **Alt** stretches both sides from the center.
-- **Rotation handle** rotates; **Shift** snaps to 15° steps.
+- **Rotation handle** rotates; **Shift** snaps to 15° steps. A selected group has one
+  too, above its dashed box, turning the whole group.
 - **Ctrl+Alt** on a corner or edge handle of a shape painted in: its paint does the
   other way than its **Stretch paint** setting says, for that drag only.
 

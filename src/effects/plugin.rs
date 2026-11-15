@@ -122,18 +122,9 @@ fn values_json(params: &Params) -> CString {
     CString::new(params.resolved().to_string()).unwrap_or_default()
 }
 
-/// Folder holding the plugins: next to the executable first, then the working directory.
+/// Folder holding the plugins (see [`crate::shipped_dir`]).
 pub fn plugins_dir() -> Option<PathBuf> {
-    let mut candidates = Vec::new();
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
-    {
-        candidates.push(dir.join("plugins"));
-    }
-    if let Ok(cwd) = std::env::current_dir() {
-        candidates.push(cwd.join("plugins"));
-    }
-    candidates.into_iter().find(|p| p.is_dir())
+    crate::shipped_dir("plugins")
 }
 
 /// What loading the plugins of a folder gave.

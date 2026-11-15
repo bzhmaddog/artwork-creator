@@ -197,18 +197,33 @@ pub enum Geometry {
     Radial { ellipse: Transform },
 }
 
-/// What fills a shape: one color, or a gradient over a box.
+/// What fills a shape: one color, a gradient over a box, or an image repeated.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Ink {
     /// Straight RGBA.
     Solid([u8; 4]),
     /// Spanning `frame`, in the units of the paths it fills.
     Gradient { gradient: Gradient, frame: Rect },
+    /// `tile` repeated, premultiplied; `transform` takes its pixels to the units of the
+    /// paths it fills (see `pattern`).
+    Pattern {
+        tile: std::sync::Arc<tiny_skia::Pixmap>,
+        transform: Transform,
+    },
 }
 
 impl Ink {
-    /// A gradient when there is one, else the color.
-    pub fn of(color: [u8; 4], gradient: Option<&Gradient>, frame: Option<Rect>) -> Self {
+    /// A pattern whose tile is loaded, else a gradient when there is one, else the
+    /// color.
+    pub fn of(
+        color: [u8; 4],
+        gradient: Option<&Gradient>,
+        pattern: Option<&crate::pattern::Pattern>,
+        frame: Option<Rect>,
+    ) -> Self {
+        if let Some(ink) = pattern.zip(frame).and_then(|(p, f)| p.ink(f)) {
+            return ink;
+        }
         match (gradient, frame) {
             (Some(g), Some(frame)) => Ink::Gradient {
                 gradient: g.clone(),
@@ -218,8 +233,23 @@ impl Ink {
         }
     }
 
+    /// The same ink for paths moved by `ts` (a move and a scale).
+    pub fn transformed(self, ts: Transform) -> Option<Self> {
+        Some(match self {
+            Ink::Gradient { gradient, frame } => Ink::Gradient {
+                gradient,
+                frame: frame.transform(ts)?,
+            },
+            Ink::Pattern { tile, transform } => Ink::Pattern {
+                tile,
+                transform: transform.post_concat(ts),
+            },
+            solid => solid,
+        })
+    }
+
     /// A paint for tiny-skia, antialiased.
-    pub fn paint(&self) -> tiny_skia::Paint<'static> {
+    pub fn paint(&self) -> tiny_skia::Paint<'_> {
         let mut paint = tiny_skia::Paint {
             anti_alias: true,
             ..Default::default()
@@ -233,6 +263,15 @@ impl Ink {
                     paint.set_color_rgba8(r, g, b, a);
                 }
             },
+            Ink::Pattern { tile, transform } => {
+                paint.shader = tiny_skia::Pattern::new(
+                    tile.as_ref().as_ref(),
+                    SpreadMode::Repeat,
+                    tiny_skia::FilterQuality::Bicubic,
+                    1.0,
+                    *transform,
+                );
+            }
         }
         paint
     }

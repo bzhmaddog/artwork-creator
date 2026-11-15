@@ -168,6 +168,10 @@ pub struct Text {
     /// Fills the letters instead of `color`, when set, over the text's box.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gradient: Option<crate::gradient::Gradient>,
+    /// Fills the letters instead of `color` and `gradient`, when set, from the text's
+    /// box, in the text's units.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pattern: Option<crate::pattern::Pattern>,
     /// Draw a line around the letters.
     pub outline: bool,
     /// Thickness of the outline outside the letters, in ems.
@@ -267,6 +271,7 @@ impl Default for Text {
             line_height: 1.2,
             color: [0, 0, 0, 255],
             gradient: None,
+            pattern: None,
             outline: false,
             outline_width: 0.05,
             outline_color: [255, 255, 255, 255],
@@ -1462,7 +1467,12 @@ fn coats<'a>(laid: &'a Laid, text: &Text) -> Vec<Coat<'a>> {
     }
     // The letters' gradient spans the laid out text's box.
     let frame = tiny_skia::Rect::from_xywh(0.0, 0.0, laid.size[0] as f32, laid.size[1] as f32);
-    let ink = Ink::of(text.color, text.gradient.as_ref(), frame);
+    let ink = Ink::of(
+        text.color,
+        text.gradient.as_ref(),
+        text.pattern.as_ref(),
+        frame,
+    );
     if laid.embolden > 0.0 {
         out.push(Coat {
             path,

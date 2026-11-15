@@ -1,6 +1,6 @@
 //! The template editor's reference: a DXF, SVG, PNG or PDF file the template's shapes are
 //! drawn over, shown at its true size as an image layer below every element. Only the
-//! editor shows it (see `template_edit`).
+//! editor shows it (see `template::edit`).
 
 use std::path::Path;
 use std::sync::Arc;

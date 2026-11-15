@@ -1,4 +1,4 @@
-//! PNG and PDF writers, and the export of every format (SVG in `svg_export`).
+//! PNG and PDF writers, and the export of every format (SVG in `export::svg`).
 
 pub mod marks;
 pub mod printing;

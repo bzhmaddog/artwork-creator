@@ -39,6 +39,7 @@ use crate::i18n::{tr, tr_noop, translate};
 use crate::template::ElementKind;
 use crate::ui::effects as effects_ui;
 use crate::ui::shortcuts::Command;
+use crate::ui::variables as variables_ui;
 
 /// Width of one nesting level in the layer list.
 const INDENT: f32 = 14.0;
@@ -534,7 +535,7 @@ pub fn show(
                         let size = vec2(ui.available_width() - badge, ui.spacing().interact_size.y);
                         let (name_rect, r) = ui.allocate_exact_size(size, Sense::click_and_drag());
                         if let Some(gone) = gone {
-                            variables::broken_links_badge(ui, gone);
+                            variables_ui::broken_links_badge(ui, gone);
                         }
                         if ui.is_rect_visible(name_rect) {
                             let color = if *selected == Some(row.id) {

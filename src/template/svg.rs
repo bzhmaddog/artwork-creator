@@ -6,7 +6,7 @@
 //! arcs). Nothing is loaded from elsewhere: no images, no fonts.
 //!
 //! The SVG is written in mm (`width`/`height` in mm, one user unit per mm, y down) in the
-//! template's frame. Items are in mm, y up, as `template_geom` has them.
+//! template's frame. Items are in mm, y up, as `template::geom` has them.
 
 use std::fmt::Write as _;
 use std::path::Path;

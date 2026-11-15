@@ -396,7 +396,7 @@ pub(super) fn properties(
                             ui.label(tr!("ELEMENT_COLOR"));
                             let [r, g, b] = tag.color;
                             let mut c = [r, g, b, 255];
-                            if crate::document::colors::button(ui, &mut c, false, None)
+                            if crate::ui::colors::button(ui, &mut c, false, None)
                                 .on_hover_text(tr!("ELEMENT_LINE_COLOR"))
                                 .changed()
                             {
@@ -507,11 +507,11 @@ pub(super) fn properties(
                             ui.horizontal(|ui| {
                                 let (t, b) = (&mut layer.transform, &mut layer.bindings);
                                 let [x, y] = &mut t.center;
-                                out.changed |= variables::field(ui, b, Field::X, x, |d| {
+                                out.changed |= variables_ui::field(ui, b, Field::X, x, |d| {
                                     mm_value(d, "x", f32::NEG_INFINITY)
                                 })
                                 .changed();
-                                out.changed |= variables::field(ui, b, Field::Y, y, |d| {
+                                out.changed |= variables_ui::field(ui, b, Field::Y, y, |d| {
                                     mm_value(d, "y", f32::NEG_INFINITY)
                                 })
                                 .changed();
@@ -533,10 +533,10 @@ pub(super) fn properties(
                                 let b = &mut layer.bindings;
                                 let links =
                                     [Field::Width, Field::Height].map(|f| b.get(&f).cloned());
-                                let rw = variables::field(ui, b, Field::Width, &mut w, |d| {
+                                let rw = variables_ui::field(ui, b, Field::Width, &mut w, |d| {
                                     mm_value(d, tr!("LAYER_WIDTH_PREFIX"), 0.01)
                                 });
-                                let rh = variables::field(ui, b, Field::Height, &mut h, |d| {
+                                let rh = variables_ui::field(ui, b, Field::Height, &mut h, |d| {
                                     mm_value(d, tr!("LAYER_HEIGHT_PREFIX"), 0.01)
                                 });
                                 unit(ui, "mm");
@@ -546,7 +546,7 @@ pub(super) fn properties(
                                         b,
                                         links,
                                         old,
-                                        &variables::published(ui.ctx()),
+                                        &variables_ui::published(ui.ctx()),
                                     );
                                 }
                                 let s = &mut layer.transform.scale;
@@ -577,7 +577,7 @@ pub(super) fn properties(
                                 let rot = &mut t.rotation_deg;
                                 // The slider's own value box can't take a formula: the
                                 // field next to it does.
-                                if variables::field(ui, b, Field::Rotation, rot, |d| {
+                                if variables_ui::field(ui, b, Field::Rotation, rot, |d| {
                                     d.fixed_decimals(1).speed(0.5)
                                 })
                                 .changed()
@@ -605,7 +605,7 @@ pub(super) fn properties(
                                         (Field::TiltX, &mut t.tilt_x_deg, "x"),
                                         (Field::TiltY, &mut t.tilt_y_deg, "y"),
                                     ] {
-                                        if variables::field(ui, b, field, v, |d| {
+                                        if variables_ui::field(ui, b, field, v, |d| {
                                             d.fixed_decimals(1)
                                                 .speed(0.5)
                                                 .prefix(format!("{prefix} "))

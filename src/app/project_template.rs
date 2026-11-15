@@ -889,7 +889,7 @@ impl ArtworkApp {
                 });
                 let line = &mut self.canvas.element_color[k];
                 let mut c = line.to_srgba_unmultiplied();
-                if crate::document::colors::button(ui, &mut c, true, None)
+                if crate::ui::colors::button(ui, &mut c, true, None)
                     .on_hover_text(tr!("ELEMENT_LINE_COLOR"))
                     .changed()
                 {

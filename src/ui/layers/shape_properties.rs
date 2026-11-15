@@ -11,16 +11,16 @@ pub(super) fn shape_size(ui: &mut Ui, layer: &mut Layer, state: &mut LayersPanel
     let [mut w, mut h] = old;
     let b = &mut layer.bindings;
     let links = [Field::Width, Field::Height].map(|f| b.get(&f).cloned());
-    let rw = variables::field(ui, b, Field::Width, &mut w, |d| {
+    let rw = variables_ui::field(ui, b, Field::Width, &mut w, |d| {
         mm_value(d, tr!("LAYER_WIDTH_PREFIX"), 0.0)
     });
-    let rh = variables::field(ui, b, Field::Height, &mut h, |d| {
+    let rh = variables_ui::field(ui, b, Field::Height, &mut h, |d| {
         mm_value(d, tr!("LAYER_HEIGHT_PREFIX"), 0.0)
     });
     unit(ui, "mm");
     aspect_lock(ui, &mut state.free_aspect);
     if !state.free_aspect {
-        variables::link_aspect(b, links, old, &variables::published(ui.ctx()));
+        variables::link_aspect(b, links, old, &variables_ui::published(ui.ctx()));
     }
     let mut size = old;
     if rw.changed() {
@@ -73,7 +73,7 @@ pub(super) fn shape_section(
                         ui.label(tr!("SHAPE_CORNER_RADIUS"));
                         let max = s.size[0].min(s.size[1]) / 2.0;
                         ui.horizontal(|ui| {
-                            changed |= variables::field(
+                            changed |= variables_ui::field(
                                 ui,
                                 &mut layer.bindings,
                                 Field::CornerRadius,
@@ -207,7 +207,7 @@ pub(super) fn shape_section(
                 ui.horizontal(|ui| {
                     changed |= ui.checkbox(&mut s.stroke, "").changed();
                     ui.add_enabled_ui(s.stroke, |ui| {
-                        changed |= variables::field(
+                        changed |= variables_ui::field(
                             ui,
                             &mut layer.bindings,
                             Field::StrokeWidth,

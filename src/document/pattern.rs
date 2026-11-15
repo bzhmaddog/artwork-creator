@@ -4,7 +4,7 @@
 //! A pattern lies in the frame of what it fills, like a gradient: it moves and turns
 //! with the layer. Its tile's width, turn and offset are in the units of that frame: mm
 //! for a shape and the page, the text's own units for a text (shown in mm, see
-//! `layers_ui`). Its image is kept in the project like a layer's (see `project`).
+//! `ui::layers`). Its image is kept in the project like a layer's (see `project`).
 
 use std::path::PathBuf;
 use std::sync::Arc;

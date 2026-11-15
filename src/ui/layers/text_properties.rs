@@ -45,7 +45,7 @@ pub(super) fn text_section(
                         } else {
                             tr!("TEXT_ON_PATH_TYPE_HINT")
                         });
-                    if crate::document::text_links::link_button(ui, &mut t.link) {
+                    if crate::ui::text_links::link_button(ui, &mut t.link) {
                         changed = true;
                     }
                     r
@@ -53,7 +53,7 @@ pub(super) fn text_section(
                 .inner;
             // Typed in, the text is no longer its variable's.
             if r.changed() {
-                crate::document::text_links::typed_in(ui.ctx(), &mut t.link);
+                crate::ui::text_links::typed_in(ui.ctx(), &mut t.link);
             }
             if std::mem::take(&mut state.show_text) {
                 r.scroll_to_me(Some(egui::Align::Center));
@@ -189,7 +189,7 @@ pub(super) fn text_section(
                 ui.label(tr!("TEXT_FONT_SIZE"));
                 let mut pt = text::size_pt(layer);
                 ui.horizontal(|ui| {
-                    if variables::field(ui, &mut layer.bindings, Field::TextSize, &mut pt, |d| {
+                    if variables_ui::field(ui, &mut layer.bindings, Field::TextSize, &mut pt, |d| {
                         d.range(1.0..=2000.0).speed(0.2).fixed_decimals(1)
                     })
                     .on_hover_text(tr!("TEXT_FONT_SIZE_HINT"))
@@ -226,7 +226,7 @@ pub(super) fn text_section(
                             changed = true;
                         }
                         unit(ui, "mm");
-                        changed |= crate::document::colors::linked_button(
+                        changed |= crate::ui::colors::linked_button(
                             ui,
                             &mut layer.color_links,
                             ColorField::TextOutline,

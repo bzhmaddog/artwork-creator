@@ -383,7 +383,7 @@ fn param_ui(
         }
         ParamKind::Color { .. } => {
             let mut v = p.color(id);
-            crate::document::colors::linked_button(ui, links, spec.id.clone(), &mut v, true)
+            crate::ui::colors::linked_button(ui, links, spec.id.clone(), &mut v, true)
                 .changed()
                 .then(|| Value::from(color_to_hex(v)))
         }

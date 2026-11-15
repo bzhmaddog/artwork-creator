@@ -94,13 +94,8 @@ pub(super) fn tool_bar(
                         };
                         ui.separator();
                         if tool != crate::document::paint::Tool::Eraser {
-                            crate::document::colors::button(
-                                ui,
-                                &mut state.brushes.color,
-                                true,
-                                None,
-                            )
-                            .on_hover_text(crate::i18n::tr!("PAINT_COLOR_HINT"));
+                            crate::ui::colors::button(ui, &mut state.brushes.color, true, None)
+                                .on_hover_text(crate::i18n::tr!("PAINT_COLOR_HINT"));
                         }
                         ui.add(
                             egui::DragValue::new(state.brushes.width_mut(tool))

@@ -4,15 +4,12 @@
 //! in a linked text unlinks it. A text whose variable is gone keeps its link, broken,
 //! and its last text; a text variable of that name links it again.
 
-use egui::Ui;
-
 use crate::document::text;
-use crate::document::variables::{self, Kind, LinkAction, Value, Variable};
+use crate::document::variables::{Value, Variable};
 use crate::document::{Document, Layer, Node};
-use crate::i18n::tr;
 
 /// The text variable `name`'s text, if there is one.
-fn find<'a>(vars: &'a [Variable], name: &str) -> Option<&'a str> {
+pub fn find<'a>(vars: &'a [Variable], name: &str) -> Option<&'a str> {
     vars.iter().find(|v| v.name == name)?.value.text()
 }
 
@@ -105,40 +102,6 @@ pub fn adopt_links(vars: &mut Vec<Variable>, node: &mut Node) {
     });
 }
 
-/// Unlinks a text typed in (`link` being its text's link), with a notice in the status
-/// bar saying so.
-pub fn typed_in(ctx: &egui::Context, link: &mut Option<String>) {
-    if let Some(name) = link.take() {
-        crate::app::notify(ctx, tr!("TEXT_UNLINKED_BY_TYPING", name = name));
-    }
-}
-
-/// The link button of a text layer's text: the text variables, a click on one linking
-/// the text to it, then Unlink, which keeps the text. Returns true if the link changed.
-pub fn link_button(ui: &mut Ui, link: &mut Option<String>) -> bool {
-    let vars = variables::published(ui.ctx());
-    let state = match link.as_deref() {
-        None => variables::Link::None,
-        Some(name) if find(&vars, name).is_some() => variables::Link::Linked(String::new()),
-        Some(name) => variables::Link::Broken(tr!("BROKEN_TEXT_LINK_HINT", name = name)),
-    };
-    let candidates: Vec<&Variable> = vars
-        .iter()
-        .filter(|v| v.value.kind() == Kind::Text)
-        .collect();
-    match variables::link_button(ui, &state, link.as_deref(), &candidates) {
-        LinkAction::Pick(name) => {
-            *link = Some(name);
-            true
-        }
-        LinkAction::Unlink => {
-            *link = None;
-            true
-        }
-        LinkAction::None => false,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,34 +179,6 @@ mod tests {
         // The name is another variable's: unlinked.
         let mut vars = vec![tv("title", "Other")];
         assert_eq!(pasted("Hello", &mut vars), None);
-    }
-
-    #[test]
-    fn typing_in_a_linked_text_unlinks_it_with_a_notice() {
-        let ctx = egui::Context::default();
-        let frame = |time: f64| {
-            let input = egui::RawInput {
-                time: Some(time),
-                ..Default::default()
-            };
-            let mut shown = None;
-            let mut out = ctx.run_ui(input, |ui| shown = crate::app::notice(ui.ctx()));
-            out.textures_delta.clear();
-            shown
-        };
-        frame(1.0);
-        let mut link = None;
-        typed_in(&ctx, &mut link);
-        assert_eq!(frame(1.1), None, "not linked: nothing to say");
-        let mut link = Some("title".to_owned());
-        typed_in(&ctx, &mut link);
-        assert_eq!(link, None);
-        let shown = frame(1.2).expect("a notice");
-        assert!(shown.contains("title"), "{shown}");
-        assert!(
-            frame(1.0 + crate::app::NOTICE_SECONDS + 0.1).is_none(),
-            "then gone"
-        );
     }
 
     #[test]

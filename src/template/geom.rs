@@ -1,8 +1,8 @@
 //! Template geometry as editable shapes, for the template editor: a template's outlines
-//! (from its SVG, see `template_svg`, or the DXF files of older templates) read as
+//! (from its SVG, see `template::svg`, or the DXF files of older templates) read as
 //! circles, rectangles (rounded or not) and paths whose arcs stay curves, and shape
 //! layers turned back into circles and outlines of lines, arcs and Beziers, which
-//! `template_svg` writes.
+//! `template::svg` writes.
 //!
 //! Items are in mm, y up, as DXF has them. The editor's page is in mm, y down.
 

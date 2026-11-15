@@ -187,9 +187,7 @@ pub fn inline(ui: &mut Ui, ui_key: impl std::hash::Hash + std::fmt::Debug, f: &m
         return changed;
     }
     match f.gradient {
-        None => {
-            changed |= crate::document::colors::button(ui, f.color, f.alpha, Some(f.link)).changed()
-        }
+        None => changed |= crate::ui::colors::button(ui, f.color, f.alpha, Some(f.link)).changed(),
         Some(g) => {
             let (rect, _) = ui.allocate_exact_size(
                 vec2(
@@ -290,7 +288,7 @@ pub fn rows(ui: &mut Ui, ui_key: impl std::hash::Hash + std::fmt::Debug, f: &mut
             };
             ui.label(tr!("GRADIENT_STOP"));
             changed |=
-                crate::document::colors::button(ui, &mut stop.color, f.alpha, Some(&mut stop.link))
+                crate::ui::colors::button(ui, &mut stop.color, f.alpha, Some(&mut stop.link))
                     .changed();
             let mut p = stop.pos * 100.0;
             if ui

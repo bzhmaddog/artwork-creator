@@ -38,7 +38,7 @@ pub struct EditedTemplate {
     #[serde(default)]
     pub shape_ids: std::collections::BTreeMap<u64, String>,
     /// The id of the reference layer: the image at the bottom of the list the shapes are
-    /// drawn over (see `template_reference`).
+    /// drawn over (see `template::reference`).
     #[serde(default)]
     pub reference: Option<u64>,
 }

@@ -42,6 +42,7 @@ use crate::ui::file_dialog::{self, FileBrowser, Filter, Purpose, Request};
 use crate::ui::layers::{self, Edit, LayersPanel};
 use crate::ui::panels::{PanelId, Side};
 use crate::ui::shortcuts::{Command, Shortcuts};
+use crate::ui::variables as variables_ui;
 
 /// Longest side of the on-screen texture. Exports always use the full-resolution image.
 const MAX_TEXTURE_SIDE: u32 = 4096;
@@ -210,7 +211,7 @@ const PANEL_LABELS: [&str; 11] = [
 /// Where the print settings are kept with the app's preferences.
 const PRINT_SETTINGS_KEY: &str = "print_settings";
 
-/// A template being edited in the window (see `template_edit`), the project set aside
+/// A template being edited in the window (see `template::edit`), the project set aside
 /// meanwhile.
 struct TemplateEditing {
     /// Its folder in the user's templates; `None` until a new template or the copy of a
@@ -614,7 +615,7 @@ impl eframe::App for ArtworkApp {
             self.add_dropped(&ctx, dropped);
         }
         self.guard_close(&ctx);
-        crate::document::colors::publish(&ctx, &self.doc, &self.canvas.picked);
+        crate::ui::colors::publish(&ctx, &self.doc, &self.canvas.picked);
         // The template's points on the page, which layer positions can be linked to.
         self.doc.template_points = match (&self.template, &self.editing) {
             (Some(t), None) => {
@@ -627,7 +628,7 @@ impl eframe::App for ArtworkApp {
             }
             _ => Vec::new(),
         };
-        variables::publish(&ctx, &self.doc);
+        variables_ui::publish(&ctx, &self.doc);
         self.shortcuts(&ctx);
         self.layers_panel.keys = self.shortcuts.texts(&ctx);
         self.canvas.keys = self.layers_panel.keys.clone();
@@ -734,7 +735,7 @@ impl eframe::App for ArtworkApp {
             self.on_files(&ctx, purpose, paths, false);
         }
         // Colors saved from a picker become color variables.
-        for var in crate::document::colors::take_saved(&ctx) {
+        for var in crate::ui::colors::take_saved(&ctx) {
             self.dirty |= crate::document::colors::save(&mut self.doc, var);
         }
         self.overwrite_modal(&ctx);

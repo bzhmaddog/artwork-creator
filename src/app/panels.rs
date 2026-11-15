@@ -223,11 +223,10 @@ impl ArtworkApp {
                 } else {
                     &variables::Kind::ALL
                 };
-                self.dirty |= variables::variables_ui(ui, &mut self.doc, kinds)
+                self.dirty |= variables_ui::variables_ui(ui, &mut self.doc, kinds)
             }
             PanelId::ColorsInUse => {
-                self.dirty |=
-                    crate::document::colors::in_use_ui(ui, &mut self.doc, &self.canvas.picked)
+                self.dirty |= crate::ui::colors::in_use_ui(ui, &mut self.doc, &self.canvas.picked)
             }
             PanelId::Layers => {
                 self.layers_panel.can_paste = self.clipboard.has_content();

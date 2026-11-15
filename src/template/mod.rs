@@ -391,7 +391,7 @@ pub struct TemplateEntry {
     pub config: TemplateConfig,
     /// Error from reading `template.json`, if any.
     pub config_error: Option<String>,
-    /// What the template diagnostic found wrong with it (`template_check`), filled when
+    /// What the template diagnostic found wrong with it (`template::check`), filled when
     /// the templates are listed (`scan_all`).
     pub problems: Vec<crate::template::check::Problem>,
 }

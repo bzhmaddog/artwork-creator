@@ -1025,7 +1025,7 @@ impl TemplateCopy {
     }
 }
 
-/// A guide line across the page, which layers snap to (see `view`).
+/// A guide line across the page, which layers snap to (see `ui::canvas`).
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Guide {
     /// A vertical line at x = `at`, or a horizontal one at y = `at`.
@@ -1050,7 +1050,7 @@ pub struct Document {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub template_copy: Option<TemplateCopy>,
     /// Only in the template editor's document: the template's settings, kept here so
-    /// that Undo covers them (see `template_edit`).
+    /// that Undo covers them (see `template::edit`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub edited_template: Option<Box<crate::template::edit::EditedTemplate>>,
     /// Page color (RGB), printed under the layers.

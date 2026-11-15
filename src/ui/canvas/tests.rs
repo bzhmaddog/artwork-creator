@@ -1138,7 +1138,8 @@ impl Canvas {
         c
     }
 
-    fn frame(&mut self, doc: &mut Document, events: Vec<Event>) {
+    /// One frame; returns the cursor it left.
+    fn frame(&mut self, doc: &mut Document, events: Vec<Event>) -> CursorIcon {
         self.time += 0.02;
         let input = egui::RawInput {
             screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 800.0))),
@@ -1151,6 +1152,7 @@ impl Canvas {
             show(ui, doc, &[], selected, state);
         });
         out.textures_delta.clear();
+        out.platform_output.cursor_icon
     }
 
     /// A page point on screen.
@@ -1199,6 +1201,45 @@ impl Canvas {
         }
         self.frame(doc, Vec::new());
     }
+}
+
+#[test]
+fn the_handle_under_the_pointer_is_highlighted_and_rotation_has_its_cursor() {
+    use super::handles::{Hot, edge_handles, handles};
+    let mut doc = snap_doc();
+    let mut c = Canvas::new(&mut doc);
+    c.frame(&mut doc, Vec::new());
+    let layer = doc.layer(1).unwrap().clone();
+    let (corners, _, rot) = handles(&c.state.camera, c.state.rect, &layer);
+    let edges = edge_handles(&c.state.camera, c.state.rect, &layer);
+    for (at, hot) in [
+        (corners[2], Hot::Corner(2)),
+        (edges[1], Hot::Edge(1)),
+        (rot, Hot::Rotate),
+    ] {
+        let cursor = c.frame(&mut doc, vec![Event::PointerMoved(at)]);
+        assert_eq!(c.state.hot, Some(hot));
+        // Turning has no system cursor: one is drawn instead.
+        assert_eq!(cursor == CursorIcon::None, hot == Hot::Rotate, "{hot:?}");
+    }
+    // A little off the rotation handle's circle still grabs it.
+    c.frame(&mut doc, vec![Event::PointerMoved(rot + vec2(10.0, 0.0))]);
+    assert_eq!(c.state.hot, Some(Hot::Rotate));
+    // Away from the handles: none; and while turning, it stays lit.
+    c.frame(
+        &mut doc,
+        vec![Event::PointerMoved(c.screen([100.0, 100.0]))],
+    );
+    assert_eq!(c.state.hot, None);
+    c.frame(&mut doc, vec![Event::PointerMoved(rot)]);
+    c.frame(&mut doc, vec![Canvas::button(rot, true)]);
+    let cursor = c.frame(&mut doc, vec![Event::PointerMoved(rot + vec2(40.0, 30.0))]);
+    assert_eq!(c.state.hot, Some(Hot::Rotate));
+    assert_eq!(cursor, CursorIcon::None);
+    c.frame(
+        &mut doc,
+        vec![Canvas::button(rot + vec2(40.0, 30.0), false)],
+    );
 }
 
 #[test]

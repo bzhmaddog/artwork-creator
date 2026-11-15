@@ -122,3 +122,14 @@ pub(super) fn rotate_vec(v: P2, deg: f32) -> P2 {
 pub(super) fn len(v: P2) -> f32 {
     (v[0] * v[0] + v[1] * v[1]).sqrt()
 }
+
+/// The handle of the selection under the pointer, or being dragged: drawn highlighted.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum Hot {
+    /// A corner: top left, top right, bottom right, bottom left.
+    Corner(usize),
+    /// The middle of an edge: top, right, bottom, left.
+    Edge(usize),
+    /// The rotation handle, of a layer or a group.
+    Rotate,
+}

@@ -49,6 +49,111 @@ pub fn field_frames(ui: &mut Ui) {
     ui.visuals_mut().widgets = ui.ctx().global_style().visuals.widgets.clone();
 }
 
+/// A field added by `add`, its `prefix` ("x", "W") in a segment of its own on its
+/// left, shaded apart from the value as an input group, in either theme. An empty
+/// prefix adds the field alone.
+pub fn prefixed<R>(ui: &mut Ui, prefix: &str, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let prefix = prefix.trim();
+    if prefix.is_empty() {
+        return add(ui);
+    }
+    let galley = ui.painter().layout_no_wrap(
+        prefix.to_owned(),
+        egui::TextStyle::Body.resolve(ui.style()),
+        ui.visuals().widgets.inactive.fg_stroke.color,
+    );
+    let width = galley.size().x + 2.0 * ui.spacing().button_padding.x;
+    input_group(
+        ui,
+        width,
+        |ui, rect| {
+            ui.painter().galley(
+                rect.center() - galley.size() / 2.0,
+                galley,
+                egui::Color32::PLACEHOLDER,
+            );
+        },
+        add,
+    )
+}
+
+/// [`prefixed`] with an icon in the segment, drawn by `icon` as a square widget as
+/// tall as a field (such as `ui::variables::kind_icon`).
+pub fn prefixed_icon<R>(
+    ui: &mut Ui,
+    icon: impl FnOnce(&mut Ui),
+    add: impl FnOnce(&mut Ui) -> R,
+) -> R {
+    let side = ui.spacing().interact_size.y;
+    input_group(
+        ui,
+        side,
+        |ui, rect| {
+            let at = Rect::from_center_size(rect.center(), vec2(side, side));
+            // Over the segment, the field placed after it as for a text.
+            icon(&mut ui.new_child(egui::UiBuilder::new().max_rect(at)));
+        },
+        add,
+    )
+}
+
+/// A segment at least `width` wide, its contents drawn by `content` in its rectangle,
+/// joined to the field `add` adds. All segments are as wide whatever they show, so
+/// that the fields of rows one under the other line up.
+fn input_group<R>(
+    ui: &mut Ui,
+    width: f32,
+    content: impl FnOnce(&mut Ui, Rect),
+    add: impl FnOnce(&mut Ui) -> R,
+) -> R {
+    let spacing = ui.spacing().item_spacing;
+    ui.horizontal(|ui| {
+        // The segment and the field side by side, without a gap.
+        ui.spacing_mut().item_spacing.x = 0.0;
+        let visuals = ui.visuals();
+        let toward = if visuals.dark_mode {
+            egui::Color32::WHITE
+        } else {
+            egui::Color32::BLACK
+        };
+        let fill = visuals
+            .widgets
+            .inactive
+            .weak_bg_fill
+            .lerp_to_gamma(toward, 0.1);
+        let r = visuals.widgets.inactive.corner_radius;
+        let height = ui.spacing().interact_size.y;
+        let size = vec2(width.max(height + 8.0), height);
+        let (rect, _) = ui.allocate_exact_size(size, Sense::hover());
+        let left = egui::CornerRadius {
+            nw: r.nw,
+            sw: r.sw,
+            ne: 0,
+            se: 0,
+        };
+        ui.painter().rect_filled(rect, left, fill);
+        content(ui, rect);
+        // The field, square on the left where it meets the segment.
+        ui.scope(|ui| {
+            ui.spacing_mut().item_spacing = spacing;
+            let w = &mut ui.visuals_mut().widgets;
+            for v in [
+                &mut w.noninteractive,
+                &mut w.inactive,
+                &mut w.hovered,
+                &mut w.active,
+                &mut w.open,
+            ] {
+                v.corner_radius.nw = 0;
+                v.corner_radius.sw = 0;
+            }
+            add(ui)
+        })
+        .inner
+    })
+    .inner
+}
+
 /// A field's unit, shown after it rather than inside it: "mm", "°", "pt", "%"...
 pub fn unit(ui: &mut Ui, unit: &str) -> Response {
     let unit = unit.trim();
@@ -182,10 +287,10 @@ pub fn section(
     state.show_body_unindented(ui, body);
 }
 
-/// A position or size field in mm, from `min` (up to 5000 mm for a size), named by
-/// `prefix`. Its row ends with the unit (see [`unit`]).
-pub(super) fn mm_value<'a>(d: DragValue<'a>, prefix: &str, min: f32) -> DragValue<'a> {
-    let d = d.fixed_decimals(1).speed(0.5).prefix(format!("{prefix} "));
+/// A position or size field in mm, from `min` (up to 5000 mm for a size); named by a
+/// prefix (see [`prefixed`]), its row ending with the unit (see [`unit`]).
+pub(super) fn mm_value(d: DragValue<'_>, min: f32) -> DragValue<'_> {
+    let d = d.fixed_decimals(1).speed(0.5);
     if min.is_finite() {
         d.range(min..=5000.0)
     } else {
@@ -456,11 +561,19 @@ pub(super) fn properties(
                             ui.add(
                                 DragValue::new(&mut state.group_turn_deg)
                                     .range(-360.0..=360.0)
-                                    .speed(0.5)
+                                    .speed(0.0)
                                     .fixed_decimals(1),
                             )
+                            .on_hover_cursor(egui::CursorIcon::Text)
                             .on_hover_text(tr!("ROTATE_GROUP_BY_HINT"));
                             unit(ui, "°");
+                            crate::ui::dial::angle_dial(
+                                ui,
+                                &mut state.group_turn_deg,
+                                crate::ui::dial::Turn::FromTop,
+                                0.0,
+                            )
+                            .on_hover_text(tr!("ROTATE_GROUP_BY_HINT"));
                             if ui
                                 .add_enabled(
                                     state.group_turn_deg % 360.0 != 0.0,
@@ -507,12 +620,16 @@ pub(super) fn properties(
                             ui.horizontal(|ui| {
                                 let (t, b) = (&mut layer.transform, &mut layer.bindings);
                                 let [x, y] = &mut t.center;
-                                out.changed |= variables_ui::field(ui, b, Field::X, x, |d| {
-                                    mm_value(d, "x", f32::NEG_INFINITY)
+                                out.changed |= prefixed(ui, "x", |ui| {
+                                    variables_ui::field(ui, b, Field::X, x, |d| {
+                                        mm_value(d, f32::NEG_INFINITY)
+                                    })
                                 })
                                 .changed();
-                                out.changed |= variables_ui::field(ui, b, Field::Y, y, |d| {
-                                    mm_value(d, "y", f32::NEG_INFINITY)
+                                out.changed |= prefixed(ui, "y", |ui| {
+                                    variables_ui::field(ui, b, Field::Y, y, |d| {
+                                        mm_value(d, f32::NEG_INFINITY)
+                                    })
                                 })
                                 .changed();
                                 unit(ui, "mm");
@@ -533,11 +650,15 @@ pub(super) fn properties(
                                 let b = &mut layer.bindings;
                                 let links =
                                     [Field::Width, Field::Height].map(|f| b.get(&f).cloned());
-                                let rw = variables_ui::field(ui, b, Field::Width, &mut w, |d| {
-                                    mm_value(d, tr!("LAYER_WIDTH_PREFIX"), 0.01)
+                                let rw = prefixed(ui, tr!("LAYER_WIDTH_PREFIX"), |ui| {
+                                    variables_ui::field(ui, b, Field::Width, &mut w, |d| {
+                                        mm_value(d, 0.01)
+                                    })
                                 });
-                                let rh = variables_ui::field(ui, b, Field::Height, &mut h, |d| {
-                                    mm_value(d, tr!("LAYER_HEIGHT_PREFIX"), 0.01)
+                                let rh = prefixed(ui, tr!("LAYER_HEIGHT_PREFIX"), |ui| {
+                                    variables_ui::field(ui, b, Field::Height, &mut h, |d| {
+                                        mm_value(d, 0.01)
+                                    })
                                 });
                                 unit(ui, "mm");
                                 aspect_lock(ui, &mut state.free_aspect);
@@ -577,18 +698,36 @@ pub(super) fn properties(
                                 let rot = &mut t.rotation_deg;
                                 // The slider's own value box can't take a formula: the
                                 // field next to it does.
-                                if variables_ui::field(ui, b, Field::Rotation, rot, |d| {
-                                    d.fixed_decimals(1).speed(0.5)
-                                })
+                                // The angle's icon in the place of a prefix: the
+                                // field lines up with x and w above it.
+                                if prefixed_icon(
+                                    ui,
+                                    |ui| {
+                                        variables_ui::kind_icon(
+                                            ui,
+                                            crate::document::variables::Kind::Angle,
+                                        );
+                                    },
+                                    |ui| {
+                                        variables_ui::field(ui, b, Field::Rotation, rot, |d| {
+                                            d.fixed_decimals(1).speed(0.0)
+                                        })
+                                    },
+                                )
+                                .on_hover_cursor(egui::CursorIcon::Text)
                                 .changed()
                                 {
                                     *rot = variables::wrap_degrees(*rot);
                                     out.changed = true;
                                 }
                                 unit(ui, "°");
-                                out.changed |= ui
-                                    .add(Slider::new(rot, -180.0..=180.0).show_value(false))
-                                    .changed();
+                                out.changed |= crate::ui::dial::angle_dial(
+                                    ui,
+                                    rot,
+                                    crate::ui::dial::Turn::FromTop,
+                                    0.0,
+                                )
+                                .changed();
                             });
                         });
                         ui.end_row();
@@ -605,10 +744,10 @@ pub(super) fn properties(
                                         (Field::TiltX, &mut t.tilt_x_deg, "x"),
                                         (Field::TiltY, &mut t.tilt_y_deg, "y"),
                                     ] {
-                                        if variables_ui::field(ui, b, field, v, |d| {
-                                            d.fixed_decimals(1)
-                                                .speed(0.5)
-                                                .prefix(format!("{prefix} "))
+                                        if prefixed(ui, prefix, |ui| {
+                                            variables_ui::field(ui, b, field, v, |d| {
+                                                d.fixed_decimals(1).speed(0.5)
+                                            })
                                         })
                                         .changed()
                                         {

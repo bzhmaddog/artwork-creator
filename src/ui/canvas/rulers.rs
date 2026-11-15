@@ -245,9 +245,9 @@ pub(super) fn guide_dialog(
             let r = ui.add(
                 egui::DragValue::new(&mut edit.at)
                     .speed(0.1)
-                    .max_decimals(2)
-                    .suffix(" mm"),
+                    .max_decimals(2),
             );
+            crate::ui::layers::unit(ui, "mm");
             if std::mem::take(&mut edit.focus) {
                 r.request_focus();
             }

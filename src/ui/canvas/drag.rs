@@ -113,7 +113,7 @@ impl Frame {
                 return None;
             }
             let (_, rot) = group_rotate_handle(group_box(doc, cam, rect, id)?);
-            return (rot.distance(p) <= HANDLE_RADIUS * 1.5)
+            return (rot.distance(p) <= ROTATE_GRAB)
                 .then(|| Some((id, DragKind::RotateGroup(layers::group_middle(doc, id)?))))
                 .flatten();
         }
@@ -121,7 +121,7 @@ impl Frame {
             .layer(id)
             .filter(|l| !crate::document::background::is_fixed(l))?;
         let (corners, _, rot) = handles(cam, rect, layer);
-        if rot.distance(p) <= HANDLE_RADIUS * 1.5 {
+        if rot.distance(p) <= ROTATE_GRAB {
             Some((layer.id, DragKind::Rotate))
         } else if let Some(i) = corners
             .iter()
@@ -139,6 +139,59 @@ impl Frame {
                 .position(|c| c.distance(p) <= HANDLE_RADIUS * 1.5)
                 .map(|i| (layer.id, DragKind::Stretch(i)))
         }
+    }
+}
+
+/// How close (screen points) the pointer must come to a rotation handle to grab it:
+/// more than its size, being small and alone.
+const ROTATE_GRAB: f32 = HANDLE_RADIUS * 2.2;
+
+impl Frame {
+    /// Which handle of the selected layer `sel` is under a screen point, to highlight it.
+    pub(super) fn hot_at(&self, doc: &Document, sel: Option<u64>, p: Pos2) -> Option<Hot> {
+        let (id, kind) = self.handle_at(doc, sel, p)?;
+        Some(match kind {
+            DragKind::Rotate | DragKind::RotateGroup(_) => Hot::Rotate,
+            DragKind::Stretch(i) => Hot::Edge(i),
+            DragKind::Distort(i) => Hot::Corner(i),
+            // The corner nearest the pointer.
+            _ => {
+                let (corners, _, _) = handles(&self.cam, self.rect, doc.layer(id)?);
+                let i = (0..4)
+                    .min_by(|&a, &b| corners[a].distance(p).total_cmp(&corners[b].distance(p)))?;
+                Hot::Corner(i)
+            }
+        })
+    }
+}
+
+/// The pointer while turning something: drawn, as the system has no such cursor, a
+/// curved arrow at `at`.
+pub(super) fn rotate_cursor(ui: &egui::Ui, at: Pos2) {
+    ui.ctx().set_cursor_icon(CursorIcon::None);
+    let painter = ui.ctx().layer_painter(egui::LayerId::new(
+        egui::Order::Tooltip,
+        egui::Id::unique("rotate_cursor"),
+    ));
+    let r = 7.0;
+    let arc: Vec<Pos2> = (0..=16)
+        .map(|k| {
+            let a = (-150.0 + 240.0 * k as f32 / 16.0f32).to_radians();
+            at + vec2(a.cos(), a.sin()) * r
+        })
+        .collect();
+    let end = arc[arc.len() - 1];
+    let tangent = (end - arc[arc.len() - 2]).normalized();
+    let side = tangent.rot90();
+    let head = vec![end + tangent * 4.0, end - side * 4.0, end + side * 4.0];
+    // White under black: seen on dark and light alike.
+    for (width, color) in [(4.0, Color32::WHITE), (1.8, Color32::BLACK)] {
+        painter.add(Shape::line(arc.clone(), Stroke::new(width, color)));
+        painter.add(Shape::convex_polygon(
+            head.clone(),
+            color,
+            Stroke::new(width - 1.8, Color32::WHITE),
+        ));
     }
 }
 
@@ -417,7 +470,7 @@ pub(super) fn update(
                     layer.transform = layers::turned_about(*start, pivot, delta);
                 }
             }
-            ui.ctx().set_cursor_icon(CursorIcon::Alias);
+            rotate_cursor(ui, p);
         }
         _ => {
             let Some(&(id, s)) = drag.layers.first() else {
@@ -446,6 +499,7 @@ pub(super) fn update(
                         r = (r / 15.0).round() * 15.0;
                     }
                     layer.transform.rotation_deg = (r + 180.0).rem_euclid(360.0) - 180.0;
+                    rotate_cursor(ui, p);
                 }
             }
         }
@@ -735,7 +789,7 @@ pub(super) fn hover_cursor(
 ) {
     let hovered_guide = hovered_guide.and_then(|i| doc.guides.get(i));
     let icon = match f.handle_at(doc, selected, p) {
-        Some((_, DragKind::Rotate | DragKind::RotateGroup(_))) => CursorIcon::Alias,
+        Some((_, DragKind::Rotate | DragKind::RotateGroup(_))) => return rotate_cursor(ui, p),
         Some((id, DragKind::Stretch(edge))) => {
             // Resize cursor along the edge's direction on screen.
             let horizontal = doc.layer(id).is_some_and(|l| {

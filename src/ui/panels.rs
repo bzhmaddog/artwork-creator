@@ -229,6 +229,9 @@ struct Runtime {
     /// Panels left out for now, whether open or not (those that have no use while a
     /// template is edited).
     hidden: Vec<PanelId>,
+    /// Each side's width that its contents were found to need, wider than the panels'
+    /// minimum, with the panels docked there then.
+    needed: [Option<(Vec<PanelId>, f32)>; 2],
 }
 
 /// A template is being edited: set by the app each frame, read by [`PanelId::title`].
@@ -818,13 +821,20 @@ impl Layout {
             Side::Left => egui::Panel::left("settings"),
             Side::Right => egui::Panel::right("layers"),
         };
-        let min_width = shown.iter().map(|id| id.min_width()).fold(0.0, f32::max);
+        // Not narrower than the contents need: they would stick out of it, and leave
+        // a gap between the panel and the canvas while it is dragged narrower.
+        let needed = match &self.runtime.needed[side.index()] {
+            Some((panels, width)) if *panels == shown => *width,
+            _ => 0.0,
+        };
+        let min_width = shown.iter().map(|id| id.min_width()).fold(needed, f32::max);
         let response = panel
             .resizable(true)
             .default_size(side.default_width())
             .min_size(min_width)
             .show(ui, |ui| {
                 let top = ui.cursor().top();
+                let width = ui.max_rect().width();
                 let mut contents = 0.0;
                 let heights = self.heights(side, ui.available_height(), &shown);
                 for (k, &(id, height)) in heights.iter().enumerate() {
@@ -851,7 +861,12 @@ impl Layout {
                 }
                 let used = ui.cursor().top() - top;
                 self.set_overhead(ui.ctx(), side, used - contents);
+                // The contents stuck out of the panel.
+                ui.min_rect().width() > width + 0.5
             });
+        if response.inner {
+            self.runtime.needed[side.index()] = Some((shown, response.response.rect.width()));
+        }
         self.set_dock_rect(side, response.response.rect);
     }
 
@@ -1352,6 +1367,79 @@ mod tests {
                 self.frame(vec![]);
             }
         }
+    }
+
+    /// Labels, and in Template a line wider than the left side's minimum width.
+    struct Wide;
+
+    impl Contents for Wide {
+        fn contents(&mut self, ui: &mut Ui, id: PanelId) -> Option<f32> {
+            if id == PanelId::Template {
+                ui.add_sized([320.0, 14.0], egui::Label::new("wide"));
+            }
+            Labels.contents(ui, id)
+        }
+    }
+
+    #[test]
+    fn side_stays_as_wide_as_its_contents_need() {
+        let ctx = egui::Context::default();
+        let mut layout = Layout::default();
+        let mut time = 0.0;
+        // One frame with `events`: the left side's background (its visible part), and
+        // where the canvas starts.
+        let mut frame = |events: Vec<egui::Event>| {
+            time += 0.02;
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 700.0))),
+                time: Some(time),
+                events,
+                ..Default::default()
+            };
+            let mut canvas = Rect::NOTHING;
+            let mut out = ctx.run_ui(input, |ui| {
+                layout.begin_frame(ui.available_rect_before_wrap());
+                layout.show_dock(ui, Side::Left, &mut Wide);
+                layout.show_dock(ui, Side::Right, &mut Labels);
+                egui::CentralPanel::no_frame().show(ui, |ui| canvas = ui.max_rect());
+            });
+            out.textures_delta.clear();
+            let fill = out
+                .shapes
+                .iter()
+                .find_map(|c| match &c.shape {
+                    egui::Shape::Rect(r) if r.rect.left() < 1.0 && r.rect.height() > 600.0 => {
+                        Some(r.rect.intersect(c.clip_rect))
+                    }
+                    _ => None,
+                })
+                .expect("left side drawn");
+            (fill, canvas)
+        };
+        for _ in 0..3 {
+            frame(vec![]);
+        }
+        let (fill, _) = frame(vec![]);
+        // Its right edge dragged far to the left: it stops where the contents need, and
+        // its background reaches the canvas all along.
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        let from = pos2(fill.right() + 1.0, 300.0);
+        frame(vec![egui::Event::PointerMoved(from)]);
+        frame(vec![button(from, true)]);
+        for x in [300.0, 200.0, 100.0, 60.0] {
+            let (fill, canvas) = frame(vec![egui::Event::PointerMoved(pos2(x, 300.0))]);
+            assert!(fill.right() >= 320.0, "{x}: {fill:?}");
+            assert!(
+                canvas.left() - fill.right() <= 1.0,
+                "{x}: {fill:?} {canvas:?}"
+            );
+        }
+        frame(vec![button(pos2(60.0, 300.0), false)]);
     }
 
     #[test]

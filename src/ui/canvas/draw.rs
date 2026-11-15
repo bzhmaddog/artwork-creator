@@ -821,6 +821,14 @@ pub(super) fn paint(
     };
     let locked = doc.effectively_locked(sel);
     let color = if locked { Color32::GRAY } else { ACCENT };
+    // A handle's fill: the accent under the pointer or while dragged, else white.
+    let fill = |hot: Hot| {
+        if state.hot == Some(hot) {
+            color
+        } else {
+            Color32::WHITE
+        }
+    };
     // In the template editor, a shape in no element: an error.
     let orphan = crate::template::edit::is_orphan(doc, sel);
     if let Some(Node::Group(_)) = doc.node(sel) {
@@ -853,7 +861,7 @@ pub(super) fn paint(
                 let (top_mid, rot) = group_rotate_handle(b);
                 let stroke = Stroke::new(1.5, color);
                 painter.line_segment([top_mid, rot], stroke);
-                painter.circle(rot, HANDLE_RADIUS, Color32::WHITE, stroke);
+                painter.circle(rot, HANDLE_RADIUS, fill(Hot::Rotate), stroke);
             }
         }
     } else if let Some(layer) = doc.layer(sel)
@@ -868,7 +876,7 @@ pub(super) fn paint(
         badges(ui, &painter, c, locked, orphan);
         if !locked {
             painter.line_segment([top_mid, rot], stroke);
-            for c in corners {
+            for (i, c) in corners.into_iter().enumerate() {
                 if distorting {
                     // Diamonds: each corner moves on its own.
                     let r = HANDLE_RADIUS * 1.3;
@@ -879,14 +887,14 @@ pub(super) fn paint(
                             c + vec2(0.0, r),
                             c - vec2(r, 0.0),
                         ],
-                        Color32::WHITE,
+                        fill(Hot::Corner(i)),
                         stroke,
                     ));
                 } else {
                     painter.rect(
                         Rect::from_center_size(c, Vec2::splat(HANDLE_RADIUS * 2.0)),
                         1.0,
-                        Color32::WHITE,
+                        fill(Hot::Corner(i)),
                         stroke,
                         StrokeKind::Middle,
                     );
@@ -900,11 +908,11 @@ pub(super) fn paint(
                 let (a, b) = (along * HANDLE_RADIUS * 0.9, across * HANDLE_RADIUS * 0.55);
                 painter.add(Shape::convex_polygon(
                     vec![c - a - b, c + a - b, c + a + b, c - a + b],
-                    Color32::WHITE,
+                    fill(Hot::Edge(i)),
                     stroke,
                 ));
             }
-            painter.circle(rot, HANDLE_RADIUS, Color32::WHITE, stroke);
+            painter.circle(rot, HANDLE_RADIUS, fill(Hot::Rotate), stroke);
         }
     }
 }

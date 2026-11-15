@@ -375,13 +375,14 @@ impl PropertiesForm {
                         .into_iter()
                         .enumerate()
                     {
-                        ui.add(
-                            egui::DragValue::new(&mut self.custom_mm[i])
-                                .range(CUSTOM_PAGE_RANGE_MM)
-                                .speed(1.0)
-                                .fixed_decimals(1)
-                                .prefix(prefix),
-                        );
+                        crate::ui::layers::prefixed(ui, prefix, |ui| {
+                            ui.add(
+                                egui::DragValue::new(&mut self.custom_mm[i])
+                                    .range(CUSTOM_PAGE_RANGE_MM)
+                                    .speed(1.0)
+                                    .fixed_decimals(1),
+                            )
+                        });
                     }
                     crate::ui::layers::unit(ui, "mm");
                 });

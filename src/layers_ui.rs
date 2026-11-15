@@ -9,7 +9,7 @@ use egui::{
 use std::collections::HashMap;
 
 use crate::colors::ColorField;
-use crate::document::{Document, Group, Layer, Node, P2};
+use crate::document::{BlendMode, Document, Group, Layer, Node, P2};
 use crate::effects_ui;
 use crate::i18n::{tr, tr_noop, translate};
 use crate::shape::{self, Cap, DashStyle, Join, ShapeKind};
@@ -20,16 +20,20 @@ use crate::variables::{self, Field};
 
 /// Width of one nesting level in the layer list.
 const INDENT: f32 = 14.0;
+/// How near the line between two rows of the layer list Alt+click clips, in points.
+const CLIP_BAND: f32 = 4.0;
 const THUMB: f32 = 28.0;
 const ICON: f32 = 18.0;
 
 /// State of the layers panel that lasts across frames.
 #[derive(Default)]
 pub struct LayersPanel {
+    /// The layer whose pattern fill is to get an image: the app opens the file dialog.
+    pub pick_pattern: Option<u64>,
+    /// The angle in a group's "Rotate by" field, in degrees clockwise.
+    pub group_turn_deg: f32,
     /// Width and height can be changed separately in Properties.
     pub free_aspect: bool,
-    /// Corner handles on the canvas distort the layer instead of scaling it.
-    pub distort: bool,
     /// What the Align buttons line up with.
     pub align_to: AlignTo,
     /// Open the selected text layer's sections, for a new text layer.
@@ -120,6 +124,8 @@ pub struct LayersOutput {
     pub add_shape: Option<ShapeKind>,
     /// A kind was picked from the Canvas button's menu: add a closed shape to paint in.
     pub add_canvas: Option<ShapeKind>,
+    /// Background was picked from the Shape button's menu: add a background layer.
+    pub add_background: bool,
     /// Cut, Copy or Paste was picked in a row's menu, that row now selected.
     pub edit: Option<Edit>,
     /// A kind was picked from the Element button's menu: add a template element.
@@ -435,8 +441,78 @@ pub fn align(doc: &mut Document, selected: Option<u64>, how: Align, area: (P2, P
     nudge(doc, selected, d)
 }
 
+/// `t` turned by `deg` (clockwise) around `pivot` in page mm: its center goes around,
+/// its rotation adds up (its flips, tilt and distortion, under the rotation, turn with
+/// it).
+pub fn turned_about(
+    mut t: crate::document::Transform,
+    pivot: P2,
+    deg: f32,
+) -> crate::document::Transform {
+    let (sin, cos) = deg.to_radians().sin_cos();
+    let d = [t.center[0] - pivot[0], t.center[1] - pivot[1]];
+    t.center = [
+        pivot[0] + d[0] * cos - d[1] * sin,
+        pivot[1] + d[0] * sin + d[1] * cos,
+    ];
+    t.rotation_deg = (t.rotation_deg + deg + 180.0).rem_euclid(360.0) - 180.0;
+    t
+}
+
+/// The middle of what the unlocked layers of node `id` cover: where a group turns and
+/// is mirrored around.
+pub fn group_middle(doc: &Document, id: u64) -> Option<P2> {
+    let (lo, hi) = layers_bounds(doc, &movable_layers(doc, id))?;
+    Some([(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0])
+}
+
+/// Turns the unlocked layers of group `id` by `deg` (clockwise) around its middle.
+/// Returns whether anything turned.
+pub fn rotate_group(doc: &mut Document, id: u64, deg: f32) -> bool {
+    let Some(pivot) = group_middle(doc, id) else {
+        return false;
+    };
+    if deg % 360.0 == 0.0 {
+        return false;
+    }
+    for id in movable_layers(doc, id) {
+        if let Some(l) = doc.layer_mut(id) {
+            l.transform = turned_about(l.transform, pivot, deg);
+        }
+    }
+    true
+}
+
+/// Mirrors the unlocked layers of group `id` across the middle of what they cover, left
+/// to right (`horizontally`) or top to bottom: each one's center goes to the other side,
+/// its turn the other way, and its own flip is switched (its tilt and distortion, under
+/// the flip, mirror with it). Returns whether anything moved.
+pub fn flip_group(doc: &mut Document, id: u64, horizontally: bool) -> bool {
+    let ids = movable_layers(doc, id);
+    let Some((lo, hi)) = layers_bounds(doc, &ids) else {
+        return false;
+    };
+    let (axis, mid) = if horizontally {
+        (0, (lo[0] + hi[0]) / 2.0)
+    } else {
+        (1, (lo[1] + hi[1]) / 2.0)
+    };
+    for id in ids {
+        let Some(l) = doc.layer_mut(id) else { continue };
+        let t = &mut l.transform;
+        t.center[axis] = 2.0 * mid - t.center[axis];
+        t.rotation_deg = -t.rotation_deg;
+        if horizontally {
+            t.flip_x ^= true;
+        } else {
+            t.flip_y ^= true;
+        }
+    }
+    true
+}
+
 /// Ids of the image layers that move with node `id`: itself or the unlocked layers it
-/// holds.
+/// holds, but backgrounds, which stay on the outline.
 pub fn movable_layers(doc: &Document, id: u64) -> Vec<u64> {
     let Some(path) = doc.path_of(id) else {
         return Vec::new();
@@ -447,6 +523,7 @@ pub fn movable_layers(doc: &Document, id: u64) -> Vec<u64> {
     doc.leaves()
         .into_iter()
         .filter(|leaf| leaf.path.starts_with(&path) && !leaf.locked)
+        .filter(|leaf| !crate::background::is_fixed(leaf.layer))
         .map(|leaf| leaf.layer.id)
         .collect()
 }
@@ -468,12 +545,16 @@ pub fn group(doc: &mut Document, selected: &mut Option<u64>) -> bool {
         visible: true,
         locked: false,
         opacity: 1.0,
+        clip: false,
+        blend: crate::document::BlendMode::Normal,
         expanded: true,
         children: Vec::new(),
         element: None,
     };
     let path = match selected.and_then(|s| doc.remove(s)) {
-        Some((path, node)) => {
+        Some((path, mut node)) => {
+            // The group takes the node's place over the layer below, clipped or not.
+            group.clip = std::mem::take(node.clip_mut());
             group.children.push(node);
             path
         }
@@ -508,9 +589,35 @@ pub fn ungroup(doc: &mut Document, selected: &mut Option<u64>) -> bool {
             }
         }
         *opacity_mut(&mut child) *= g.opacity;
+        // Clipped as the group was, to the layer below it.
+        *child.clip_mut() |= g.clip;
         doc.insert(&path, child);
         *path.last_mut().unwrap() += 1;
     }
+    true
+}
+
+/// Whether the node can be clipped to the layer below: there is one in its list.
+pub fn can_clip(doc: &Document, id: u64) -> bool {
+    doc.path_of(id)
+        .and_then(|p| p.last().copied())
+        .is_some_and(|i| i > 0)
+}
+
+/// Turns "Clip to layer below" on or off for the node. Off always works; on needs a
+/// layer below (`can_clip`).
+pub fn toggle_clip(doc: &mut Document, id: Option<u64>) -> bool {
+    let Some(id) = id else {
+        return false;
+    };
+    let can = can_clip(doc, id);
+    let Some(clip) = doc.node_mut(id).map(Node::clip_mut) else {
+        return false;
+    };
+    if !*clip && !can {
+        return false;
+    }
+    *clip ^= true;
     true
 }
 
@@ -800,6 +907,21 @@ fn folder_icon(ui: &mut Ui) {
     p.rect_filled(body, 2.0, c.gamma_multiply(0.7));
 }
 
+/// Bent arrow before a clipped node's thumbnail, pointing down to the layer it is
+/// clipped to.
+fn clip_mark(ui: &mut Ui) {
+    let (rect, r) = ui.allocate_exact_size(vec2(ICON * 0.8, ICON), Sense::hover());
+    r.on_hover_text(tr!("CLIPPED_TO_LAYER_BELOW"));
+    let c = ui.visuals().widgets.inactive.fg_stroke.color;
+    let stroke = Stroke::new(1.5, c);
+    let k = rect.center();
+    let p = ui.painter();
+    p.line_segment([k + vec2(-5.0, -5.0), k + vec2(1.0, -5.0)], stroke);
+    p.line_segment([k + vec2(1.0, -5.0), k + vec2(1.0, 5.0)], stroke);
+    p.line_segment([k + vec2(-2.5, 2.0), k + vec2(1.0, 5.5)], stroke);
+    p.line_segment([k + vec2(4.5, 2.0), k + vec2(1.0, 5.5)], stroke);
+}
+
 /// Triangle that opens or closes a group in the list.
 fn expander(ui: &mut Ui, expanded: &mut bool) {
     let (rect, r) = ui.allocate_exact_size(vec2(ICON * 0.8, ICON), Sense::click());
@@ -854,6 +976,8 @@ pub enum Tool {
     Brush(crate::paint::BrushKind),
     /// Cutting painted strokes: an eraser.
     Eraser,
+    /// Picking a color on the canvas: a pipette.
+    Eyedropper,
     /// Emptying a shape of its paint: a frame with a stroke in it, crossed out.
     ClearPaint,
     Align(Align),
@@ -1254,6 +1378,20 @@ pub fn draw_tool(p: &egui::Painter, rect: Rect, tool: Tool, c: Color32, back: Co
             p.line_segment([at(2.0, 2.0), at(7.0, 7.0)], x);
             p.line_segment([at(7.0, 2.0), at(2.0, 7.0)], x);
         }
+        Tool::Eyedropper => {
+            // Along the diagonal: the bulb at the top right, the collar across, then the
+            // glass tube down to the tip at the bottom left.
+            let d = vec2(1.0, -1.0).normalized();
+            let n = d.rot90();
+            let tip = at(-7.0, 7.0);
+            let collar = tip + d * 11.0;
+            p.add(Shape::closed_line(
+                vec![tip + d * 1.5, collar + n * 1.8, collar - n * 1.8],
+                s,
+            ));
+            p.line_segment([collar + n * 3.5, collar - n * 3.5], Stroke::new(2.0, c));
+            p.circle_filled(collar + d * 3.5, 2.8, c);
+        }
         Tool::Eraser => {
             // A block on the diagonal, its lower part filled.
             let d = vec2(1.0, -1.0).normalized();
@@ -1589,6 +1727,21 @@ pub fn show(
                 out.add_shape = Some(ShapeKind::Path);
                 ui.close();
             }
+            // A template has no outline of its own to fill.
+            if !state.template_mode {
+                let mut b = Button::new(tr!("ADD_BACKGROUND_LAYER"));
+                if let Some(s) = state.keys.get(&Command::AddBackground) {
+                    b = b.shortcut_text(s.as_str());
+                }
+                if ui
+                    .add(b)
+                    .on_hover_text(tr!("ADD_BACKGROUND_LAYER_HINT"))
+                    .clicked()
+                {
+                    out.add_background = true;
+                    ui.close();
+                }
+            }
         });
         // A template has no canvases, groups or stacking order: only shapes in its
         // elements.
@@ -1664,6 +1817,7 @@ pub fn show(
     let mut pending_drop = None;
     let mut pending_duplicate = None;
     let mut pending_edit = None;
+    let mut pending_clip = None;
     // The list takes the rest of the panel's height.
     let list = egui::ScrollArea::vertical()
         .id_salt("layer_list")
@@ -1679,9 +1833,19 @@ pub fn show(
             }
             let full = ui.max_rect();
             let broken_links = variables::broken_links_by_node(doc);
-            for row in rows(doc) {
+            let all_rows = rows(doc);
+            for (k, row) in all_rows.iter().enumerate() {
+                // The row below, when it is the node right under this one in the same
+                // list: Alt+click between them clips this one to it.
+                let sibling_below = all_rows.get(k + 1).filter(|b| {
+                    b.path.len() == row.path.len()
+                        && b.path[..b.path.len() - 1] == row.path[..row.path.len() - 1]
+                        && b.path.last().map(|i| i + 1) == row.path.last().copied()
+                });
                 // The template's reference: at the bottom, apart from the elements.
                 let reference = crate::template_edit::is_reference(doc, row.id);
+                let can_clip_row = !state.template_mode && row.path.last().is_some_and(|&i| i > 0);
+                let clipped = doc.node_at(&row.path).is_some_and(Node::clip);
                 if reference {
                     ui.separator();
                 }
@@ -1698,6 +1862,9 @@ pub fn show(
                         Node::Layer(_) => {
                             ui.add_space(ICON * 0.8);
                         }
+                    }
+                    if node.clip() && row.path.last().is_some_and(|&i| i > 0) {
+                        clip_mark(ui);
                     }
                     let (visible, locked) = match node {
                         Node::Group(g) => (&mut g.visible, &mut g.locked),
@@ -1816,6 +1983,19 @@ pub fn show(
                                 {
                                     pending_duplicate = Some(row.id);
                                 }
+                                // A template has no stacking order to clip with.
+                                if !state.template_mode {
+                                    let clip =
+                                        entry(tr_noop!("CLIP_TO_LAYER_BELOW"), Command::Clip)
+                                            .selected(clipped);
+                                    if ui
+                                        .add_enabled(clipped || can_clip_row, clip)
+                                        .on_hover_text(tr!("CLIP_TO_LAYER_BELOW_HINT"))
+                                        .clicked()
+                                    {
+                                        pending_clip = Some(row.id);
+                                    }
+                                }
                             });
                         }
                         if r.dragged()
@@ -1861,6 +2041,32 @@ pub fn show(
                         background,
                         egui::epaint::RectShape::filled(rect.expand2(vec2(0.0, 1.0)), 2.0, fill),
                     );
+                }
+                // Alt over the line between this row and the layer right under it: a mark
+                // on the line, and a click clips this one to that layer (or unclips it).
+                if !state.template_mode
+                    && sibling_below.is_some()
+                    && let Some(p) = ui.ctx().pointer_hover_pos()
+                    && ui.input(|i| i.modifiers.alt)
+                    && (p.y - rect.bottom()).abs() <= CLIP_BAND
+                    && rect.x_range().contains(p.x)
+                    && DragAndDrop::payload::<DraggedNode>(ui.ctx()).is_none()
+                {
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::Alias);
+                    let left = rect.left() + row.depth as f32 * INDENT;
+                    let stroke = Stroke::new(1.0, ui.visuals().selection.stroke.color);
+                    ui.painter().add(egui::Shape::dashed_line(
+                        &[
+                            egui::pos2(left, rect.bottom()),
+                            egui::pos2(rect.right(), rect.bottom()),
+                        ],
+                        stroke,
+                        4.0,
+                        3.0,
+                    ));
+                    if ui.input(|i| i.pointer.primary_clicked()) {
+                        pending_clip = Some(row.id);
+                    }
                 }
                 let hover = ui.ctx().pointer_hover_pos().filter(|p| rect.contains(*p));
                 if let (Some(p), Some(dragged)) =
@@ -1919,6 +2125,9 @@ pub fn show(
     if let Some(id) = pending_duplicate {
         *selected = Some(id);
         out.changed |= duplicate(doc, selected);
+    }
+    if let Some(id) = pending_clip {
+        out.changed |= toggle_clip(doc, Some(id));
     }
     if let Some((id, edit)) = pending_edit {
         *selected = Some(id);
@@ -1989,6 +2198,7 @@ fn text_section(
     let mut changed = false;
     // A new text layer opens the section, so its settings show while it is typed.
     let open = state.show_text;
+    let text_scale = layer.transform.scale[1].abs();
     section(
         ui,
         "text_props",
@@ -2129,16 +2339,23 @@ fn text_section(
                     color: &mut t.color,
                     link: &mut link,
                     gradient: &mut t.gradient,
+                    pattern: Some(&mut t.pattern),
+                    // The text's units are its scale's mm.
+                    units_per_mm: 1.0 / text_scale.max(1e-6),
                     alpha: true,
+                    pick_pattern: false,
                 };
                 ui.horizontal(|ui| {
                     changed |= crate::gradient_ui::inline(ui, ("text", layer.id), &mut fill);
                 });
                 ui.end_row();
-                if fill.gradient.is_some() {
+                if fill.has_rows() {
                     ui.label("");
                     changed |= crate::gradient_ui::rows(ui, ("text", layer.id), &mut fill);
                     ui.end_row();
+                }
+                if fill.pick_pattern {
+                    state.pick_pattern = Some(layer.id);
                 }
                 if let Some(name) = link {
                     layer.color_links.insert(ColorField::Text, name);
@@ -2423,6 +2640,7 @@ fn shape_section(
     layer: &mut Layer,
     locked: bool,
     edit_points: &mut Option<u64>,
+    pick_pattern: &mut Option<u64>,
     delete_key: &str,
     plain: bool,
 ) -> bool {
@@ -2543,7 +2761,10 @@ fn shape_section(
                         color: &mut s.fill_color,
                         link: &mut link,
                         gradient: &mut s.fill_gradient,
+                        pattern: Some(&mut s.fill_pattern),
+                        units_per_mm: 1.0,
                         alpha: true,
+                        pick_pattern: false,
                     };
                     ui.horizontal(|ui| {
                         changed |= ui.checkbox(&mut s.fill, "").changed();
@@ -2552,12 +2773,15 @@ fn shape_section(
                         });
                     });
                     ui.end_row();
-                    if fill.gradient.is_some() {
+                    if fill.has_rows() {
                         ui.label("");
                         ui.add_enabled_ui(s.fill, |ui| {
                             changed |= crate::gradient_ui::rows(ui, ("fill", id), &mut fill);
                         });
                         ui.end_row();
+                    }
+                    if fill.pick_pattern {
+                        *pick_pattern = Some(id);
                     }
                     if let Some(name) = link {
                         layer.color_links.insert(ColorField::Fill, name);
@@ -2596,7 +2820,10 @@ fn shape_section(
                     color: &mut s.stroke_color,
                     link: &mut link,
                     gradient: &mut s.stroke_gradient,
+                    pattern: None,
+                    units_per_mm: 1.0,
                     alpha: true,
+                    pick_pattern: false,
                 };
                 ui.add_enabled_ui(s.stroke, |ui| {
                     ui.horizontal(|ui| {
@@ -2755,7 +2982,9 @@ fn properties(
     };
     let page_center = doc.page_center();
     let page = doc.page_mm();
-    let locked = doc.effectively_locked(id);
+    // A background stays on the outline: placed like a locked layer.
+    let fixed = doc.layer(id).is_some_and(crate::background::is_fixed);
+    let locked = doc.effectively_locked(id) || fixed;
     // Align the selection with the page or the template outline.
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 2.0;
@@ -2797,6 +3026,10 @@ fn properties(
         }
     });
     ui.add_space(4.0);
+    if fixed {
+        crate::callout::callout(ui, crate::callout::Tone::Info, tr!("BACKGROUND_LAYER_NOTE"));
+        ui.add_space(4.0);
+    }
 
     // Shape layers a text can follow, by name.
     let shapes: Vec<(u64, String)> = doc
@@ -2811,6 +3044,46 @@ fn properties(
     // The template's reference: its place, size, turn, opacity and visibility, saved with
     // the template; nothing it wouldn't keep (flips, distortion, effects).
     let reference = crate::template_edit::is_reference(doc, id);
+    let can_clip = can_clip(doc, id);
+    let clip_hint = state.hint(tr!("CLIP_TO_LAYER_BELOW_HINT"), Command::Clip);
+    // How the layer or group mixes with what lies below.
+    let blend_row = |ui: &mut Ui, blend: &mut BlendMode| {
+        ui.label(tr!("BLEND_MODE"));
+        let mut changed = false;
+        egui::ComboBox::from_id_salt("blend_mode")
+            .selected_text(translate(blend.name_key()))
+            .show_ui(ui, |ui| {
+                for (k, mode) in BlendMode::ALL.into_iter().enumerate() {
+                    // A line between the families of `BlendMode::ALL`.
+                    if matches!(k, 1 | 4 | 7 | 10 | 12) {
+                        ui.separator();
+                    }
+                    changed |= ui
+                        .selectable_value(blend, mode, translate(mode.name_key()))
+                        .changed();
+                }
+            })
+            .response
+            .on_hover_text(tr!("BLEND_MODE_HINT"));
+        ui.end_row();
+        changed
+    };
+    // Turns clipping off, or on when there is a layer below.
+    let clip_row = |ui: &mut Ui, clip: &mut bool| {
+        ui.label("");
+        let r = ui
+            .add_enabled(
+                *clip || can_clip,
+                egui::Checkbox::new(clip, tr!("CLIP_TO_LAYER_BELOW")),
+            )
+            .on_hover_text(&clip_hint)
+            .on_disabled_hover_text(&clip_hint);
+        ui.end_row();
+        r.changed()
+    };
+    // A group's Flip H or V, or turn, done once it is no longer borrowed.
+    let mut group_flip = None;
+    let mut group_turn = None;
     match doc.node_mut(id) {
         Some(Node::Group(g)) => {
             // A group has only the properties all layers have.
@@ -2831,10 +3104,15 @@ fn properties(
                             ui.label(translate(tag.kind.label()));
                             ui.end_row();
                             ui.label(tr!("ELEMENT_COLOR"));
-                            out.changed |= ui
-                                .color_edit_button_srgb(&mut tag.color)
+                            let [r, g, b] = tag.color;
+                            let mut c = [r, g, b, 255];
+                            if crate::colors::button(ui, &mut c, false, None)
                                 .on_hover_text(tr!("ELEMENT_LINE_COLOR"))
-                                .changed();
+                                .changed()
+                            {
+                                tag.color = [c[0], c[1], c[2]];
+                                out.changed = true;
+                            }
                             ui.end_row();
                             return;
                         }
@@ -2848,6 +3126,62 @@ fn properties(
                             .on_hover_text(tr!("GROUP_OPACITY_HINT"))
                             .changed();
                         ui.end_row();
+                        out.changed |= blend_row(ui, &mut g.blend);
+                        out.changed |= clip_row(ui, &mut g.clip);
+                    });
+                    if plain {
+                        return;
+                    }
+                    ui.add_space(4.0);
+                    ui.add_enabled_ui(!locked, |ui| {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
+                            if ui
+                                .button(tr!("FLIP_LAYER_HORIZONTALLY"))
+                                .on_hover_text(tr!("FLIP_GROUP_HORIZONTALLY_HINT"))
+                                .clicked()
+                            {
+                                group_flip = Some(true);
+                            }
+                            if ui
+                                .button(tr!("FLIP_LAYER_VERTICALLY"))
+                                .on_hover_text(tr!("FLIP_GROUP_VERTICALLY_HINT"))
+                                .clicked()
+                            {
+                                group_flip = Some(false);
+                            }
+                            ui.add_space(4.0);
+                            for (deg, hint) in [
+                                (-90.0, tr!("ROTATE_GROUP_LEFT_HINT")),
+                                (90.0, tr!("ROTATE_GROUP_RIGHT_HINT")),
+                            ] {
+                                if ui.button(format!("{deg:+}°")).on_hover_text(hint).clicked() {
+                                    group_turn = Some(deg);
+                                }
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 4.0;
+                            ui.label(tr!("ROTATE_GROUP_BY"));
+                            ui.add(
+                                DragValue::new(&mut state.group_turn_deg)
+                                    .range(-360.0..=360.0)
+                                    .speed(0.5)
+                                    .fixed_decimals(1),
+                            )
+                            .on_hover_text(tr!("ROTATE_GROUP_BY_HINT"));
+                            unit(ui, "°");
+                            if ui
+                                .add_enabled(
+                                    state.group_turn_deg % 360.0 != 0.0,
+                                    Button::new(tr!("ROTATE_GROUP")),
+                                )
+                                .on_hover_text(tr!("ROTATE_GROUP_BY_HINT"))
+                                .clicked()
+                            {
+                                group_turn = Some(state.group_turn_deg);
+                            }
+                        });
                     });
                 },
             );
@@ -2872,6 +3206,10 @@ fn properties(
                                 .add(Slider::new(&mut layer.opacity, 0.0..=1.0).fixed_decimals(2))
                                 .changed();
                             ui.end_row();
+                        }
+                        if !plain && !reference {
+                            out.changed |= blend_row(ui, &mut layer.blend);
+                            out.changed |= clip_row(ui, &mut layer.clip);
                         }
 
                         ui.add_enabled_ui(!locked, |ui| ui.label(tr!("LAYER_POSITION")));
@@ -3048,11 +3386,19 @@ fn properties(
                             if reference {
                                 return;
                             }
-                            if ui.button(tr!("FLIP_LAYER_HORIZONTALLY")).clicked() {
+                            if ui
+                                .button(tr!("FLIP_LAYER_HORIZONTALLY"))
+                                .on_hover_text(tr!("FLIP_LAYER_HORIZONTALLY_HINT"))
+                                .clicked()
+                            {
                                 layer.transform.flip_x ^= true;
                                 out.changed = true;
                             }
-                            if ui.button(tr!("FLIP_LAYER_VERTICALLY")).clicked() {
+                            if ui
+                                .button(tr!("FLIP_LAYER_VERTICALLY"))
+                                .on_hover_text(tr!("FLIP_LAYER_VERTICALLY_HINT"))
+                                .clicked()
+                            {
                                 layer.transform.flip_y ^= true;
                                 out.changed = true;
                             }
@@ -3063,16 +3409,6 @@ fn properties(
                     ui.add_enabled_ui(!locked && !reference, |ui| {
                         ui.horizontal_wrapped(|ui| {
                             ui.spacing_mut().item_spacing = vec2(4.0, 4.0);
-                            // Shows what the corner handles do right now: Ctrl swaps the mode
-                            // while held.
-                            let ctrl = ui.input(|i| i.modifiers.command);
-                            if ui
-                                .selectable_label(state.distort != ctrl, tr!("DISTORT_LAYER"))
-                                .on_hover_text(tr!("DISTORT_LAYER_HINT"))
-                                .clicked()
-                            {
-                                state.distort = !state.distort;
-                            }
                             if ui
                                 .add_enabled(
                                     layer.transform.is_distorted(),
@@ -3081,6 +3417,18 @@ fn properties(
                                 .clicked()
                             {
                                 layer.transform.distort = Default::default();
+                                out.changed = true;
+                            }
+                            if ui
+                                .add_enabled(
+                                    layer.transform.is_tilted(),
+                                    Button::new(tr!("RESET_TILT")),
+                                )
+                                .clicked()
+                            {
+                                layer.transform.tilt_x_deg = 0.0;
+                                layer.transform.tilt_y_deg = 0.0;
+                                layer.transform.perspective = crate::document::DEFAULT_PERSPECTIVE;
                                 out.changed = true;
                             }
                         });
@@ -3100,6 +3448,7 @@ fn properties(
                             layer,
                             locked,
                             &mut state.edit_points,
+                            &mut state.pick_pattern,
                             &delete,
                             plain,
                         );
@@ -3122,6 +3471,12 @@ fn properties(
             }
         }
         None => {}
+    }
+    if let Some(horizontally) = group_flip {
+        out.changed |= flip_group(doc, id, horizontally);
+    }
+    if let Some(deg) = group_turn {
+        out.changed |= rotate_group(doc, id, deg);
     }
 }
 
@@ -3195,7 +3550,7 @@ mod tests {
         fn frame(&mut self, events: Vec<egui::Event>) -> Vec<(String, Pos2)> {
             self.time += 0.02;
             let input = egui::RawInput {
-                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 800.0))),
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(400.0, 1000.0))),
                 time: Some(self.time),
                 events,
                 ..Default::default()
@@ -3665,6 +4020,212 @@ mod tests {
         assert_eq!((l.opacity, l.visible), (0.5, false));
     }
 
+    /// The layer list and Properties with layers clipped to a text layer, to look at:
+    /// `CLIP_PANEL_PREVIEW=out.png cargo test clip_panel_preview -- --ignored`.
+    #[test]
+    #[ignore]
+    fn clip_panel_preview() {
+        let Ok(path) = std::env::var("CLIP_PANEL_PREVIEW") else {
+            return;
+        };
+        let t = text::new_layer(2, "Title", text::BUILTIN_FAMILY.into(), [50.0, 50.0]);
+        let mut a = layer(3);
+        *a.clip_mut() = true;
+        let mut b = layer(4);
+        *b.clip_mut() = true;
+        let doc = std::cell::RefCell::new(doc_with(vec![layer(1), Node::Layer(Box::new(t)), a, b]));
+        let state = std::cell::RefCell::new(LayersPanel::default());
+        crate::preview::render(&path, vec2(320.0, 560.0), |ui| {
+            let (mut doc, mut state) = (doc.borrow_mut(), state.borrow_mut());
+            let mut sel = Some(3);
+            show(ui, &mut doc, &mut sel, &mut state);
+            ui.separator();
+            properties_panel(
+                ui,
+                &mut doc,
+                sel,
+                &mut state,
+                None,
+                &FontLibrary::builtin_only(),
+            );
+        });
+    }
+
+    #[test]
+    fn flipping_a_group_mirrors_it_as_a_whole() {
+        // Two 10 x 10 mm squares side by side, the right one turned and tilted: the
+        // group covers [0, 30] x [0, 10] mm.
+        let square = |id: u64, x: f32| {
+            let mut l = Layer::new(id, format!("l{id}"), "x.png".into());
+            l.size_px = [10, 10];
+            l.transform.center = [x, 5.0];
+            l
+        };
+        let mut b = square(2, 25.0);
+        b.transform.rotation_deg = 20.0;
+        b.transform.tilt_y_deg = 15.0;
+        let mut d = doc_with(vec![Node::Group(Group {
+            id: 10,
+            name: "g".into(),
+            visible: true,
+            locked: false,
+            opacity: 1.0,
+            clip: false,
+            blend: crate::document::BlendMode::Normal,
+            expanded: true,
+            children: vec![
+                Node::Layer(Box::new(square(1, 5.0))),
+                Node::Layer(Box::new(b)),
+            ],
+            element: None,
+        })]);
+        let mirrored = |p: P2, mid: f32| [2.0 * mid - p[0], p[1]];
+        let before: Vec<[P2; 4]> = [1, 2].map(|id| d.layer(id).unwrap().corners()).into();
+        let (lo, hi) = layers_bounds(&d, &[1, 2]).unwrap();
+        let mid = (lo[0] + hi[0]) / 2.0;
+        assert!(flip_group(&mut d, 10, true));
+        for (k, id) in [1, 2].into_iter().enumerate() {
+            let after = d.layer(id).unwrap().corners();
+            // The mirror image of each corner is one of the corners now.
+            for p in before[k] {
+                let m = mirrored(p, mid);
+                assert!(
+                    after
+                        .iter()
+                        .any(|q| (q[0] - m[0]).abs() < 1e-3 && (q[1] - m[1]).abs() < 1e-3),
+                    "layer {id}: {m:?} in {after:?}"
+                );
+            }
+        }
+        let t = &d.layer(2).unwrap().transform;
+        assert!(t.flip_x && t.rotation_deg == -20.0 && t.tilt_y_deg == 15.0);
+        // Twice gives it back.
+        assert!(flip_group(&mut d, 10, true));
+        assert_eq!(d.layer(2).unwrap().corners(), before[1]);
+    }
+
+    #[test]
+    fn rotating_a_group_turns_it_as_a_whole() {
+        let square = |id: u64, x: f32| {
+            let mut l = Layer::new(id, format!("l{id}"), "x.png".into());
+            l.size_px = [10, 10];
+            l.transform.center = [x, 5.0];
+            l
+        };
+        let mut b = square(2, 25.0);
+        b.transform.rotation_deg = 20.0;
+        b.transform.flip_x = true;
+        let mut d = doc_with(vec![Node::Group(Group {
+            id: 10,
+            name: "g".into(),
+            visible: true,
+            locked: false,
+            opacity: 1.0,
+            clip: false,
+            blend: crate::document::BlendMode::Normal,
+            expanded: true,
+            children: vec![
+                Node::Layer(Box::new(square(1, 5.0))),
+                Node::Layer(Box::new(b)),
+            ],
+            element: None,
+        })]);
+        let mid = group_middle(&d, 10).unwrap();
+        // A quarter turn clockwise with y down: (x, y) -> (-y, x) around the middle.
+        let turned = |p: P2| [mid[0] - (p[1] - mid[1]), mid[1] + (p[0] - mid[0])];
+        let before: Vec<[P2; 4]> = [1, 2].map(|id| d.layer(id).unwrap().corners()).into();
+        assert!(rotate_group(&mut d, 10, 90.0));
+        for (k, id) in [1, 2].into_iter().enumerate() {
+            let after = d.layer(id).unwrap().corners();
+            for (p, q) in before[k].iter().zip(after) {
+                let t = turned(*p);
+                assert!(
+                    (q[0] - t[0]).abs() < 1e-3 && (q[1] - t[1]).abs() < 1e-3,
+                    "layer {id}: {t:?} vs {q:?}"
+                );
+            }
+        }
+        assert_eq!(d.layer(2).unwrap().transform.rotation_deg, 110.0);
+        assert!(!rotate_group(&mut d, 10, 360.0), "a full turn does nothing");
+    }
+
+    #[test]
+    fn reset_tilt_clears_only_the_tilt() {
+        let mut l = Layer::new(1, "l1".into(), "x.png".into());
+        l.transform.tilt_x_deg = 20.0;
+        l.transform.tilt_y_deg = -10.0;
+        l.transform.perspective = 0.9;
+        l.transform.rotation_deg = 30.0;
+        let mut h = Harness::new(doc_with(vec![Node::Layer(Box::new(l))]));
+        h.selected = Some(1);
+        h.frame(vec![]);
+        let button = h.label("Reset 3D tilt");
+        h.click(button);
+        let t = &h.doc.layer(1).unwrap().transform;
+        assert_eq!((t.tilt_x_deg, t.tilt_y_deg), (0.0, 0.0));
+        assert_eq!(t.perspective, crate::document::DEFAULT_PERSPECTIVE);
+        assert_eq!(t.rotation_deg, 30.0, "the rotation stays");
+    }
+
+    /// A group's Properties, to look at them:
+    /// `GROUP_PANEL_PREVIEW=out.png cargo test group_panel_preview -- --ignored`.
+    #[test]
+    #[ignore]
+    fn group_panel_preview() {
+        let Ok(path) = std::env::var("GROUP_PANEL_PREVIEW") else {
+            return;
+        };
+        let doc = std::cell::RefCell::new(doc_with(vec![layer(1), layer(2)]));
+        let state = std::cell::RefCell::new(LayersPanel {
+            group_turn_deg: 12.5,
+            ..Default::default()
+        });
+        {
+            let mut sel = Some(2);
+            group(&mut doc.borrow_mut(), &mut sel);
+        }
+        crate::preview::render(&path, vec2(320.0, 300.0), |ui| {
+            let (mut doc, mut state) = (doc.borrow_mut(), state.borrow_mut());
+            properties_panel(
+                ui,
+                &mut doc,
+                Some(100),
+                &mut state,
+                None,
+                &FontLibrary::builtin_only(),
+            );
+        });
+    }
+
+    #[test]
+    fn clip_toggles_only_with_a_layer_below() {
+        let mut d = doc_with(vec![layer(1), layer(2)]);
+        // The bottom layer has nothing below to clip to.
+        assert!(!toggle_clip(&mut d, Some(1)));
+        assert!(!d.node(1).unwrap().clip());
+        assert!(toggle_clip(&mut d, Some(2)));
+        assert!(d.node(2).unwrap().clip());
+        assert!(toggle_clip(&mut d, Some(2)));
+        assert!(!d.node(2).unwrap().clip());
+        // Moved to the bottom while clipped, it can still be turned off.
+        *d.node_mut(1).unwrap().clip_mut() = true;
+        assert!(toggle_clip(&mut d, Some(1)));
+        assert!(!d.node(1).unwrap().clip());
+    }
+
+    #[test]
+    fn grouping_keeps_clipping_to_the_layer_below() {
+        let mut d = doc_with(vec![layer(1), layer(2)]);
+        *d.node_mut(2).unwrap().clip_mut() = true;
+        let mut sel = Some(2);
+        assert!(group(&mut d, &mut sel));
+        assert_eq!(shape(&d.layers), "1 100[2]");
+        assert!(d.node(100).unwrap().clip(), "the group is clipped");
+        assert!(!d.node(2).unwrap().clip(), "its layer no longer is");
+        assert!(ungroup(&mut d, &mut sel));
+        assert!(d.node(2).unwrap().clip(), "clipped again once ungrouped");
+    }
+
     #[test]
     fn steps_enter_and_leave_groups() {
         let mut d = doc_with(vec![layer(1), layer(2)]);
@@ -3971,6 +4532,8 @@ mod tests {
                     visible: true,
                     locked: false,
                     opacity: 1.0,
+                    clip: false,
+                    blend: crate::document::BlendMode::Normal,
                     expanded: false,
                     children: vec![Node::Layer(Box::new(inner))],
                     element: None,

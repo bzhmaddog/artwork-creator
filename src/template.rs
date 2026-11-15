@@ -788,18 +788,9 @@ impl Template {
     }
 }
 
-/// Finds the templates folder: next to the executable first, then the working directory.
+/// Finds the templates folder (see [`crate::shipped_dir`]).
 pub fn templates_dir() -> Option<PathBuf> {
-    let mut candidates = Vec::new();
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent()
-    {
-        candidates.push(dir.join("templates"));
-    }
-    if let Ok(cwd) = std::env::current_dir() {
-        candidates.push(cwd.join("templates"));
-    }
-    candidates.into_iter().find(|p| p.is_dir())
+    crate::shipped_dir("templates")
 }
 
 /// The user's templates folder, in the app's data folder; it may not exist yet.

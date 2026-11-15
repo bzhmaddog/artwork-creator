@@ -76,6 +76,16 @@ pub fn load(path: &Path) -> Result<(Document, ExportSettings), String> {
             .or_insert_with_key(|name| read_entry(&mut zip, name).ok().map(Arc::new))
             .clone();
     });
+    // Pattern tiles.
+    doc.for_each_pattern_mut(|p| {
+        let name = p.source.to_string_lossy().replace('\\', "/");
+        if name.starts_with(IMAGE_DIR) {
+            p.data = images
+                .entry(name)
+                .or_insert_with_key(|name| read_entry(&mut zip, name).ok().map(Arc::new))
+                .clone();
+        }
+    });
     // A text's fallback fonts.
     doc.for_each_layer_mut(|layer| {
         for f in layer.text.iter_mut().flat_map(|t| &mut t.fallbacks) {
@@ -141,8 +151,9 @@ fn read_entry(zip: &mut ZipArchive<Cursor<Vec<u8>>>, name: &str) -> Result<Vec<u
 }
 
 /// Saves the project as an archive with all its images and fonts. Returns the names of
-/// layers whose image could not be included because it never loaded (missing file);
-/// they keep their link to the file on disk. Text layers whose font isn't loaded, or
+/// layers whose image could not be included because it never loaded (missing file),
+/// and the files of pattern fills that never loaded; they keep their link to the file
+/// on disk. Text layers whose font isn't loaded, or
 /// whose license forbids embedding it, keep their link to the font file and will look
 /// for their font family where the project is opened. Writes to a temporary file first, so a failed save
 /// leaves an existing project untouched.
@@ -172,6 +183,16 @@ pub fn save(doc: &Document, export: &ExportSettings, path: &Path) -> Result<Vec<
             }
             None => missing.push(layer.name.clone()),
         }
+    });
+    doc.for_each_pattern_mut(|p| match &p.data {
+        Some(data) => {
+            let name = entry_name(data, &p.source, false);
+            if !images.iter().any(|(n, _)| *n == name) {
+                images.push((name.clone(), data.clone()));
+            }
+            p.source = PathBuf::from(name);
+        }
+        None => missing.push(p.source.display().to_string()),
     });
     let json = serde_json::to_string(&doc).map_err(|e| e.to_string())?;
     let json = with_export(&json, export)?;
@@ -337,6 +358,42 @@ mod tests {
         let l = back.layer(1).unwrap();
         assert_eq!(l.shape, want);
         assert!(l.source.as_os_str().is_empty() && l.data.is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn pattern_images_go_in_the_archive() {
+        use crate::shape::{self, ShapeKind};
+        let dir = std::env::temp_dir().join(format!("artwork-patterns-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let tile = Arc::new(png([10, 200, 30]));
+        let pattern = |angle_deg| crate::pattern::Pattern {
+            source: "/elsewhere/tile.png".into(),
+            size: 7.0,
+            angle_deg,
+            offset: [1.0, 2.0],
+            data: Some(tile.clone()),
+            tile: None,
+        };
+        let mut doc = Document {
+            background_pattern: Some(pattern(0.0)),
+            ..Default::default()
+        };
+        let mut l = shape::new_layer(1, ShapeKind::Rectangle, [50.0, 50.0]);
+        l.shape.as_mut().unwrap().fill_pattern = Some(pattern(30.0));
+        doc.layers.push(Node::Layer(Box::new(l)));
+        let path = dir.join("p.artwork");
+        let missing = save(&doc, &ExportSettings::default(), &path).unwrap();
+        assert!(missing.is_empty());
+        let mut back = load(&path).unwrap().0;
+        let mut found = Vec::new();
+        back.for_each_pattern_mut(|p| {
+            assert_eq!(p.data.as_deref(), Some(&*tile), "its image");
+            assert!(p.source.starts_with(IMAGE_DIR.trim_end_matches('/')));
+            p.load().unwrap();
+            found.push((p.size, p.angle_deg, p.offset));
+        });
+        assert_eq!(found, [(7.0, 0.0, [1.0, 2.0]), (7.0, 30.0, [1.0, 2.0])]);
         std::fs::remove_dir_all(&dir).ok();
     }
 

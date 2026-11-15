@@ -17,6 +17,12 @@
 #                     ARGS=--linux or ARGS=--windows checks one target only
 #   make plugins      build the example plugins for Linux and Windows into plugins/
 #   make dist         package each release build with its templates folder into dist/
+#   make deb          Linux .deb package into dist/ (needs cargo-deb:
+#                     cargo install cargo-deb --locked)
+#   make appimage     Linux AppImage into dist/ (see scripts/appimage.sh)
+#   make windows-setup
+#                     Windows installer into dist/, with Inno Setup in a Docker or
+#                     Podman container (see scripts/windows-setup.sh)
 #   make version-check
 #                     show the commits since the last release and suggest the next version
 #   make version-bump-patch, version-bump-minor, version-bump-major
@@ -55,7 +61,7 @@ TRIVY_CACHE   ?= $(HOME)/.cache/trivy
 VERSION_STEPS := $(foreach p,patch minor major,version-bump-$(p))
 
 .PHONY: all linux windows debug debug-linux debug-windows run run-windows \
-        test check check-dependencies fmt clippy hooks pre-commit plugins dist version-check version-bump $(VERSION_STEPS) dist-linux dist-windows clean
+        test check check-dependencies fmt clippy hooks pre-commit plugins dist version-check version-bump $(VERSION_STEPS) dist-linux dist-windows deb appimage windows-setup clean
 
 all: linux windows
 
@@ -151,6 +157,17 @@ dist-windows: windows
 	cd $(DIST) && rm -f $(APP)-windows.zip && \
 		if command -v zip >/dev/null; then zip -qr $(APP)-windows.zip $(APP)-windows; \
 		else echo "zip not installed; skipping $(APP)-windows.zip (folder is in $(DIST)/)"; fi
+
+# Installers: the app finds its templates in ../share/artwork-creator/ from the executable.
+deb: linux
+	mkdir -p $(DIST)
+	$(CARGO) deb --no-build --target $(LINUX) -o $(DIST)/
+
+appimage: linux
+	sh scripts/appimage.sh $(LINUX_BIN) $(DIST)/$(APP)-linux-x86_64.AppImage
+
+windows-setup: windows
+	sh scripts/windows-setup.sh $(WINDOWS_BIN)
 
 clean:
 	$(CARGO) clean

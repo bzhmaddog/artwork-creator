@@ -471,6 +471,12 @@ pub struct Layer {
     pub locked: bool,
     /// 0 (transparent) to 1 (opaque).
     pub opacity: f32,
+    /// Clipped to the layer below (see `Node::clip`).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub clip: bool,
+    /// How it mixes with what lies below.
+    #[serde(default, skip_serializing_if = "BlendMode::is_normal")]
+    pub blend: BlendMode,
     /// Placement on the page.
     pub transform: Transform,
     /// Effects applied to the image, in order.
@@ -529,6 +535,8 @@ impl Layer {
             visible: true,
             locked: false,
             opacity: 1.0,
+            clip: false,
+            blend: BlendMode::Normal,
             transform: Transform::default(),
             effects: Vec::new(),
             bindings: Default::default(),
@@ -544,6 +552,13 @@ impl Layer {
             broken: false,
             fx: None,
         }
+    }
+
+    /// Its pattern fills: a shape's fill, a text's letters.
+    pub fn patterns_mut(&mut self) -> impl Iterator<Item = &mut crate::pattern::Pattern> {
+        let shape = self.shape.as_mut().and_then(|s| s.fill_pattern.as_mut());
+        let text = self.text.as_mut().and_then(|t| t.pattern.as_mut());
+        shape.into_iter().chain(text)
     }
 
     /// Texture to draw on the canvas: with the effects applied once they are computed.
@@ -690,6 +705,130 @@ fn yes() -> bool {
     true
 }
 
+/// How a layer's colors mix with those below it, as in image editors (and PDF and CSS,
+/// which have the same modes).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BlendMode {
+    #[default]
+    Normal,
+    Multiply,
+    Screen,
+    Overlay,
+    Darken,
+    Lighten,
+    ColorDodge,
+    ColorBurn,
+    HardLight,
+    SoftLight,
+    Difference,
+    Exclusion,
+    Hue,
+    Saturation,
+    Color,
+    Luminosity,
+}
+
+impl BlendMode {
+    /// In the order image editors list them: normal, darkening, lightening, contrast,
+    /// comparing, then the color components.
+    pub const ALL: [BlendMode; 16] = [
+        BlendMode::Normal,
+        BlendMode::Darken,
+        BlendMode::Multiply,
+        BlendMode::ColorBurn,
+        BlendMode::Lighten,
+        BlendMode::Screen,
+        BlendMode::ColorDodge,
+        BlendMode::Overlay,
+        BlendMode::SoftLight,
+        BlendMode::HardLight,
+        BlendMode::Difference,
+        BlendMode::Exclusion,
+        BlendMode::Hue,
+        BlendMode::Saturation,
+        BlendMode::Color,
+        BlendMode::Luminosity,
+    ];
+
+    pub fn is_normal(&self) -> bool {
+        *self == BlendMode::Normal
+    }
+
+    /// Its name in the interface.
+    pub fn name_key(self) -> &'static str {
+        use crate::i18n::tr_noop;
+        match self {
+            BlendMode::Normal => tr_noop!("BLEND_NORMAL"),
+            BlendMode::Multiply => tr_noop!("BLEND_MULTIPLY"),
+            BlendMode::Screen => tr_noop!("BLEND_SCREEN"),
+            BlendMode::Overlay => tr_noop!("BLEND_OVERLAY"),
+            BlendMode::Darken => tr_noop!("BLEND_DARKEN"),
+            BlendMode::Lighten => tr_noop!("BLEND_LIGHTEN"),
+            BlendMode::ColorDodge => tr_noop!("BLEND_COLOR_DODGE"),
+            BlendMode::ColorBurn => tr_noop!("BLEND_COLOR_BURN"),
+            BlendMode::HardLight => tr_noop!("BLEND_HARD_LIGHT"),
+            BlendMode::SoftLight => tr_noop!("BLEND_SOFT_LIGHT"),
+            BlendMode::Difference => tr_noop!("BLEND_DIFFERENCE"),
+            BlendMode::Exclusion => tr_noop!("BLEND_EXCLUSION"),
+            BlendMode::Hue => tr_noop!("BLEND_HUE"),
+            BlendMode::Saturation => tr_noop!("BLEND_SATURATION"),
+            BlendMode::Color => tr_noop!("BLEND_COLOR"),
+            BlendMode::Luminosity => tr_noop!("BLEND_LUMINOSITY"),
+        }
+    }
+
+    /// The same mode for tiny-skia, which draws the pixels.
+    pub fn skia(self) -> tiny_skia::BlendMode {
+        use tiny_skia::BlendMode as B;
+        match self {
+            BlendMode::Normal => B::SourceOver,
+            BlendMode::Multiply => B::Multiply,
+            BlendMode::Screen => B::Screen,
+            BlendMode::Overlay => B::Overlay,
+            BlendMode::Darken => B::Darken,
+            BlendMode::Lighten => B::Lighten,
+            BlendMode::ColorDodge => B::ColorDodge,
+            BlendMode::ColorBurn => B::ColorBurn,
+            BlendMode::HardLight => B::HardLight,
+            BlendMode::SoftLight => B::SoftLight,
+            BlendMode::Difference => B::Difference,
+            BlendMode::Exclusion => B::Exclusion,
+            BlendMode::Hue => B::Hue,
+            BlendMode::Saturation => B::Saturation,
+            BlendMode::Color => B::Color,
+            BlendMode::Luminosity => B::Luminosity,
+        }
+    }
+
+    /// Its name in CSS (SVG's `mix-blend-mode`), which PDF's are spelled after.
+    pub fn css(self) -> &'static str {
+        match self {
+            BlendMode::Normal => "normal",
+            BlendMode::Multiply => "multiply",
+            BlendMode::Screen => "screen",
+            BlendMode::Overlay => "overlay",
+            BlendMode::Darken => "darken",
+            BlendMode::Lighten => "lighten",
+            BlendMode::ColorDodge => "color-dodge",
+            BlendMode::ColorBurn => "color-burn",
+            BlendMode::HardLight => "hard-light",
+            BlendMode::SoftLight => "soft-light",
+            BlendMode::Difference => "difference",
+            BlendMode::Exclusion => "exclusion",
+            BlendMode::Hue => "hue",
+            BlendMode::Saturation => "saturation",
+            BlendMode::Color => "color",
+            BlendMode::Luminosity => "luminosity",
+        }
+    }
+}
+
+/// Leaves flags that are off out of the saved file.
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 /// A folder of layers. Its opacity applies to the group as a whole: the children are
 /// composited together first, then blended onto what lies below.
 #[derive(Clone, Serialize, Deserialize)]
@@ -705,6 +844,13 @@ pub struct Group {
     pub locked: bool,
     /// Applied to the group as a whole, 0 to 1.
     pub opacity: f32,
+    /// Clipped to the layer below (see `Node::clip`).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub clip: bool,
+    /// How the group, composited on its own, mixes with what lies below. Normal lets
+    /// its children mix with what lies below the group themselves.
+    #[serde(default, skip_serializing_if = "BlendMode::is_normal")]
+    pub blend: BlendMode,
     /// Children shown in the layer list.
     #[serde(default = "yes")]
     pub expanded: bool,
@@ -747,6 +893,35 @@ impl Node {
         match self {
             Node::Group(g) => g.locked,
             Node::Layer(l) => l.locked,
+        }
+    }
+
+    /// Clipped to the layer below: drawn only where the nearest node under it in the
+    /// same list that is not clipped itself, its base, shows. Several clipped nodes can
+    /// share a base; at the bottom of a list, with no base, the flag does nothing.
+    pub fn clip(&self) -> bool {
+        match self {
+            Node::Group(g) => g.clip,
+            Node::Layer(l) => l.clip,
+        }
+    }
+
+    /// Itself or something in it, shown, mixes with what lies below in a mode other
+    /// than normal.
+    pub fn has_blend(&self) -> bool {
+        match self {
+            Node::Group(g) => {
+                g.visible && (!g.blend.is_normal() || g.children.iter().any(Node::has_blend))
+            }
+            Node::Layer(l) => l.visible && !l.blend.is_normal(),
+        }
+    }
+
+    /// The `clip` flag, to change it.
+    pub fn clip_mut(&mut self) -> &mut bool {
+        match self {
+            Node::Group(g) => &mut g.clip,
+            Node::Layer(l) => &mut l.clip,
         }
     }
 
@@ -875,6 +1050,10 @@ pub struct Document {
     /// the page being opaque.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background_gradient: Option<crate::gradient::Gradient>,
+    /// Fills the page over `background`, instead of `background_gradient`, when set; in
+    /// page mm.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub background_pattern: Option<crate::pattern::Pattern>,
     /// Layers and groups, bottom of the stack first.
     pub layers: Vec<Node>,
     /// Saved colors of the first projects that had them, made color variables once
@@ -914,6 +1093,7 @@ impl Default for Document {
             background: [255, 255, 255],
             background_link: None,
             background_gradient: None,
+            background_pattern: None,
             layers: Vec::new(),
             old_palette: Vec::new(),
             variables: Vec::new(),
@@ -1144,6 +1324,14 @@ impl Document {
         }
     }
 
+    /// Calls `f` on every pattern fill: the background's, then the layers'.
+    pub fn for_each_pattern_mut(&mut self, mut f: impl FnMut(&mut crate::pattern::Pattern)) {
+        if let Some(p) = &mut self.background_pattern {
+            f(p);
+        }
+        self.for_each_layer_mut(|l| l.patterns_mut().for_each(&mut f));
+    }
+
     /// Maps template mm (origin at its top-left, size `tpl_size`) to page mm: the
     /// template centered on the page, as drawn.
     pub fn template_affine(&self, tpl_size: P2) -> Affine {
@@ -1370,6 +1558,8 @@ mod tests {
             visible: false,
             locked: false,
             opacity: 0.25,
+            clip: false,
+            blend: crate::document::BlendMode::Normal,
             expanded: true,
             children: vec![Node::Layer(Box::new(inner))],
             element: None,
@@ -1424,6 +1614,8 @@ mod tests {
             visible: false,
             locked: true,
             opacity: 1.0,
+            clip: false,
+            blend: crate::document::BlendMode::Normal,
             expanded: true,
             children: vec![Node::Layer(Box::new(b))],
             element: None,

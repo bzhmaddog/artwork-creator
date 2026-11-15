@@ -1,9 +1,10 @@
 [package]
 name = "artwork-creator"
-version = "0.12.0"
+version = "0.13.0"
 edition = "2024"
 description = "Design printable artwork for arcade controllers on DXF templates, with print-ready PNG/PDF export"
 license-file = "LICENSE"
+homepage = "https://github.com/bzhmaddog/artwork-creator"
 publish = false
 
 # The plugin SDK and the example plugin live in the same workspace; see "Plugins" in README.md.
@@ -69,6 +70,23 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Memory",
     "Win32_UI_Controls_Dialogs",
 ] }
+
+# The Linux .deb package (`make deb`, cargo-deb). The app finds its templates in
+# ../share/artwork-creator/ from the executable. $auto lists the libraries it links to;
+# the others are the ones it loads at run time (OpenGL, X11 or Wayland, fontconfig).
+[package.metadata.deb]
+maintainer = "bzhmaddog"
+copyright = "bzhmaddog"
+section = "graphics"
+extended-description = "A desktop app for designing printed artwork for arcade controllers and fightsticks: load a controller template, arrange images on it and export print-ready PNG, PDF or SVG at true size."
+depends = "$auto, libgl1, libegl1, libfontconfig1, libxkbcommon0, libwayland-client0, libx11-6, libxcursor1, libxi6, libxrandr2"
+assets = [
+    ["target/release/artwork-creator", "usr/bin/", "755"],
+    ["templates/**/*", "usr/share/artwork-creator/templates/", "644"],
+    ["assets/artwork-creator.desktop", "usr/share/applications/", "644"],
+    ["assets/icon/artwork-creator.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
+    ["assets/icon/png/artwork-creator-256.png", "usr/share/icons/hicolor/256x256/apps/artwork-creator.png", "644"],
+]
 
 [profile.release]
 opt-level = 3

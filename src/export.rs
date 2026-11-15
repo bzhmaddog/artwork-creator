@@ -10,7 +10,7 @@ use printpdf::{
 };
 use tiny_skia::PathSegment;
 
-use crate::document::{Affine, Homography, Orientation, P2, PageSize};
+use crate::document::{Affine, BlendMode, Homography, Orientation, P2, PageSize};
 use crate::gradient::{Geometry as GradientGeometry, Gradient, Ink};
 use crate::i18n::tr;
 use crate::print;
@@ -452,6 +452,107 @@ fn mm_to_pt(mm: f32) -> f32 {
     mm * 72.0 / 25.4
 }
 
+/// A shape filled with a pattern: clipped to its outline (`rings`, in PDF points, under
+/// the fill rule `order`), then the tile drawn wherever it shows over `bounds` (the
+/// path's, in the layer's units), through the layer's map. The tile's image is added
+/// to the document once, kept in `tiles` by its pixels' address. Only on a layer that
+/// is not distorted, with few enough tiles (see `SceneLayer::vector`).
+#[allow(clippy::too_many_arguments)]
+fn pattern_ops(
+    doc: &mut PdfDocument,
+    tiles: &mut std::collections::HashMap<usize, printpdf::XObjectId>,
+    rings: Vec<PolygonRing>,
+    order: WindingOrder,
+    bounds: tiny_skia::Rect,
+    tile: &std::sync::Arc<tiny_skia::Pixmap>,
+    transform: tiny_skia::Transform,
+    map: Homography,
+    opacity: f32,
+    page_h: f32,
+) -> Vec<Op> {
+    let (w, h) = (tile.width(), tile.height());
+    let (Some(a), Some([x0, x1, y0, y1])) = (
+        map.as_affine(),
+        crate::pattern::tiles(bounds, w, h, transform),
+    ) else {
+        return Vec::new();
+    };
+    let id = tiles
+        .entry(std::sync::Arc::as_ptr(tile) as usize)
+        .or_insert_with(|| {
+            doc.add_image(&RawImage {
+                pixels: RawImageData::U8(crate::effects::cache::demultiply(tile).into_raw()),
+                width: w as usize,
+                height: h as usize,
+                data_format: RawImageFormat::RGBA8,
+                tag: Vec::new(),
+            })
+        })
+        .clone();
+    let mut ops = vec![Op::SaveGraphicsState];
+    if opacity < 1.0 {
+        let gs = ExtendedGraphicsState::default().with_current_fill_alpha(opacity.max(0.0));
+        ops.push(Op::LoadGraphicsState {
+            gs: doc.add_graphics_state(gs),
+        });
+    }
+    ops.push(Op::DrawPolygon {
+        polygon: Polygon {
+            rings,
+            mode: PaintMode::Clip,
+            winding_order: order,
+        },
+    });
+    // Layer units to page mm (the layer's map), then to PDF points with y up.
+    let k = mm_to_pt(1.0);
+    let to_pt = a.then(Affine {
+        a: k,
+        b: 0.0,
+        c: 0.0,
+        d: -k,
+        e: 0.0,
+        f: mm_to_pt(page_h),
+    });
+    let raw = |m: Affine| printpdf::CurTransMat::Raw([m.a, m.b, m.c, m.d, m.e, m.f]);
+    ops.push(Op::SetTransformationMatrix { matrix: raw(to_pt) });
+    let t = Affine {
+        a: transform.sx,
+        b: transform.ky,
+        c: transform.kx,
+        d: transform.sy,
+        e: transform.tx,
+        f: transform.ty,
+    };
+    let (wf, hf) = (w as f32, h as f32);
+    for j in y0..y1 {
+        for i in x0..x1 {
+            // The image's unit square, y up, onto the tile's place in its pixels (y
+            // down), then into the layer's units.
+            let place = Affine {
+                a: wf,
+                b: 0.0,
+                c: 0.0,
+                d: -hf,
+                e: i as f32 * wf,
+                f: (j + 1) as f32 * hf,
+            }
+            .then(t);
+            ops.push(Op::SaveGraphicsState);
+            ops.push(Op::SetTransformationMatrix { matrix: raw(place) });
+            ops.push(Op::UseXobject {
+                id: id.clone(),
+                transform: XObjectTransform {
+                    no_auto_scale: true,
+                    ..Default::default()
+                },
+            });
+            ops.push(Op::RestoreGraphicsState);
+        }
+    }
+    ops.push(Op::RestoreGraphicsState);
+    ops
+}
+
 /// A shape filled with a gradient: clipped to its outline (`rings`, in PDF points, under
 /// the fill rule `order`), then a PDF shading painted in the layer's own units through
 /// its map. Only for an opaque gradient on a layer that is not distorted (see
@@ -657,6 +758,31 @@ fn polygon(shapes: &[Vec<P2>], page_h: f32, mode: PaintMode) -> Polygon {
     }
 }
 
+/// The same mode in PDF.
+fn pdf_blend(blend: BlendMode) -> printpdf::BlendMode {
+    use printpdf::{NonSeperableBlendMode as N, SeperableBlendMode as S};
+    let s = |m| printpdf::BlendMode::Seperable(m);
+    let n = |m| printpdf::BlendMode::NonSeperable(m);
+    match blend {
+        BlendMode::Normal => s(S::Normal),
+        BlendMode::Multiply => s(S::Multiply),
+        BlendMode::Screen => s(S::Screen),
+        BlendMode::Overlay => s(S::Overlay),
+        BlendMode::Darken => s(S::Darken),
+        BlendMode::Lighten => s(S::Lighten),
+        BlendMode::ColorDodge => s(S::ColorDodge),
+        BlendMode::ColorBurn => s(S::ColorBurn),
+        BlendMode::HardLight => s(S::HardLight),
+        BlendMode::SoftLight => s(S::SoftLight),
+        BlendMode::Difference => s(S::Difference),
+        BlendMode::Exclusion => s(S::Exclusion),
+        BlendMode::Hue => n(N::Hue),
+        BlendMode::Saturation => n(N::Saturation),
+        BlendMode::Color => n(N::Color),
+        BlendMode::Luminosity => n(N::Luminosity),
+    }
+}
+
 fn rgb(c: [u8; 3]) -> Color {
     Color::Rgb(Rgb::new(
         c[0] as f32 / 255.0,
@@ -673,6 +799,8 @@ fn page_ops(doc: &mut PdfDocument, scene: &Scene, parts: &[Part], dpi: f32) -> V
     let page_h_pt = mm_to_pt(page_h);
     let px_to_pt = 72.0 / dpi;
     let mut ops = Vec::new();
+    // Pattern tiles added to the document, each once.
+    let mut tiles = std::collections::HashMap::new();
     // The first part is the page already cut. What goes over it is cut here: clipped to
     // the outline, and blank paper painted over the holes.
     let (outline, holes) = if parts.len() > 1 {
@@ -682,8 +810,21 @@ fn page_ops(doc: &mut PdfDocument, scene: &Scene, parts: &[Part], dpi: f32) -> V
     };
     ops.push(Op::SaveGraphicsState);
     for (i, part) in parts.iter().enumerate() {
+        // A part in another mode than normal: in a graphics state of its own.
+        let blend = match part {
+            Part::Raster { blend, .. } => *blend,
+            Part::Vector(l) => l.blend,
+            _ => BlendMode::Normal,
+        };
+        if !blend.is_normal() {
+            ops.push(Op::SaveGraphicsState);
+            let gs = ExtendedGraphicsState::default().with_blend_mode(pdf_blend(blend));
+            ops.push(Op::LoadGraphicsState {
+                gs: doc.add_graphics_state(gs),
+            });
+        }
         match part {
-            Part::Raster { pixmap, origin } => {
+            Part::Raster { pixmap, origin, .. } => {
                 let image = if i == 0 {
                     RawImage {
                         pixels: RawImageData::U8(render::to_rgb(pixmap)),
@@ -722,7 +863,9 @@ fn page_ops(doc: &mut PdfDocument, scene: &Scene, parts: &[Part], dpi: f32) -> V
                 }
             }
             Part::Vector(layer) => {
-                let Some(v) = layer.vector() else { continue };
+                let Some(v) = layer.vector() else {
+                    unreachable!("vector parts have shapes")
+                };
                 // The strokes painted inside a shape are cut off at its outline.
                 let clip = v.clip.as_ref().map(|(c, range, rule)| {
                     (rings(c, v.map, page_h), range.clone(), winding(*rule))
@@ -749,6 +892,21 @@ fn page_ops(doc: &mut PdfDocument, scene: &Scene, parts: &[Part], dpi: f32) -> V
                     }
                     let c = match ink {
                         Ink::Solid(c) => *c,
+                        Ink::Pattern { tile, transform } => {
+                            ops.extend(pattern_ops(
+                                doc,
+                                &mut tiles,
+                                rings,
+                                winding(*rule),
+                                path.bounds(),
+                                tile,
+                                *transform,
+                                v.map,
+                                layer.opacity,
+                                page_h,
+                            ));
+                            continue;
+                        }
                         Ink::Gradient { gradient, frame } => {
                             ops.extend(gradient_ops(
                                 doc,
@@ -787,6 +945,21 @@ fn page_ops(doc: &mut PdfDocument, scene: &Scene, parts: &[Part], dpi: f32) -> V
                     ops.push(Op::RestoreGraphicsState);
                 }
             }
+            // Cut by the outline of the layer they are clipped to, its shapes together.
+            Part::ClipBegin(layer) => {
+                ops.push(Op::SaveGraphicsState);
+                let rings = layer
+                    .clip_outline()
+                    .map(render::clip_rings)
+                    .unwrap_or_default();
+                ops.push(Op::DrawPolygon {
+                    polygon: polygon(&rings, page_h, PaintMode::Clip),
+                });
+            }
+            Part::ClipEnd => ops.push(Op::RestoreGraphicsState),
+        }
+        if !blend.is_normal() {
+            ops.push(Op::RestoreGraphicsState);
         }
     }
     if !holes.is_empty() {
@@ -1042,6 +1215,107 @@ pub(crate) mod tests {
                 .unwrap();
             }
         }
+    }
+
+    /// `render::tests::clip_page_scene` exported to PDF, and the PDF drawn back by
+    /// hayro, to look at: `CLIP_PDF_PREVIEW=out cargo test clip_pdf_preview -- --ignored`
+    /// writes out.pdf and out-pdf.png.
+    #[test]
+    #[ignore]
+    fn clip_pdf_preview() {
+        use hayro::hayro_interpret::InterpreterSettings;
+        let Ok(path) = std::env::var("CLIP_PDF_PREVIEW") else {
+            return;
+        };
+        let scene = render::tests::clip_page_scene();
+        let parts = render::compose_parts(&scene, 150.0, true, &mut |_| true).unwrap();
+        let pdf_path = format!("{path}.pdf");
+        write_pdf(&scene, &parts, 150.0, Path::new(&pdf_path), None).unwrap();
+        let pdf = hayro::hayro_syntax::Pdf::new(std::fs::read(&pdf_path).unwrap()).unwrap();
+        let settings = hayro::PixmapSettings {
+            x_scale: 3.0,
+            y_scale: 3.0,
+            ..Default::default()
+        };
+        let page = &pdf.pages()[0];
+        let rendered = hayro::render(
+            page,
+            &hayro::RenderCache::new(),
+            &InterpreterSettings::default(),
+            &hayro::RenderSettings::default(),
+            &settings,
+        );
+        let (w, h) = (rendered.width() as u32, rendered.height() as u32);
+        let rgba = rendered.take_rgba8(hayro::vello_cpu::peniko::ImageAlphaType::Alpha);
+        image::RgbaImage::from_raw(w, h, rgba)
+            .unwrap()
+            .save(format!("{path}-pdf.png"))
+            .unwrap();
+    }
+
+    #[test]
+    fn pdf_blend_modes_are_graphics_states() {
+        let load_states = |blend: BlendMode| {
+            let mut scene = text_scene(false);
+            let render::SceneNode::Image(l) = &mut scene.layers[1] else {
+                panic!("the text layer")
+            };
+            l.blend = blend;
+            let parts = render::compose_parts(&scene, 100.0, true, &mut |_| true).unwrap();
+            let mut pdf = PdfDocument::new("test");
+            let ops = page_ops(&mut pdf, &scene, &parts, 100.0);
+            ops.iter()
+                .filter(|op| matches!(op, Op::LoadGraphicsState { .. }))
+                .count()
+        };
+        assert_eq!(
+            load_states(BlendMode::Multiply),
+            load_states(BlendMode::Normal) + 1,
+            "one state, around the text"
+        );
+    }
+
+    #[test]
+    fn pdf_patterns_draw_one_image_tile_by_tile() {
+        // 10 mm tiles over a 20 x 10 mm rectangle starting at a tile's corner: 2 x 1,
+        // and a column more for the edge reaching the next one.
+        let scene = render::tests::pattern_scene(10.0);
+        let parts = render::compose_parts(&scene, 254.0, true, &mut |_| true).unwrap();
+        let mut pdf = PdfDocument::new("test");
+        let ops = page_ops(&mut pdf, &scene, &parts, 254.0);
+        let ids: Vec<_> = ops
+            .iter()
+            .skip(1)
+            .filter_map(|op| match op {
+                Op::UseXobject { id, transform } if transform.no_auto_scale => Some(id.clone()),
+                _ => None,
+            })
+            .collect();
+        assert!((2..=6).contains(&ids.len()), "{} tiles", ids.len());
+        assert!(ids.iter().all(|id| *id == ids[0]), "one image");
+        assert!(ops.iter().any(|op| matches!(op,
+            Op::DrawPolygon { polygon } if polygon.mode == PaintMode::Clip)));
+    }
+
+    #[test]
+    fn pdf_clips_to_a_shape_with_its_outline() {
+        let scene = render::tests::clip_to_shape_scene(1.0);
+        let parts = render::compose_parts(&scene, 254.0, true, &mut |_| true).unwrap();
+        let mut pdf = PdfDocument::new("test");
+        let ops = page_ops(&mut pdf, &scene, &parts, 254.0);
+        // The outline of the fill and stroke together, as one ring, then the square.
+        let clip = ops
+            .iter()
+            .position(|op| {
+                matches!(op, Op::DrawPolygon { polygon } if polygon.mode == PaintMode::Clip
+                    && polygon.rings.len() == 1)
+            })
+            .expect("clipped by the rectangle");
+        let image = ops
+            .iter()
+            .rposition(|op| matches!(op, Op::UseXobject { .. }));
+        assert!(image.is_some_and(|i| i > clip), "the square after the clip");
+        assert!(matches!(ops[clip - 1], Op::SaveGraphicsState));
     }
 
     #[test]
@@ -1529,6 +1803,7 @@ pub(crate) mod tests {
             page_mm: [100.0, 50.0],
             background: [255, 255, 255],
             background_gradient: None,
+            background_pattern: None,
             layers: Vec::new(),
             elements: Vec::new(),
             cuts: Cuts::default(),

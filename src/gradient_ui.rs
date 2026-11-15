@@ -1,9 +1,10 @@
-//! Editing a fill that can be one color or a gradient: a shape's fill and stroke, a
-//! text's color, the page background.
+//! Editing a fill that can be one color, a gradient or a pattern: a shape's fill and
+//! stroke, a text's color, the page background (no pattern for a stroke).
 //!
-//! [`inline`] goes where the color button was: a Solid / Linear / Radial switch, then
-//! the color button, or a swatch of the gradient. [`rows`] goes under it for a gradient:
-//! its angle, or its center and radius, then the bar of its color stops. A click on the
+//! [`inline`] goes where the color button was: a Solid / Linear / Radial / Pattern
+//! switch, then the color button, or a swatch of the gradient. [`rows`] goes under it
+//! for a pattern: its image, tile width, turn and offset; for a gradient: its angle, or
+//! its center and radius, then the bar of its color stops. A click on the
 //! bar adds a stop there, a stop is dragged along it, and right-clicked to remove it; the
 //! stop picked last shows its color button (linked to color variables like any color),
 //! its position and a button removing it.
@@ -12,15 +13,109 @@ use egui::{Color32, ComboBox, DragValue, Id, Mesh, Pos2, Rect, Sense, Stroke, Ui
 
 use crate::gradient::{Gradient, GradientKind, MAX_STOPS, Stop};
 use crate::i18n::tr;
+use crate::pattern::Pattern;
 
-/// A color, or a gradient in its place, with the color's variable link.
+/// A color, or a gradient or a pattern in its place, with the color's variable link.
 pub struct Fill<'a> {
     /// Straight RGBA; kept when a gradient is set, for going back to one color.
     pub color: &'a mut [u8; 4],
     pub link: &'a mut Option<String>,
     pub gradient: &'a mut Option<Gradient>,
+    /// The pattern in place of both, for fills that can have one.
+    pub pattern: Option<&'a mut Option<Pattern>>,
+    /// Pattern sizes are in the fill's units: mm times this.
+    pub units_per_mm: f32,
     /// Colors may be see-through; the page background may not.
     pub alpha: bool,
+    /// Set by [`inline`] and [`rows`] when the pattern's image is to be chosen: the
+    /// caller opens the file dialog.
+    pub pick_pattern: bool,
+}
+
+impl Fill<'_> {
+    /// It has settings for [`rows`]: a gradient or a pattern.
+    pub fn has_rows(&self) -> bool {
+        self.gradient.is_some() || self.pattern.as_ref().is_some_and(|p| p.is_some())
+    }
+}
+
+/// What fills: the choices of the switch.
+#[derive(Clone, Copy, PartialEq)]
+enum Kind {
+    Solid,
+    Gradient(GradientKind),
+    Pattern,
+}
+
+/// A pattern's settings: its image (a click chooses another), the tile's width, turn
+/// and offset in mm. Returns whether they changed, and whether another image is to be
+/// chosen.
+fn pattern_rows(ui: &mut Ui, p: &mut Pattern, units_per_mm: f32) -> (bool, bool) {
+    let mut changed = false;
+    let mut pick = false;
+    let k = units_per_mm.max(1e-6);
+    // A length in the fill's units, shown in mm.
+    let mm = |ui: &mut Ui, v: &mut f32, prefix: &str, min: f32, hint: &str| {
+        let mut x = *v / k;
+        let r = ui
+            .add(
+                DragValue::new(&mut x)
+                    .prefix(prefix)
+                    .range(min..=f32::MAX)
+                    .speed(0.1)
+                    .fixed_decimals(1),
+            )
+            .on_hover_text(hint);
+        if r.changed() {
+            *v = x * k;
+        }
+        r.changed()
+    };
+    ui.vertical(|ui| {
+        ui.horizontal(|ui| {
+            let name = p
+                .source
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let missing = p.tile.is_none();
+            let mut text = egui::RichText::new(name);
+            if missing {
+                text = text.color(ui.visuals().error_fg_color);
+            }
+            let r = ui.add(egui::Button::new(text).truncate());
+            let r = if missing {
+                r.on_hover_text(tr!("PATTERN_IMAGE_MISSING"))
+            } else {
+                r.on_hover_text(tr!("PATTERN_IMAGE_HINT"))
+            };
+            pick = r.clicked();
+        });
+        ui.horizontal(|ui| {
+            ui.label(tr!("PATTERN_TILE"));
+            changed |= mm(ui, &mut p.size, "", 0.1, tr!("PATTERN_TILE_HINT"));
+            ui.label("mm");
+            ui.label(tr!("PATTERN_ANGLE"));
+            changed |= ui
+                .add(
+                    DragValue::new(&mut p.angle_deg)
+                        .range(-180.0..=180.0)
+                        .speed(1.0)
+                        .fixed_decimals(0)
+                        .suffix("°"),
+                )
+                .on_hover_text(tr!("PATTERN_ANGLE_HINT"))
+                .changed();
+        });
+        ui.horizontal(|ui| {
+            ui.label(tr!("PATTERN_OFFSET"));
+            let [x, y] = &mut p.offset;
+            changed |= mm(ui, x, "x ", f32::MIN, tr!("PATTERN_OFFSET_HINT"));
+            changed |= mm(ui, y, "y ", f32::MIN, tr!("PATTERN_OFFSET_HINT"));
+            ui.label("mm");
+        });
+    });
+    (changed, pick)
 }
 
 /// Height of the stops bar, and of the stops' markers under it.
@@ -32,37 +127,67 @@ const MARKER: f32 = 12.0;
 pub fn inline(ui: &mut Ui, ui_key: impl std::hash::Hash + std::fmt::Debug, f: &mut Fill) -> bool {
     let id = ui.make_persistent_id(("fill", ui_key));
     let mut changed = false;
-    let kind = f.gradient.as_ref().map(|g| g.kind);
-    let name = |k: Option<GradientKind>| match k {
-        None => tr!("FILL_SOLID"),
-        Some(GradientKind::Linear) => tr!("FILL_LINEAR_GRADIENT"),
-        Some(GradientKind::Radial) => tr!("FILL_RADIAL_GRADIENT"),
+    let patterned = f.pattern.as_ref().is_some_and(|p| p.is_some());
+    let kind = match (patterned, &f.gradient) {
+        (true, _) => Kind::Pattern,
+        (false, Some(g)) => Kind::Gradient(g.kind),
+        (false, None) => Kind::Solid,
     };
+    let name = |k: Kind| match k {
+        Kind::Solid => tr!("FILL_SOLID"),
+        Kind::Gradient(GradientKind::Linear) => tr!("FILL_LINEAR_GRADIENT"),
+        Kind::Gradient(GradientKind::Radial) => tr!("FILL_RADIAL_GRADIENT"),
+        Kind::Pattern => tr!("FILL_PATTERN"),
+    };
+    let mut kinds = vec![
+        Kind::Solid,
+        Kind::Gradient(GradientKind::Linear),
+        Kind::Gradient(GradientKind::Radial),
+    ];
+    if f.pattern.is_some() {
+        kinds.push(Kind::Pattern);
+    }
     let mut picked = kind;
     ComboBox::from_id_salt(id.with("kind"))
         .selected_text(name(kind))
         .width(90.0)
         .show_ui(ui, |ui| {
-            for k in [None, Some(GradientKind::Linear), Some(GradientKind::Radial)] {
+            for k in kinds {
                 ui.selectable_value(&mut picked, k, name(k));
             }
         })
         .response
         .on_hover_text(tr!("FILL_KIND_HINT"));
     if picked != kind {
-        changed = true;
-        *f.gradient = picked.map(|k| {
-            // From the color, or the gradient as it was with the other spread.
-            let mut g = f
-                .gradient
-                .take()
-                .unwrap_or_else(|| Gradient::from_color(*f.color));
-            g.kind = k;
-            g
-        });
+        match picked {
+            // Once its image is chosen.
+            Kind::Pattern => f.pick_pattern = true,
+            Kind::Solid => {
+                changed = true;
+                *f.gradient = None;
+            }
+            Kind::Gradient(k) => {
+                changed = true;
+                // From the color, or the gradient as it was with the other spread.
+                let mut g = f
+                    .gradient
+                    .take()
+                    .unwrap_or_else(|| Gradient::from_color(*f.color));
+                g.kind = k;
+                *f.gradient = Some(g);
+            }
+        }
+        if picked != Kind::Pattern
+            && let Some(p) = f.pattern.as_deref_mut()
+        {
+            *p = None;
+        }
+    }
+    if patterned && picked == Kind::Pattern {
+        return changed;
     }
     match f.gradient {
-        None => changed |= crate::colors::button(ui, f.color, f.alpha, f.link).changed(),
+        None => changed |= crate::colors::button(ui, f.color, f.alpha, Some(f.link)).changed(),
         Some(g) => {
             let (rect, _) = ui.allocate_exact_size(
                 vec2(
@@ -86,6 +211,12 @@ pub fn inline(ui: &mut Ui, ui_key: impl std::hash::Hash + std::fmt::Debug, f: &m
 /// A gradient's settings, under [`inline`]; nothing for one color. Returns whether
 /// anything changed.
 pub fn rows(ui: &mut Ui, ui_key: impl std::hash::Hash + std::fmt::Debug, f: &mut Fill) -> bool {
+    let units_per_mm = f.units_per_mm;
+    if let Some(Some(p)) = f.pattern.as_deref_mut() {
+        let (changed, pick) = pattern_rows(ui, p, units_per_mm);
+        f.pick_pattern |= pick;
+        return changed;
+    }
     let Some(g) = f.gradient.as_mut() else {
         return false;
     };
@@ -157,7 +288,7 @@ pub fn rows(ui: &mut Ui, ui_key: impl std::hash::Hash + std::fmt::Debug, f: &mut
             };
             ui.label(tr!("GRADIENT_STOP"));
             changed |=
-                crate::colors::button(ui, &mut stop.color, f.alpha, &mut stop.link).changed();
+                crate::colors::button(ui, &mut stop.color, f.alpha, Some(&mut stop.link)).changed();
             let mut p = stop.pos * 100.0;
             if ui
                 .add(
@@ -377,7 +508,10 @@ mod tests {
                     color,
                     link,
                     gradient,
+                    pattern: None,
+                    units_per_mm: 1.0,
                     alpha: true,
+                    pick_pattern: false,
                 };
                 ui.horizontal(|ui| changed |= inline(ui, "t", &mut f));
                 changed |= rows(ui, "t", &mut f);
@@ -424,7 +558,10 @@ mod tests {
                     color,
                     link,
                     gradient,
+                    pattern: None,
+                    units_per_mm: 1.0,
                     alpha: true,
+                    pick_pattern: false,
                 };
                 ui.horizontal(|ui| inline(ui, "t", &mut f));
                 rows(ui, "t", &mut f);
@@ -512,7 +649,8 @@ mod tests {
         assert_eq!(h.g().stops.len(), 2, "a gradient keeps two colors");
     }
 
-    /// The editor for a linear and a radial gradient, to look at it:
+    /// The editor for a linear and a radial gradient, one color and a pattern, to look
+    /// at it:
     /// `GRADIENT_PREVIEW=out.png cargo test gradient_preview -- --ignored`.
     #[test]
     #[ignore]
@@ -531,7 +669,15 @@ mod tests {
             ([0u8; 4], None, Some(radial)),
             ([70, 130, 180, 255], None, None),
         ]);
-        crate::preview::render(&path, vec2(380.0, 330.0), |ui| {
+        let pattern = std::cell::RefCell::new(Some(crate::pattern::Pattern {
+            source: "/somewhere/carbon-fiber.png".into(),
+            size: 12.5,
+            angle_deg: 45.0,
+            offset: [0.0, 2.0],
+            data: None,
+            tile: Some(std::sync::Arc::new(tiny_skia::Pixmap::new(4, 4).unwrap())),
+        }));
+        crate::preview::render(&path, vec2(380.0, 440.0), |ui| {
             let mut state = state.borrow_mut();
             egui::Frame::NONE.inner_margin(10.0).show(ui, |ui| {
                 for (i, (color, link, gradient)) in state.iter_mut().enumerate() {
@@ -539,7 +685,10 @@ mod tests {
                         color,
                         link,
                         gradient,
+                        pattern: None,
+                        units_per_mm: 1.0,
                         alpha: true,
+                        pick_pattern: false,
                     };
                     ui.horizontal(|ui| {
                         ui.label("Fill");
@@ -548,6 +697,23 @@ mod tests {
                     rows(ui, i, &mut f);
                     ui.separator();
                 }
+                // A pattern, its kind open to show the choices.
+                let mut pattern = pattern.borrow_mut();
+                let (mut color, mut link, mut gradient) = ([0u8; 4], None, None);
+                let mut f = Fill {
+                    color: &mut color,
+                    link: &mut link,
+                    gradient: &mut gradient,
+                    pattern: Some(&mut pattern),
+                    units_per_mm: 1.0,
+                    alpha: true,
+                    pick_pattern: false,
+                };
+                ui.horizontal(|ui| {
+                    ui.label("Fill");
+                    inline(ui, "pattern", &mut f);
+                });
+                rows(ui, "pattern", &mut f);
             });
         });
     }

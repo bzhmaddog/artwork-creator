@@ -1,7 +1,7 @@
 # Versioning and releasing
 
 A release is a `vX.Y.Z` tag pushed to GitHub, on a commit whose `Cargo.toml` has that
-version, and a GitHub Release with the Linux and Windows packages attached. You set the
+version, and a GitHub Release with the Linux and Windows packages and installers attached. You set the
 version and push the tag; the [Release workflow](../.github/workflows/release.yml) builds
 the packages and makes the release as a draft, which you then publish.
 
@@ -53,15 +53,18 @@ version too. It asks before committing, and makes no tag and pushes nothing. See
 
    The workflow checks that the tag matches the version in `Cargo.toml` and stops if not.
 
-3. Wait for the **Release** workflow to finish (Actions tab). It builds both packages and
-   creates a **draft** release for the tag, with the packages attached and notes
+3. Wait for the **Release** workflow to finish (Actions tab). It builds the packages
+   (`.zip`, `.tar.gz`) and installers (Windows setup `.exe`, `.deb`, AppImage) and
+   creates a **draft** release for the tag, with them attached and notes
    generated from the commits.
 
-4. On GitHub, open **Releases**, check the draft (notes, the two packages), and click
+4. On GitHub, open **Releases**, check the draft (notes, the five files), and click
    **Publish release**.
 
 ## Building the packages without releasing
 
 Run the **Release** workflow by hand (Actions > Release > Run workflow): it only builds the
 packages and keeps them as the run's artifacts for 7 days. Locally, `make dist` builds the
-same packages into `dist/`.
+same packages into `dist/`, `make deb` and `make appimage` the Linux installers, and
+`make windows-setup` the Windows one (Inno Setup with Wine in a Docker or Podman
+container).

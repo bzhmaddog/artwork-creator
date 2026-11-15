@@ -124,6 +124,8 @@ fn element_group(doc: &mut Document, kind: ElementKind, name: String, color: [u8
         visible: true,
         locked: false,
         opacity: 1.0,
+        clip: false,
+        blend: crate::document::BlendMode::Normal,
         expanded: true,
         children: Vec::new(),
         element: Some(ElementTag { kind, color }),

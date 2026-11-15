@@ -1610,14 +1610,7 @@ pub fn variables_ui(ui: &mut Ui, doc: &mut Document, kinds: &[Kind]) -> bool {
                     if let Value::Text(t) = &mut var.value {
                         changed |= text_value_button(ui, t, [value_width, row_height]);
                     } else if let Value::Color(c) = &mut var.value {
-                        changed |= ui
-                            .scope(|ui| {
-                                ui.spacing_mut().interact_size.x = value_width;
-                                ui.color_edit_button_srgba_unmultiplied(c)
-                            })
-                            .inner
-                            .on_hover_text(crate::colors::describe(*c))
-                            .changed();
+                        changed |= crate::colors::button(ui, c, true, None).changed();
                     } else if !template_vars.is_empty() || var.formula.is_some() {
                         // With an fx button, to inherit from the template's variables.
                         let id = ui.scope_id().with(("variable_formula", i));
@@ -2654,6 +2647,8 @@ mod tests {
                     visible: true,
                     locked: false,
                     opacity: 1.0,
+                    clip: false,
+                    blend: crate::document::BlendMode::Normal,
                     expanded: false,
                     children: vec![Node::Layer(Box::new(gone))],
                     element: None,

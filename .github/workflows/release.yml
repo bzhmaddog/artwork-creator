@@ -1,5 +1,7 @@
-# Release builds for Linux and Windows, packaged like `make dist`: the executable with
-# its templates folder next to it.
+# Release builds for Linux and Windows, packaged like `make dist` (the executable with
+# its templates folder next to it), and as installers: a setup .exe for Windows (Inno
+# Setup, installer/artwork-creator.iss), a .deb and an AppImage for Linux (`make deb`,
+# `make appimage`).
 #
 # - Pushing a version tag (vX.Y.Z, made by hand) builds both and attaches them
 #   to a draft GitHub Release for that tag, to look over and publish by hand.
@@ -51,6 +53,12 @@ jobs:
           cp "target/release/${{ matrix.exe }}" "dist/$dir/"
           cp -r templates "dist/$dir/"
           tar -czf "dist/$dir.tar.gz" -C dist "$dir"
+      - name: Installers (Linux)
+        if: matrix.name == 'linux'
+        run: |
+          cargo install cargo-deb --version 3.8.0 --locked
+          cargo deb --no-build -o dist/
+          sh scripts/appimage.sh "target/release/${{ matrix.exe }}" "dist/$APP-linux-x86_64.AppImage"
       - name: Package (Windows)
         if: matrix.name == 'windows'
         shell: pwsh
@@ -60,12 +68,33 @@ jobs:
           Copy-Item "target/release/${{ matrix.exe }}" "dist/$dir/"
           Copy-Item -Recurse templates "dist/$dir/"
           Compress-Archive -Path "dist/$dir" -DestinationPath "dist/$dir.zip"
+      # Inno Setup at a pinned version, checked against its SHA-256; raise it on purpose.
+      - name: Installer (Windows)
+        if: matrix.name == 'windows'
+        shell: pwsh
+        env:
+          INNO_VERSION: 6.7.4
+          INNO_SHA256: a549929319f9120716677c685535ca4671e4b937b5fdc87e2585f32d8eb30e8c
+        run: |
+          $setup = "$env:RUNNER_TEMP\innosetup.exe"
+          $tag = "is-" + $env:INNO_VERSION.Replace(".", "_")
+          Invoke-WebRequest "https://github.com/jrsoftware/issrc/releases/download/$tag/innosetup-$env:INNO_VERSION.exe" -OutFile $setup
+          if ((Get-FileHash $setup -Algorithm SHA256).Hash -ne $env:INNO_SHA256) { throw "Inno Setup checksum mismatch" }
+          $inno = "$env:RUNNER_TEMP\inno"
+          Start-Process $setup -Wait -ArgumentList "/VERYSILENT", "/SUPPRESSMSGBOXES", "/NORESTART", "/CURRENTUSER", "/DIR=$inno"
+          $iscc = "$inno\ISCC.exe"
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"' | Select-Object -First 1).Matches.Groups[1].Value
+          & $iscc "/DAppVersion=$version" installer/artwork-creator.iss
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ env.APP }}-${{ matrix.name }}
           path: |
             dist/*.tar.gz
             dist/*.zip
+            dist/*.deb
+            dist/*.AppImage
+            dist/*.exe
           if-no-files-found: error
           retention-days: 7
 

@@ -110,6 +110,8 @@ enum DragKind {
     /// Turns the layer in 3D (Ctrl+drag on it): up and down tilt its top, left and right
     /// its sides.
     Tilt,
+    /// Turns a group's layers around this point (page mm), its middle.
+    RotateGroup(P2),
 }
 
 /// Degrees of 3D tilt per screen pixel dragged.
@@ -192,9 +194,6 @@ pub struct CanvasState {
     safe_area: Option<(u64, Vec<Vec<P2>>)>,
     /// Mouse position on the page, for the status bar.
     pub cursor_mm: Option<P2>,
-    /// Corner handles distort the selected layer instead of scaling it. Holding Ctrl
-    /// swaps the two.
-    pub distort_mode: bool,
     /// Image centers, corners and edge middles snap to the centers of the template's
     /// shapes while dragged. Holding Alt turns it off for the drag.
     pub snap_to_centers: bool,
@@ -251,6 +250,14 @@ pub struct CanvasState {
     /// shape replaces selecting and moving. The tool is kept while no such shape is
     /// selected, and in hand again once one is (see [`active_tool`]).
     pub brushes: crate::paint::Brushes,
+    /// The eyedropper is in hand: a click on the canvas takes the artwork's color there
+    /// (see [`eyedropper_input`]). The paint tool picked last is kept.
+    pub eyedropper: bool,
+    /// The colors added with the eyedropper (Ctrl+click), last first: first among the
+    /// colors in use, in the Colors in use panel and in every color picker.
+    pub picked: Vec<[u8; 4]>,
+    /// Where the eyedropper was on the page last, and the color there.
+    dropper_sample: Option<(P2, Option<[u8; 4]>)>,
     /// Each command's shortcut as text, for the tool bar's tooltips; set by the app.
     pub keys: HashMap<crate::shortcuts::Command, String>,
     /// The stroke being painted: x, y on the page (mm) and the pen's pressure.
@@ -284,7 +291,6 @@ impl Default for CanvasState {
             safe_margin_mm: 0.0,
             safe_area: None,
             cursor_mm: None,
-            distort_mode: false,
             snap_to_centers: true,
             snapped: None,
             link_offer: None,
@@ -311,6 +317,9 @@ impl Default for CanvasState {
             group_previews: HashMap::new(),
             background: None,
             brushes: Default::default(),
+            eyedropper: false,
+            picked: Vec::new(),
+            dropper_sample: None,
             keys: HashMap::new(),
             painting: Vec::new(),
             paint_preview: None,
@@ -615,6 +624,25 @@ fn edge_axis(t: Transform, size_px: [u32; 2], edge: usize) -> (P2, f32) {
     ([v[0] / half, v[1] / half], half * 2.0)
 }
 
+/// The box around the visible layers of group `id` on screen, as drawn around it when
+/// selected.
+fn group_box(doc: &Document, cam: &Camera, rect: Rect, id: u64) -> Option<Rect> {
+    let path = doc.path_of(id)?;
+    let pts: Vec<Pos2> = doc
+        .leaves()
+        .into_iter()
+        .filter(|l| l.visible && l.path.starts_with(&path))
+        .flat_map(|l| l.layer.corners().map(|p| cam.to_screen(rect, p)))
+        .collect();
+    (!pts.is_empty()).then(|| Rect::from_points(&pts).expand(4.0))
+}
+
+/// The middle of the top of a group's box on screen, and its rotation handle above.
+fn group_rotate_handle(b: Rect) -> (Pos2, Pos2) {
+    let top_mid = b.center_top();
+    (top_mid, top_mid - vec2(0.0, ROTATE_HANDLE_OFFSET))
+}
+
 /// Screen positions of the four corners, the middle of the top edge and the rotation
 /// handle.
 fn handles(cam: &Camera, rect: Rect, layer: &Layer) -> ([Pos2; 4], Pos2, Pos2) {
@@ -813,8 +841,8 @@ pub fn show(
     // Stretch paint says, for that drag. Neither key then does what it does alone.
     let flip_paint = ui.input(|i| i.modifiers.command && i.modifiers.alt);
     let alt = ui.input(|i| i.modifiers.alt) && !flip_paint;
-    // Ctrl swaps the corner handles between resizing and distorting while held.
-    let distorting = state.distort_mode != (ui.input(|i| i.modifiers.command) && !flip_paint);
+    // Ctrl makes the corner handles distort instead of resizing while held.
+    let distorting = ui.input(|i| i.modifiers.command) && !flip_paint;
     // Snapping reach in mm, when on and the template has shapes with a center.
     let anchors: Vec<P2> = elements.iter().flat_map(|e| &e.centers).copied().collect();
     let snap_reach =
@@ -870,11 +898,21 @@ pub fn show(
     let editing_points = state.points.as_ref().map(|e| e.layer);
     let handle_at = |doc: &Document, sel: Option<u64>, p: Pos2| -> Option<(u64, DragKind)> {
         let id = sel?;
-        let layer = doc.layer(id)?;
         if doc.effectively_locked(id) || !doc.effectively_visible(id) || editing_points == Some(id)
         {
             return None;
         }
+        // A group: the rotation handle above its box (none in the template editor).
+        if let Some(Node::Group(_)) = doc.node(id) {
+            if doc.edited_template.is_some() {
+                return None;
+            }
+            let (_, rot) = group_rotate_handle(group_box(doc, &cam, rect, id)?);
+            return (rot.distance(p) <= HANDLE_RADIUS * 1.5)
+                .then(|| Some((id, DragKind::RotateGroup(layers_ui::group_middle(doc, id)?))))
+                .flatten();
+        }
+        let layer = doc.layer(id).filter(|l| !crate::background::is_fixed(l))?;
         let (corners, _, rot) = handles(&cam, rect, layer);
         if rot.distance(p) <= HANDLE_RADIUS * 1.5 {
             Some((layer.id, DragKind::Rotate))
@@ -899,13 +937,14 @@ pub fn show(
     // A paint tool takes the left button: it paints or erases in the selected closed
     // shape instead of selecting. Esc goes back to selecting. Without one to paint in,
     // the tool waits for the next one.
-    if active_tool(doc, *selected, &state.brushes).is_some()
+    if (state.eyedropper || active_tool(doc, *selected, &state.brushes).is_some())
         && !ui.ctx().egui_wants_keyboard_input()
         && ui.input(|i| i.key_pressed(Key::Escape))
     {
         state.brushes.tool = None;
+        state.eyedropper = false;
     }
-    let active = active_tool(doc, *selected, &state.brushes);
+    let active = active_tool(doc, *selected, &state.brushes).filter(|_| !state.eyedropper);
     if active.is_none() {
         state.painting.clear();
     }
@@ -915,6 +954,16 @@ pub fn show(
         state.drawing = None;
         state.points = None;
         changed |= paint_input(ui, doc, *selected, state, cam, rect, &response, tool);
+    }
+    // The eyedropper takes the left button too.
+    let dropper = state.eyedropper && !space && doc.edited_template.is_none();
+    if dropper {
+        state.typing = None;
+        state.drawing = None;
+        state.points = None;
+        eyedropper_input(ui, doc, state, cam, rect, &response);
+    } else {
+        state.dropper_sample = None;
     }
 
     // Typing on the canvas takes the clicks and drags on its text.
@@ -966,7 +1015,7 @@ pub fn show(
     changed |= points.changed;
     snapped = snapped.or(points.snapped);
 
-    if !space && !typing.took && !points.took && paint_tool.is_none() {
+    if !space && !typing.took && !points.took && paint_tool.is_none() && !dropper {
         if response.drag_started_by(PointerButton::Primary) {
             let origin = ui
                 .input(|i| i.pointer.press_origin())
@@ -984,11 +1033,15 @@ pub fn show(
                 // reference, whose tilt isn't saved).
                 let tilt = ui.input(|i| i.modifiers.command && !i.modifiers.alt);
                 let tiltable = |id: u64| {
-                    doc.layer(id).is_some()
+                    doc.layer(id)
+                        .is_some_and(|l| !crate::background::is_fixed(l))
                         && !doc.effectively_locked(id)
                         && !crate::template_edit::is_reference(doc, id)
                 };
                 let (ids, kind) = match handle_at(doc, *selected, origin) {
+                    Some((id, kind @ DragKind::RotateGroup(_))) => {
+                        (layers_ui::movable_layers(doc, id), kind)
+                    }
                     Some((id, kind)) => (vec![id], kind),
                     None => match (topmost_hit(doc, m), *selected) {
                         (Some(hit), Some(sel)) if tilt && hit == sel && tiltable(sel) => {
@@ -999,8 +1052,13 @@ pub fn show(
                             (layers_ui::movable_layers(doc, sel), DragKind::Move)
                         }
                         // A locked layer is selected but stays put: the drag pans.
+                        // A background stays on the outline: the drag pans.
                         (hit, _) => {
                             *selected = layer_to_select(doc, m);
+                            let hit = hit.filter(|&id| {
+                                doc.layer(id)
+                                    .is_none_or(|l| !crate::background::is_fixed(l))
+                            });
                             (hit.into_iter().collect(), DragKind::Move)
                         }
                     },
@@ -1131,7 +1189,9 @@ pub fn show(
     // The guide under the pointer, or the one dragged, is highlighted.
     state.guide_hover = state.guide_drag.or_else(|| {
         hover
-            .filter(|_| state.drag.is_none() && paint_tool.is_none() && state.drawing.is_none())
+            .filter(|_| {
+                state.drag.is_none() && paint_tool.is_none() && !dropper && state.drawing.is_none()
+            })
             .filter(|&p| !space && !points.over_handle && handle_at(doc, *selected, p).is_none())
             .and_then(|p| guide_under(doc, p))
     });
@@ -1210,6 +1270,30 @@ pub fn show(
             changed = true;
         } else if response.dragged_by(PointerButton::Primary)
             && let Some(p) = response.interact_pointer_pos()
+            && let DragKind::RotateGroup(pivot) = drag.kind
+        {
+            // Turned by the angle the pointer went around the middle; Shift: 15° steps.
+            let m = cam.to_mm(rect, p);
+            let (v0, v) = (
+                [
+                    drag.start_mouse[0] - pivot[0],
+                    drag.start_mouse[1] - pivot[1],
+                ],
+                [m[0] - pivot[0], m[1] - pivot[1]],
+            );
+            let mut delta = (v[1].atan2(v[0]) - v0[1].atan2(v0[0])).to_degrees();
+            if shift {
+                delta = (delta / 15.0).round() * 15.0;
+            }
+            for (id, start) in &drag.layers {
+                if let Some(layer) = doc.layer_mut(*id) {
+                    layer.transform = layers_ui::turned_about(*start, pivot, delta);
+                }
+            }
+            ui.ctx().set_cursor_icon(CursorIcon::Alias);
+            changed = true;
+        } else if response.dragged_by(PointerButton::Primary)
+            && let Some(p) = response.interact_pointer_pos()
             && let Some(&(id, s)) = drag.layers.first()
             && let Some(layer) = doc.layer_mut(id)
         {
@@ -1219,7 +1303,8 @@ pub fn show(
             let v = [m[0] - c[0], m[1] - c[1]];
             let t = &mut layer.transform;
             match drag.kind {
-                DragKind::Move => {}
+                // Handled above, for all its layers.
+                DragKind::Move | DragKind::RotateGroup(_) => {}
                 DragKind::Tilt => {
                     // Screen pixels dragged, in the layer's own frame: up is toward its
                     // top, whatever its rotation and flips.
@@ -1434,6 +1519,7 @@ pub fn show(
         }
     } else if let Some(p) = hover
         && !space
+        && !dropper
         && !panning_now
         && !typing.over_text
         && !points.took
@@ -1441,7 +1527,9 @@ pub fn show(
     {
         let hovered_guide = state.guide_hover.and_then(|i| doc.guides.get(i));
         match handle_at(doc, *selected, p) {
-            Some((_, DragKind::Rotate)) => ui.ctx().set_cursor_icon(CursorIcon::Alias),
+            Some((_, DragKind::Rotate | DragKind::RotateGroup(_))) => {
+                ui.ctx().set_cursor_icon(CursorIcon::Alias)
+            }
             Some((id, DragKind::Stretch(edge))) => {
                 // Resize cursor along the edge's direction on screen.
                 let horizontal = doc.layer(id).is_some_and(|l| {
@@ -1476,8 +1564,16 @@ pub fn show(
     state.snapped = snapped;
     state.snapped_guides = snapped_guides;
     paint(ui, doc, elements, *selected, state, rect, distorting);
-    if can_paint(doc, *selected) && tool_bar(ui, state, rect, has_paint(doc, *selected)) {
+    // Not in the template editor, which has nothing to paint or pick colors for.
+    let paintable = can_paint(doc, *selected);
+    if (paintable || doc.edited_template.is_none())
+        && tool_bar(ui, state, rect, paintable, has_paint(doc, *selected))
+        && paintable
+    {
         changed |= clear_paint(doc, *selected);
+    }
+    if dropper {
+        paint_dropper_sample(ui, state, rect, hover);
     }
     canvas_text::paint(ui, doc, &state.typing, cam, rect);
     let painter = ui.painter_at(rect);
@@ -1978,12 +2074,24 @@ fn hash_scene(nodes: &[SceneNode], h: &mut impl Hasher) {
                     v.to_bits().hash(h);
                 }
                 l.opacity.to_bits().hash(h);
+                l.blend.hash(h);
             }
-            SceneNode::Group { opacity, children } => {
+            SceneNode::Group {
+                opacity,
+                blend,
+                children,
+            } => {
                 1u8.hash(h);
                 opacity.to_bits().hash(h);
+                blend.hash(h);
                 children.len().hash(h);
                 hash_scene(children, h);
+            }
+            SceneNode::Clip { base, clipped } => {
+                2u8.hash(h);
+                hash_scene(std::slice::from_ref(&**base), h);
+                clipped.len().hash(h);
+                hash_scene(clipped, h);
             }
         }
     }
@@ -1996,46 +2104,103 @@ struct Painting<'a> {
     cam: Camera,
     rect: Rect,
     page: P2,
+    /// The page's background color, gradient and pattern.
+    background: (
+        [u8; 3],
+        Option<crate::gradient::Gradient>,
+        Option<crate::pattern::Pattern>,
+    ),
     /// Previews of the previous frame; the ones still in use move to `used`.
     cache: &'a mut HashMap<u64, GroupPreview>,
     used: HashMap<u64, GroupPreview>,
 }
 
+/// Cache key of the offscreen render of the layers up to the last one in a blend mode.
+const BLENDED_PREVIEW: u64 = u64::MAX;
+
 impl Painting<'_> {
+    /// Draws the layer tree. A layer in another mode than normal mixes with what lies
+    /// below it, the page's background included, which drawing each layer on its own
+    /// can't do: the layers up to the last such one (and those clipped to it) are
+    /// composited offscreen, over the background.
+    fn top(&mut self, layers: &[Node]) {
+        let Some(mut k) = layers.iter().rposition(Node::has_blend) else {
+            self.nodes(layers, 1.0);
+            return;
+        };
+        while layers.get(k + 1).is_some_and(Node::clip) {
+            k += 1;
+        }
+        let below = &layers[..=k];
+        let scene = render::scene_nodes(below, true);
+        if self.offscreen(BLENDED_PREVIEW, &scene, 1.0, true) {
+            self.missing(below);
+        } else {
+            self.nodes(below, 1.0);
+        }
+        self.nodes(&layers[k + 1..], 1.0);
+    }
+
     /// Draws nodes under an inherited opacity. Semi-transparent groups with overlapping
-    /// children go through an offscreen render.
+    /// children, and nodes with others clipped to them, go through an offscreen render.
     fn nodes(&mut self, nodes: &[Node], opacity: f32) {
-        for node in nodes {
-            match node {
-                Node::Layer(l) if l.visible => match l.shown_texture() {
-                    Some(tex) => paint_layer(
-                        &self.painter,
-                        self.cam,
-                        self.rect,
-                        l,
-                        tex.id(),
-                        l.opacity * opacity,
-                    ),
-                    None => paint_missing(
-                        &self.painter,
-                        l.corners().map(|p| self.cam.to_screen(self.rect, p)),
-                    ),
-                },
-                Node::Group(g) if g.visible && g.opacity > 0.0 => {
-                    if g.opacity >= 1.0 {
-                        self.nodes(&g.children, opacity);
-                        continue;
-                    }
-                    let scene = render::scene_nodes(&g.children, true);
-                    if scene.len() <= 1 || !self.group(g.id, &scene, opacity * g.opacity) {
-                        // Nothing overlaps within the group: per-layer opacity is exact.
-                        self.nodes(&g.children, opacity * g.opacity);
-                    } else {
-                        self.missing(&g.children);
-                    }
+        let mut i = 0;
+        while i < nodes.len() {
+            let start = i;
+            i += 1;
+            if !nodes[start].clip() {
+                while i < nodes.len() && nodes[i].clip() {
+                    i += 1;
                 }
-                _ => {}
             }
+            if i == start + 1 {
+                self.node(&nodes[start], opacity);
+                continue;
+            }
+            let stack = &nodes[start..i];
+            let scene = render::scene_nodes(stack, true);
+            if self.group(nodes[start].id(), &scene, opacity) {
+                self.missing(stack);
+            } else {
+                // Not clipped rather than not drawn.
+                for node in stack {
+                    self.node(node, opacity);
+                }
+            }
+        }
+    }
+
+    /// Draws one layer or group under an inherited opacity.
+    fn node(&mut self, node: &Node, opacity: f32) {
+        match node {
+            Node::Layer(l) if l.visible => match l.shown_texture() {
+                Some(tex) => paint_layer(
+                    &self.painter,
+                    self.cam,
+                    self.rect,
+                    l,
+                    tex.id(),
+                    l.opacity * opacity,
+                ),
+                None => paint_missing(
+                    &self.painter,
+                    l.corners().map(|p| self.cam.to_screen(self.rect, p)),
+                ),
+            },
+            Node::Group(g) if g.visible && g.opacity > 0.0 => {
+                if g.opacity >= 1.0 {
+                    self.nodes(&g.children, opacity);
+                    return;
+                }
+                let scene = render::scene_nodes(&g.children, true);
+                if scene.len() <= 1 || !self.group(g.id, &scene, opacity * g.opacity) {
+                    // Nothing overlaps within the group: per-layer opacity is exact.
+                    self.nodes(&g.children, opacity * g.opacity);
+                } else {
+                    self.missing(&g.children);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -2057,7 +2222,21 @@ impl Painting<'_> {
 
     /// Draws a group composited offscreen. Returns false if it could not be rendered.
     fn group(&mut self, id: u64, scene: &[SceneNode], opacity: f32) -> bool {
-        let Some((lo, hi)) = render::bounds(scene, Affine::IDENTITY) else {
+        self.offscreen(id, scene, opacity, false)
+    }
+
+    /// Draws nodes composited offscreen, over the page's background with `on_page`.
+    /// Returns false if they could not be rendered.
+    fn offscreen(&mut self, id: u64, scene: &[SceneNode], opacity: f32, on_page: bool) -> bool {
+        let bounds = render::bounds(scene, Affine::IDENTITY);
+        let Some((lo, hi)) = (match (bounds, on_page) {
+            (Some((lo, hi)), true) => Some((
+                [lo[0].min(0.0), lo[1].min(0.0)],
+                [hi[0].max(self.page[0]), hi[1].max(self.page[1])],
+            )),
+            (None, true) => Some(([0.0, 0.0], self.page)),
+            (b, false) => b,
+        }) else {
             return true;
         };
         // Content far off the page is not worth the pixels.
@@ -2082,12 +2261,31 @@ impl Painting<'_> {
         for v in [lo[0], lo[1], hi[0], hi[1]] {
             v.to_bits().hash(&mut h);
         }
+        if on_page {
+            self.background.0.hash(&mut h);
+            format!("{:?}", self.background.1).hash(&mut h);
+            pattern_key(self.background.2.as_ref()).hash(&mut h);
+        }
         let key = h.finish();
 
         let preview = match self.cache.remove(&id) {
             Some(p) if p.key == key => p,
             old => {
-                let pixmap = match render::compose_region(scene, lo, size, px_per_mm) {
+                let composed = if on_page {
+                    render::compose_region_on_page(
+                        scene,
+                        lo,
+                        size,
+                        px_per_mm,
+                        self.page,
+                        self.background.0,
+                        self.background.1.as_ref(),
+                        self.background.2.as_ref(),
+                    )
+                } else {
+                    render::compose_region(scene, lo, size, px_per_mm)
+                };
+                let pixmap = match composed {
                     Ok(p) => p,
                     Err(e) => {
                         log::warn!("group preview: {e}");
@@ -2325,13 +2523,18 @@ fn paint(
     );
     let [r, g, b] = doc.background;
     painter.rect_filled(page, 0.0, Color32::from_rgb(r, g, b));
-    match &doc.background_gradient {
-        Some(gradient) => {
-            let texture = background_texture(ui.ctx(), state, doc, gradient);
+    let filled = doc.background_gradient.is_some()
+        || doc
+            .background_pattern
+            .as_ref()
+            .is_some_and(|p| p.tile.is_some());
+    match filled {
+        true => {
+            let texture = background_texture(ui.ctx(), state, doc);
             let uv = Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0));
             painter.image(texture, page, uv, Color32::WHITE);
         }
-        None => state.background = None,
+        false => state.background = None,
     }
 
     // While comparing, the project's template on one side of the divider (`own`), the
@@ -2359,10 +2562,15 @@ fn paint(
         cam,
         rect,
         page: doc.page_mm(),
+        background: (
+            doc.background,
+            doc.background_gradient.clone(),
+            doc.background_pattern.clone(),
+        ),
         cache: &mut state.group_previews,
         used: HashMap::new(),
     };
-    painting.nodes(&doc.layers, 1.0);
+    painting.top(&doc.layers);
     // In the template editor, the centers of the elements' closed shapes, crossed as a
     // project's template shows them.
     if doc.edited_template.is_some() && state.show_template {
@@ -2510,6 +2718,13 @@ fn paint(
             ];
             painter.extend(Shape::dashed_line(&line, Stroke::new(1.5, color), 6.0, 4.0));
             badges(ui, &painter, b.center(), locked, orphan);
+            // Its rotation handle; not in the template editor, whose groups are elements.
+            if !locked && doc.edited_template.is_none() {
+                let (top_mid, rot) = group_rotate_handle(b);
+                let stroke = Stroke::new(1.5, color);
+                painter.line_segment([top_mid, rot], stroke);
+                painter.circle(rot, HANDLE_RADIUS, Color32::WHITE, stroke);
+            }
         }
     } else if let Some(layer) = doc.layer(sel)
         // Its points are being edited or drawn: they are shown instead.
@@ -2581,12 +2796,18 @@ pub const TOOLS: [(crate::shortcuts::Command, Option<crate::paint::Tool>); 4] = 
     ),
 ];
 
-/// The tool bar at the canvas' top left, while a closed shape is selected: the tools,
-/// the button clearing the shape's paint (`can_clear` says whether it has any), then,
-/// for a paint tool, its color (not the eraser's) and width. Returns true if the
-/// clear button was clicked.
-fn tool_bar(ui: &egui::Ui, state: &mut CanvasState, rect: Rect, can_clear: bool) -> bool {
-    use crate::layers_ui::{Tool as Icon, tool_icon};
+/// The tool bar at the canvas' top left: Select and the eyedropper; while a closed shape
+/// is selected (`paintable`), the paint tools between them, the button clearing the
+/// shape's paint (`can_clear` says whether it has any), then, for a paint tool, its
+/// color (not the eraser's) and width. Returns true if the clear button was clicked.
+fn tool_bar(
+    ui: &egui::Ui,
+    state: &mut CanvasState,
+    rect: Rect,
+    paintable: bool,
+    can_clear: bool,
+) -> bool {
+    use crate::layers_ui::Tool as Icon;
     let mut clear = false;
     egui::Area::new(ui.scope_id().with("tool_bar"))
         .fixed_pos(rect.min + vec2(8.0, 8.0))
@@ -2597,7 +2818,8 @@ fn tool_bar(ui: &egui::Ui, state: &mut CanvasState, rect: Rect, can_clear: bool)
                 .show(ui, |ui| {
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 2.0;
-                        for (command, tool) in TOOLS {
+                        let shown = TOOLS.iter().filter(|(_, t)| paintable || t.is_none());
+                        for &(command, tool) in shown {
                             let icon = match tool {
                                 None => Icon::Select,
                                 Some(crate::paint::Tool::Pencil) => Icon::Pencil,
@@ -2612,23 +2834,26 @@ fn tool_bar(ui: &egui::Ui, state: &mut CanvasState, rect: Rect, can_clear: bool)
                                 tip = format!("{tip}\n{}", crate::i18n::tr!("BRUSH_KIND_HINT"));
                             }
                             // The tool in use stands out.
-                            let on = state.brushes.tool == tool;
-                            let at = ui.cursor().min;
-                            if on {
-                                ui.painter().rect_filled(
-                                    Rect::from_min_size(at, vec2(24.0, 24.0)),
-                                    3.0,
-                                    ui.visuals().selection.bg_fill,
-                                );
-                            }
-                            let button = tool_icon(ui, icon, true, &tip);
+                            let on = !state.eyedropper
+                                && (state.brushes.tool == tool || !paintable && tool.is_none());
+                            let button = tool_toggle(ui, icon, on, &tip);
                             if button.clicked() {
                                 state.brushes.tool = tool;
+                                state.eyedropper = false;
                                 state.painting.clear();
                             }
                             if tool == Some(crate::paint::Tool::Brush) {
                                 brush_menu(ui, &button, &mut state.brushes);
                             }
+                        }
+                        let c = crate::shortcuts::Command::EyedropperTool;
+                        let tip = crate::shortcuts::with_key(c.label(), state.keys.get(&c));
+                        if tool_toggle(ui, Icon::Eyedropper, state.eyedropper, &tip).clicked() {
+                            state.eyedropper = true;
+                            state.painting.clear();
+                        }
+                        if !paintable {
+                            return;
                         }
                         // Emptying the shape of its paint, with any tool.
                         ui.add_space(4.0);
@@ -2636,13 +2861,12 @@ fn tool_bar(ui: &egui::Ui, state: &mut CanvasState, rect: Rect, can_clear: bool)
                         let tip = crate::shortcuts::with_key(c.label(), state.keys.get(&c));
                         clear =
                             crate::layers_ui::tool_button(ui, Icon::ClearPaint, can_clear, &tip);
-                        let Some(tool) = state.brushes.tool else {
+                        let Some(tool) = state.brushes.tool.filter(|_| !state.eyedropper) else {
                             return;
                         };
                         ui.separator();
                         if tool != crate::paint::Tool::Eraser {
-                            let mut link = None;
-                            crate::colors::button(ui, &mut state.brushes.color, true, &mut link)
+                            crate::colors::button(ui, &mut state.brushes.color, true, None)
                                 .on_hover_text(crate::i18n::tr!("PAINT_COLOR_HINT"));
                         }
                         ui.add(
@@ -2660,6 +2884,100 @@ fn tool_bar(ui: &egui::Ui, state: &mut CanvasState, rect: Rect, can_clear: bool)
                 });
         });
     clear
+}
+
+/// A tool bar button with `icon`, standing out when `on`, the tool in hand.
+fn tool_toggle(
+    ui: &mut egui::Ui,
+    icon: crate::layers_ui::Tool,
+    on: bool,
+    tip: &str,
+) -> egui::Response {
+    if on {
+        let at = ui.cursor().min;
+        ui.painter().rect_filled(
+            Rect::from_min_size(at, vec2(24.0, 24.0)),
+            3.0,
+            ui.visuals().selection.bg_fill,
+        );
+    }
+    crate::layers_ui::tool_icon(ui, icon, true, tip)
+}
+
+/// With the eyedropper in hand: the artwork's color under the pointer is sampled when it
+/// moves, and a click takes it: it becomes the paint's color and its hex code goes to the
+/// clipboard. A Ctrl+click also adds it to the picked ones, first among the colors in use.
+fn eyedropper_input(
+    ui: &egui::Ui,
+    doc: &Document,
+    state: &mut CanvasState,
+    cam: Camera,
+    rect: Rect,
+    response: &egui::Response,
+) {
+    let Some(p) = ui
+        .input(|i| i.pointer.hover_pos())
+        .filter(|_| ui.rect_contains_pointer(rect))
+    else {
+        state.dropper_sample = None;
+        return;
+    };
+    ui.ctx().set_cursor_icon(CursorIcon::Crosshair);
+    let at = cam.to_mm(rect, p);
+    if state.dropper_sample.is_none_or(|(q, _)| q != at) {
+        // One pixel at the zoom's resolution: the color as shown.
+        let px_per_mm = (cam.zoom * ui.ctx().pixels_per_point()).max(1e-3);
+        let color = render::sample(
+            &render::scene_nodes(&doc.layers, true),
+            at,
+            px_per_mm,
+            doc.page_mm(),
+            doc.background,
+            doc.background_gradient.as_ref(),
+            doc.background_pattern.as_ref(),
+        );
+        state.dropper_sample = Some((at, color));
+    }
+    if response.clicked_by(PointerButton::Primary)
+        && let Some((_, Some(c))) = state.dropper_sample
+    {
+        state.brushes.color = c;
+        if ui.input(|i| i.modifiers.command) {
+            state.picked.retain(|&p| p != c);
+            state.picked.insert(0, c);
+        }
+        let [r, g, b, _] = c;
+        ui.ctx().copy_text(format!("#{r:02X}{g:02X}{b:02X}"));
+    }
+}
+
+/// Next to the pointer, with the eyedropper in hand: a swatch of the color under it and
+/// its code.
+fn paint_dropper_sample(ui: &egui::Ui, state: &CanvasState, rect: Rect, hover: Option<Pos2>) {
+    let (Some(p), Some((_, Some(c)))) = (hover, state.dropper_sample) else {
+        return;
+    };
+    let painter = ui.painter_at(rect);
+    let [r, g, b, a] = c;
+    let side = 28.0;
+    let swatch = Rect::from_min_size(p + vec2(14.0, 14.0), vec2(side, side));
+    let frame = Stroke::new(1.0, ui.visuals().widgets.noninteractive.fg_stroke.color);
+    painter.rect_filled(swatch.expand(2.0), 4.0, ui.visuals().extreme_bg_color);
+    painter.rect_filled(swatch, 3.0, Color32::from_rgba_unmultiplied(r, g, b, a));
+    painter.rect_stroke(swatch, 3.0, frame, egui::StrokeKind::Outside);
+    let text = format!("#{r:02X}{g:02X}{b:02X}");
+    let font = egui::TextStyle::Small.resolve(ui.style());
+    let galley = painter.layout_no_wrap(text, font, ui.visuals().text_color());
+    let at = pos2(
+        swatch.right() + 6.0,
+        swatch.center().y - galley.size().y / 2.0,
+    );
+    painter.rect_filled(
+        Rect::from_min_size(at, galley.size()).expand(3.0),
+        3.0,
+        ui.visuals().extreme_bg_color,
+    );
+    painter.galley(at, galley, Color32::PLACEHOLDER);
 }
 
 /// The brush button's corner mark, saying it has more kinds, and the menu of them
@@ -3039,6 +3357,22 @@ fn stroke_preview(
 /// Longest side of the page background's gradient as drawn on screen, in pixels: a
 /// gradient is smooth, so a small texture stretched over the page shows it well.
 const BACKGROUND_SIDE: f32 = 512.0;
+/// The same for a pattern, whose tiles have details.
+const PATTERN_BACKGROUND_SIDE: f32 = 4096.0;
+
+/// Tells a pattern's settings and image from others, for the textures drawn from it.
+fn pattern_key(p: Option<&crate::pattern::Pattern>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    if let Some(p) = p {
+        serde_json::to_string(p).unwrap_or_default().hash(&mut h);
+        p.tile
+            .as_ref()
+            .map(|t| std::sync::Arc::as_ptr(t) as usize)
+            .hash(&mut h);
+    }
+    h.finish()
+}
 
 /// The page background's gradient as a texture the page's shape, drawn again when the
 /// gradient, the color or the page changes.
@@ -3046,15 +3380,16 @@ fn background_texture(
     ctx: &egui::Context,
     state: &mut CanvasState,
     doc: &Document,
-    gradient: &crate::gradient::Gradient,
 ) -> egui::TextureId {
     let page = doc.page_mm();
+    let pattern = doc.background_pattern.as_ref();
     let key = {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
-        serde_json::to_string(gradient)
+        serde_json::to_string(&doc.background_gradient)
             .unwrap_or_default()
             .hash(&mut h);
+        pattern_key(pattern).hash(&mut h);
         doc.background.hash(&mut h);
         page.map(f32::to_bits).hash(&mut h);
         h.finish()
@@ -3064,13 +3399,25 @@ fn background_texture(
     {
         return t.id();
     }
-    let k = BACKGROUND_SIDE / page[0].max(page[1]).max(1.0);
+    // A pattern's tiles need more pixels than a gradient.
+    let side = if pattern.is_some() {
+        PATTERN_BACKGROUND_SIDE
+    } else {
+        BACKGROUND_SIDE
+    };
+    let k = side / page[0].max(page[1]).max(1.0);
     let (w, h) = (
         (page[0] * k).round().max(1.0) as u32,
         (page[1] * k).round().max(1.0) as u32,
     );
     let mut pixmap = tiny_skia::Pixmap::new(w, h).expect("a small pixmap");
-    crate::render::fill_background(&mut pixmap, doc.background, Some(gradient));
+    crate::render::fill_background(
+        &mut pixmap,
+        doc.background,
+        doc.background_gradient.as_ref(),
+        pattern,
+        k,
+    );
     let image = egui::ColorImage::from_rgba_premultiplied([w as usize, h as usize], pixmap.data());
     let texture = ctx.load_texture("page-background", image, egui::TextureOptions::LINEAR);
     let id = texture.id();
@@ -3339,6 +3686,8 @@ mod tests {
                     visible: true,
                     locked: false,
                     opacity: 0.5,
+                    clip: false,
+                    blend: crate::document::BlendMode::Normal,
                     expanded: true,
                     children: vec![square(2, 50.0), square(3, 100.0)],
                     element: None,
@@ -3406,6 +3755,104 @@ mod tests {
         assert!(close(c(2), [60.0, 55.0]), "{:?}", c(2));
         assert!(close(c(3), [110.0, 55.0]), "{:?}", c(3));
         assert!(close(c(4), [200.0, 50.0]), "outside the group stays put");
+    }
+
+    #[test]
+    fn the_eyedropper_takes_the_artworks_color_without_selecting() {
+        let img = image::RgbaImage::from_pixel(10, 10, image::Rgba([200, 30, 40, 255]));
+        let pixmap = std::sync::Arc::new(render::premultiplied_pixmap(&img).unwrap());
+        let mut l = Layer::new(1, "red".into(), "x.png".into());
+        l.size_px = [10, 10];
+        l.transform.center = [50.0, 50.0];
+        l.pixmap = Some(pixmap.clone());
+        l.preview = Some(pixmap);
+        let mut doc = Document {
+            layers: vec![Node::Layer(Box::new(l))],
+            background: [10, 20, 30],
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        let mut state = CanvasState::default();
+        let selected = std::cell::RefCell::new(None);
+        let mut time = 0.0;
+        let mut frame = |doc: &mut Document, state: &mut CanvasState, events: Vec<Event>| {
+            time += 0.1;
+            let input = egui::RawInput {
+                screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 800.0))),
+                time: Some(time),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                show(ui, doc, &[], &mut selected.borrow_mut(), state);
+            });
+            out.textures_delta.clear();
+            out.platform_output
+        };
+        frame(&mut doc, &mut state, vec![]);
+        let (cam, rect) = (state.camera, state.rect);
+        let mut click = |doc: &mut Document, state: &mut CanvasState, at: P2, ctrl: bool| {
+            let pos = cam.to_screen(rect, at);
+            let modifiers = if ctrl {
+                egui::Modifiers::COMMAND
+            } else {
+                Default::default()
+            };
+            let button = |pressed| Event::PointerButton {
+                pos,
+                button: PointerButton::Primary,
+                pressed,
+                modifiers,
+            };
+            let held = Event::ModifiersChanged(modifiers);
+            frame(doc, state, vec![held, Event::PointerMoved(pos)]);
+            frame(doc, state, vec![button(true)]);
+            frame(doc, state, vec![button(false)])
+        };
+
+        state.eyedropper = true;
+        let out = click(&mut doc, &mut state, [50.0, 50.0], false);
+        assert_eq!(state.brushes.color, [200, 30, 40, 255], "the layer's color");
+        assert!(
+            state.picked.is_empty(),
+            "a click doesn't add it to the colors in use"
+        );
+        assert!(
+            out.commands
+                .iter()
+                .any(|c| matches!(c, egui::OutputCommand::CopyText(t) if t == "#C81E28")),
+            "its code copied: {:?}",
+            out.commands
+        );
+        assert_eq!(*selected.borrow(), None, "the layer clicked isn't selected");
+        assert!(state.eyedropper, "still in hand");
+
+        click(&mut doc, &mut state, [20.0, 20.0], true);
+        assert_eq!(state.brushes.color, [10, 20, 30, 255]);
+        assert_eq!(
+            state.picked,
+            [[10, 20, 30, 255]],
+            "Ctrl+click: the page's background added to the colors in use"
+        );
+        // Another one is added before it; one added again moves first, once.
+        click(&mut doc, &mut state, [50.0, 50.0], true);
+        assert_eq!(state.picked, [[200, 30, 40, 255], [10, 20, 30, 255]]);
+        click(&mut doc, &mut state, [20.0, 20.0], true);
+        assert_eq!(state.picked, [[10, 20, 30, 255], [200, 30, 40, 255]]);
+
+        // Off the page, nothing is drawn: nothing taken.
+        click(&mut doc, &mut state, [-20.0, -20.0], true);
+        assert_eq!(state.picked, [[10, 20, 30, 255], [200, 30, 40, 255]]);
+
+        let esc = Event::Key {
+            key: Key::Escape,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: Default::default(),
+        };
+        frame(&mut doc, &mut state, vec![esc]);
+        assert!(!state.eyedropper, "Esc: back to selecting");
     }
 
     #[test]
@@ -4029,20 +4476,30 @@ mod tests {
     }
 
     #[test]
-    fn distort_mode_drags_one_corner() {
-        let mut l = Layer::new(1, "l".into(), "x.png".into());
-        l.size_px = [100, 50];
-        l.transform.center = [100.0, 100.0];
-        l.transform.rotation_deg = 30.0;
+    fn the_group_handle_turns_the_group() {
+        let square = |id: u64, x: f32| {
+            let mut l = Layer::new(id, format!("l{id}"), "x.png".into());
+            l.size_px = [20, 20];
+            l.transform.center = [x, 100.0];
+            Node::Layer(Box::new(l))
+        };
         let mut doc = Document {
-            layers: vec![Node::Layer(Box::new(l))],
+            layers: vec![Node::Group(crate::document::Group {
+                id: 1,
+                name: "g".into(),
+                visible: true,
+                locked: false,
+                opacity: 1.0,
+                clip: false,
+                blend: crate::document::BlendMode::Normal,
+                expanded: true,
+                children: vec![square(2, 80.0), square(3, 120.0)],
+                element: None,
+            })],
             ..Default::default()
         };
         let ctx = egui::Context::default();
-        let mut state = CanvasState {
-            distort_mode: true,
-            ..Default::default()
-        };
+        let mut state = CanvasState::default();
         let mut selected = Some(1);
         let mut time = 0.0;
         let mut frame = |doc: &mut Document, state: &mut CanvasState, events: Vec<Event>| {
@@ -4059,11 +4516,12 @@ mod tests {
             out.textures_delta.clear();
         };
         frame(&mut doc, &mut state, vec![]);
-        let before = doc.layer(1).unwrap().corners();
         let (cam, rect) = (state.camera, state.rect);
-        let target = [before[1][0] - 10.0, before[1][1] + 8.0];
-        let from = cam.to_screen(rect, before[1]);
-        let to = cam.to_screen(rect, target);
+        let (_, from) = group_rotate_handle(group_box(&doc, &cam, rect, 1).unwrap());
+        // From straight above the middle (100, 100) to straight right of it: a quarter
+        // turn clockwise.
+        let mid = cam.to_screen(rect, [100.0, 100.0]);
+        let to = mid + vec2(from.distance(mid), 0.0);
         let button = |pos, pressed| Event::PointerButton {
             pos,
             button: PointerButton::Primary,
@@ -4072,11 +4530,41 @@ mod tests {
         };
         frame(&mut doc, &mut state, vec![Event::PointerMoved(from)]);
         frame(&mut doc, &mut state, vec![button(from, true)]);
-        for k in 1..=4 {
-            let p = from + (to - from) * (k as f32 / 4.0);
+        for k in 1..=8 {
+            let a = std::f32::consts::FRAC_PI_2 * k as f32 / 8.0;
+            let r = from.distance(mid);
+            let p = mid + vec2(a.sin(), -a.cos()) * r;
             frame(&mut doc, &mut state, vec![Event::PointerMoved(p)]);
         }
         frame(&mut doc, &mut state, vec![button(to, false)]);
+        let close = |a: P2, b: P2| (a[0] - b[0]).abs() < 0.05 && (a[1] - b[1]).abs() < 0.05;
+        let (l, r) = (doc.layer(2).unwrap(), doc.layer(3).unwrap());
+        assert!(
+            close(l.transform.center, [100.0, 80.0]),
+            "{:?}",
+            l.transform.center
+        );
+        assert!(
+            close(r.transform.center, [100.0, 120.0]),
+            "{:?}",
+            r.transform.center
+        );
+        assert!((l.transform.rotation_deg - 90.0).abs() < 0.1);
+    }
+
+    #[test]
+    fn ctrl_drags_one_corner() {
+        let mut l = Layer::new(1, "l".into(), "x.png".into());
+        l.size_px = [100, 50];
+        l.transform.center = [100.0, 100.0];
+        l.transform.rotation_deg = 30.0;
+        let mut doc = Document {
+            layers: vec![Node::Layer(Box::new(l))],
+            ..Default::default()
+        };
+        let before = doc.layer(1).unwrap().corners();
+        let target = [before[1][0] - 10.0, before[1][1] + 8.0];
+        canvas_drag(&mut doc, before[1], target, egui::Modifiers::COMMAND);
 
         let after = doc.layer(1).unwrap().corners();
         let close = |a: P2, b: P2| (a[0] - b[0]).abs() < 0.05 && (a[1] - b[1]).abs() < 0.05;
@@ -4089,23 +4577,19 @@ mod tests {
 
     /// Drags on the canvas from one page point to another, with the layer selected.
     fn canvas_drag(doc: &mut Document, from: P2, to: P2, modifiers: egui::Modifiers) {
-        canvas_drag_in(doc, from, to, modifiers, false, &[]);
+        canvas_drag_in(doc, from, to, modifiers, &[]);
     }
 
-    /// `canvas_drag` with the Distort button on or off.
+    /// `canvas_drag` with the template's `elements` on the page.
     fn canvas_drag_in(
         doc: &mut Document,
         from: P2,
         to: P2,
         modifiers: egui::Modifiers,
-        distort_mode: bool,
         elements: &[PlacedElement],
     ) {
         let ctx = egui::Context::default();
-        let mut state = CanvasState {
-            distort_mode,
-            ..Default::default()
-        };
+        let mut state = CanvasState::default();
         let mut selected = Some(1);
         let mut time = 0.0;
         let mut frame = |doc: &mut Document, state: &mut CanvasState, events: Vec<Event>| {
@@ -4900,8 +5384,7 @@ mod tests {
         let none = egui::Modifiers::NONE;
         // Guides x 40, 110, 180 and y 20, 100, 180. The image: (50, 75) to (150, 125).
         let els = outline([40.0, 20.0], [180.0, 180.0]);
-        let drag =
-            |doc: &mut Document, from: P2, to: P2, m| canvas_drag_in(doc, from, to, m, false, &els);
+        let drag = |doc: &mut Document, from: P2, to: P2, m| canvas_drag_in(doc, from, to, m, &els);
 
         // The left edge comes within reach of the outline's and lands on it.
         let mut doc = snap_doc();
@@ -4928,7 +5411,7 @@ mod tests {
 
         // Without a template, the page's edges: the right one, 297.
         let mut doc = snap_doc();
-        canvas_drag_in(&mut doc, [100.0, 100.0], [245.5, 100.0], none, false, &[]);
+        canvas_drag_in(&mut doc, [100.0, 100.0], [245.5, 100.0], none, &[]);
         assert!(close(doc.layer(1).unwrap().transform.center[0], 247.0));
 
         // A corner scaled near the outline's right side ends on it.
@@ -4945,59 +5428,31 @@ mod tests {
         // The center comes within reach of an anchor and lands on it.
         let mut doc = snap_doc();
         let near_center = anchors(&[[104.0, 102.0]]);
-        canvas_drag_in(
-            &mut doc,
-            [100.0, 100.0],
-            [103.0, 101.0],
-            none,
-            false,
-            &near_center,
-        );
+        canvas_drag_in(&mut doc, [100.0, 100.0], [103.0, 101.0], none, &near_center);
         let c = doc.layer(1).unwrap().transform.center;
         assert!(close(c, [104.0, 102.0]), "{c:?}");
         // Alt drags freely.
         let mut doc = snap_doc();
-        canvas_drag_in(
-            &mut doc,
-            [100.0, 100.0],
-            [103.0, 101.0],
-            alt,
-            false,
-            &near_center,
-        );
+        canvas_drag_in(&mut doc, [100.0, 100.0], [103.0, 101.0], alt, &near_center);
         let c = doc.layer(1).unwrap().transform.center;
         assert!(close(c, [103.0, 101.0]), "{c:?}");
         // A corner snaps too, moving the whole image with it.
         let mut doc = snap_doc();
         let near_corner = anchors(&[[155.0, 76.0]]);
-        canvas_drag_in(
-            &mut doc,
-            [100.0, 100.0],
-            [104.0, 100.0],
-            none,
-            false,
-            &near_corner,
-        );
+        canvas_drag_in(&mut doc, [100.0, 100.0], [104.0, 100.0], none, &near_corner);
         let l = doc.layer(1).unwrap();
         assert!(close(l.corners()[1], [155.0, 76.0]), "{:?}", l.corners());
         assert!(close(l.transform.center, [105.0, 101.0]));
         // So does the middle of an edge: the right one, at (150, 100).
         let mut doc = snap_doc();
         let near_edge = anchors(&[[156.0, 99.0]]);
-        canvas_drag_in(
-            &mut doc,
-            [100.0, 100.0],
-            [104.0, 100.0],
-            none,
-            false,
-            &near_edge,
-        );
+        canvas_drag_in(&mut doc, [100.0, 100.0], [104.0, 100.0], none, &near_edge);
         let c = doc.layer(1).unwrap().transform.center;
         assert!(close(c, [106.0, 99.0]), "{c:?}");
         // Out of reach, nothing snaps.
         let mut doc = snap_doc();
         let far = anchors(&[[130.0, 100.0]]);
-        canvas_drag_in(&mut doc, [100.0, 100.0], [103.0, 101.0], none, false, &far);
+        canvas_drag_in(&mut doc, [100.0, 100.0], [103.0, 101.0], none, &far);
         let c = doc.layer(1).unwrap().transform.center;
         assert!(close(c, [103.0, 101.0]), "{c:?}");
     }
@@ -5009,14 +5464,7 @@ mod tests {
         // Scaling around the center: the corner lands on an anchor on its diagonal.
         let mut doc = snap_doc();
         let on_diagonal = anchors(&[[160.0, 130.0]]);
-        canvas_drag_in(
-            &mut doc,
-            [150.0, 125.0],
-            [158.0, 129.0],
-            none,
-            false,
-            &on_diagonal,
-        );
+        canvas_drag_in(&mut doc, [150.0, 125.0], [158.0, 129.0], none, &on_diagonal);
         let l = doc.layer(1).unwrap();
         assert!(close(l.corners()[2], [160.0, 130.0]), "{:?}", l.corners());
         assert!(
@@ -5027,7 +5475,8 @@ mod tests {
         // Distorting: the corner lands exactly on the anchor, the others stay.
         let mut doc = snap_doc();
         let anchor = anchors(&[[160.0, 81.0]]);
-        canvas_drag_in(&mut doc, [150.0, 75.0], [158.0, 80.0], none, true, &anchor);
+        let ctrl = egui::Modifiers::COMMAND;
+        canvas_drag_in(&mut doc, [150.0, 75.0], [158.0, 80.0], ctrl, &anchor);
         let c = doc.layer(1).unwrap().corners();
         assert!(close(c[1], [160.0, 81.0]), "{c:?}");
         assert!(
@@ -5154,26 +5603,14 @@ mod tests {
         let distorted = |d: &Document| d.layer(1).unwrap().transform.is_distorted();
         let scaled = |d: &Document| d.layer(1).unwrap().transform.scale != [1.0, 1.0];
 
-        for (mods, mode, want_distort) in [
-            (none, false, false), // plain drag resizes
-            (ctrl, false, true),  // Ctrl distorts
-            (none, true, true),   // Distort on: plain drag distorts
-            (ctrl, true, false),  // Distort on: Ctrl goes back to resizing
+        for (mods, want_distort) in [
+            (none, false), // plain drag resizes
+            (ctrl, true),  // Ctrl distorts
         ] {
             let mut d = doc();
-            canvas_drag_in(&mut d, from, to, mods, mode, &[]);
-            assert_eq!(
-                distorted(&d),
-                want_distort,
-                "ctrl {} mode {mode}",
-                mods.command
-            );
-            assert_eq!(
-                scaled(&d),
-                !want_distort,
-                "ctrl {} mode {mode}",
-                mods.command
-            );
+            canvas_drag(&mut d, from, to, mods);
+            assert_eq!(distorted(&d), want_distort, "ctrl {}", mods.command);
+            assert_eq!(scaled(&d), !want_distort, "ctrl {}", mods.command);
         }
     }
 
@@ -5206,14 +5643,7 @@ mod tests {
         let ctrl_alt = egui::Modifiers::COMMAND | egui::Modifiers::ALT;
 
         // The right edge's handle dragged out with Ctrl+Alt: wider, the paint in place.
-        canvas_drag_in(
-            &mut doc,
-            [150.0, 100.0],
-            [200.0, 100.0],
-            ctrl_alt,
-            false,
-            &[],
-        );
+        canvas_drag_in(&mut doc, [150.0, 100.0], [200.0, 100.0], ctrl_alt, &[]);
         crate::shape::sync(&ctx, &mut doc, true);
         let size = |doc: &Document| doc.layer(1).unwrap().shape.as_ref().unwrap().size;
         assert!(close(size(&doc), [150.0, 50.0]), "{:?}", size(&doc));
@@ -5228,7 +5658,6 @@ mod tests {
             [200.0, 100.0],
             [350.0, 100.0],
             egui::Modifiers::NONE,
-            false,
             &[],
         );
         crate::shape::sync(&ctx, &mut doc, true);

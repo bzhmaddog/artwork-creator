@@ -219,6 +219,8 @@ mod tests {
             visible: true,
             locked: false,
             opacity: 1.0,
+            clip: false,
+            blend: crate::document::BlendMode::Normal,
             expanded: true,
             children: vec![
                 Node::Layer(Box::new(shape)),

@@ -262,6 +262,14 @@ pub struct Shape {
     /// one color.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fill_gradient: Option<crate::gradient::Gradient>,
+    /// Fills it instead of `fill_color` and `fill_gradient`, when set, over the shape's
+    /// box in mm.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill_pattern: Option<crate::pattern::Pattern>,
+    /// A background: its points are the template's outline grown by the bleed, kept so
+    /// (see `background`).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub follows_outline: bool,
     /// Draw a line along the outline, centered on it.
     pub stroke: bool,
     pub stroke_width: f32,
@@ -324,6 +332,8 @@ impl Shape {
             fill: !open,
             fill_color: [70, 130, 180, 255],
             fill_gradient: None,
+            fill_pattern: None,
+            follows_outline: false,
             stroke: true,
             stroke_width: if open { 1.0 } else { 0.5 },
             stroke_color: [0, 0, 0, 255],
@@ -640,7 +650,12 @@ impl Shape {
                 _ => self.dashed(&path),
             };
             if let Some(stroke) = line.and_then(|l| l.stroke(&self.stroke_style(), CURVE_RES)) {
-                let ink = Ink::of(self.stroke_color, self.stroke_gradient.as_ref(), frame);
+                let ink = Ink::of(
+                    self.stroke_color,
+                    self.stroke_gradient.as_ref(),
+                    None,
+                    frame,
+                );
                 out.push((stroke, ink, false, FillRule::Winding));
             }
         }
@@ -652,7 +667,12 @@ impl Shape {
             out.splice(0..0, paint);
         }
         if self.filled() {
-            let ink = Ink::of(self.fill_color, self.fill_gradient.as_ref(), frame);
+            let ink = Ink::of(
+                self.fill_color,
+                self.fill_gradient.as_ref(),
+                self.fill_pattern.as_ref(),
+                frame,
+            );
             out.insert(0, (path, ink, false, self.fill_rule()));
         }
         out
@@ -1586,14 +1606,7 @@ pub fn outlines(layer: &Layer) -> Option<Outlines> {
         .coats()
         .into_iter()
         .filter_map(|(path, ink, clipped, rule)| {
-            let ink = match ink {
-                Ink::Gradient { gradient, frame } => Ink::Gradient {
-                    gradient,
-                    frame: frame.transform(ts)?,
-                },
-                solid => solid,
-            };
-            Some((path.transform(ts)?, ink, clipped, rule))
+            Some((path.transform(ts)?, ink.transformed(ts)?, clipped, rule))
         })
         .collect();
     // The painted strokes, one after the other, are cut off at the outline.

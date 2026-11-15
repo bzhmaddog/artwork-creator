@@ -101,10 +101,10 @@ pub(super) fn tool_bar(
                             egui::DragValue::new(state.brushes.width_mut(tool))
                                 .range(0.05..=100.0)
                                 .speed(0.05)
-                                .max_decimals(2)
-                                .suffix(" mm"),
+                                .max_decimals(2),
                         )
                         .on_hover_text(crate::i18n::tr!("PAINT_WIDTH_HINT"));
+                        crate::ui::layers::unit(ui, "mm");
                         if tool == crate::document::paint::Tool::Brush {
                             brush_options(ui, &mut state.brushes);
                         }
@@ -246,43 +246,6 @@ pub(super) fn brush_menu(
     });
 }
 
-/// A dial for an angle in degrees, counterclockwise from the right: a ring with a dot at
-/// the angle and a faint line through its center, the calligraphy nib. Dragging or
-/// clicking on it turns it there; a double click puts it back to the default.
-pub(super) fn angle_dial(ui: &mut egui::Ui, deg: &mut f32) -> egui::Response {
-    const SIDE: f32 = 22.0;
-    let (rect, mut r) = ui.allocate_exact_size(vec2(SIDE, SIDE), Sense::click_and_drag());
-    let c = rect.center();
-    if r.double_clicked() {
-        *deg = crate::document::paint::Brushes::default().nib_angle;
-        r.mark_changed();
-    } else if (r.dragged() || r.clicked())
-        && let Some(p) = r.interact_pointer_pos()
-    {
-        let v = p - c;
-        if v.length() > 1.0 {
-            // Up on screen is counterclockwise.
-            *deg = (-v.y).atan2(v.x).to_degrees().round();
-            r.mark_changed();
-        }
-    }
-    if ui.is_rect_visible(rect) {
-        let visuals = ui.style().interact(&r);
-        let p = ui.painter();
-        let radius = SIDE / 2.0 - 1.5;
-        p.circle(c, radius, visuals.bg_fill, visuals.bg_stroke);
-        let a = deg.to_radians();
-        let dir = vec2(a.cos(), -a.sin());
-        let faint = visuals.fg_stroke.color.gamma_multiply(0.4);
-        p.line_segment(
-            [c - dir * radius, c + dir * radius],
-            Stroke::new(1.0, faint),
-        );
-        p.circle_filled(c + dir * (radius - 3.0), 2.5, visuals.fg_stroke.color);
-    }
-    r
-}
-
 /// The settings of the brush kinds that have some: the calligraphy nib's angle, the
 /// spray's density.
 pub(super) fn brush_options(ui: &mut egui::Ui, brushes: &mut crate::document::paint::Brushes) {
@@ -290,23 +253,32 @@ pub(super) fn brush_options(ui: &mut egui::Ui, brushes: &mut crate::document::pa
     use crate::i18n::tr;
     match brushes.brush {
         BrushKind::Calligraphy => {
-            angle_dial(ui, &mut brushes.nib_angle).on_hover_text(tr!("NIB_ANGLE_HINT"));
+            let default = crate::document::paint::Brushes::default().nib_angle;
+            let r = crate::ui::dial::angle_dial(
+                ui,
+                &mut brushes.nib_angle,
+                crate::ui::dial::Turn::FromRight,
+                default,
+            )
+            .on_hover_text(tr!("NIB_ANGLE_HINT"));
+            // A faint line through its middle: the nib.
+            let a = brushes.nib_angle.to_radians();
+            let dir = vec2(a.cos(), -a.sin()) * (r.rect.width() / 2.0 - 1.5);
+            let faint = ui.style().interact(&r).fg_stroke.color.gamma_multiply(0.4);
+            let c = r.rect.center();
+            ui.painter()
+                .line_segment([c - dir, c + dir], Stroke::new(1.0, faint));
         }
         BrushKind::Spray => {
             let mut percent = brushes.spray_density * 100.0;
             if ui
-                .add(
-                    egui::DragValue::new(&mut percent)
-                        .range(1.0..=100.0)
-                        .speed(1.0)
-                        .max_decimals(0)
-                        .suffix(" %"),
-                )
+                .add(egui::Slider::new(&mut percent, 1.0..=100.0).max_decimals(0))
                 .on_hover_text(tr!("SPRAY_DENSITY_HINT"))
                 .changed()
             {
                 brushes.spray_density = percent / 100.0;
             }
+            crate::ui::layers::unit(ui, "%");
         }
         _ => {}
     }

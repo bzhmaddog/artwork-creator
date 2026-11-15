@@ -316,7 +316,7 @@
   "FORMULA_WRONG_KIND": "{name} can't be used here: this field takes {kind} and {number} variables",
   "GO_TO_PARENT_FOLDER": "Up",
   "GRADIENT_ANGLE": "Angle",
-  "GRADIENT_ANGLE_HINT": "Direction the colors run: 0° from left to right, 90° from bottom to top",
+  "GRADIENT_ANGLE_HINT": "Direction the colors run: 0° from bottom to top, 90° from left to right",
   "GRADIENT_BAR_HINT": "Click to add a color here. Drag a color below the bar to move it, right-click it to remove it.",
   "GRADIENT_CENTER": "Center",
   "GRADIENT_CENTER_X_HINT": "Across, from the left edge",

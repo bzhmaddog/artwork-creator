@@ -13,8 +13,8 @@ mod tools;
 pub use draw::element_colors;
 use draw::paint;
 use handles::{
-    corners_of, edge_axis, edge_handles, group_box, group_rotate_handle, handles, layer_to_select,
-    len, rotate_vec, topmost_hit,
+    Hot, corners_of, edge_axis, edge_handles, group_box, group_rotate_handle, handles,
+    layer_to_select, len, rotate_vec, topmost_hit,
 };
 pub use rulers::clear_guides;
 use rulers::{
@@ -283,6 +283,8 @@ pub struct CanvasState {
     pub picked: Vec<[u8; 4]>,
     /// Where the eyedropper was on the page last, and the color there.
     dropper_sample: Option<(P2, Option<[u8; 4]>)>,
+    /// The selection's handle under the pointer, or being dragged, drawn highlighted.
+    hot: Option<Hot>,
     /// Each command's shortcut as text, for the tool bar's tooltips; set by the app.
     pub keys: HashMap<crate::ui::shortcuts::Command, String>,
     /// The stroke being painted: x, y on the page (mm) and the pen's pressure.
@@ -345,6 +347,7 @@ impl Default for CanvasState {
             eyedropper: false,
             picked: Vec::new(),
             dropper_sample: None,
+            hot: None,
             keys: HashMap::new(),
             painting: Vec::new(),
             paint_preview: None,
@@ -654,6 +657,9 @@ pub fn show(
         && !points.over_handle
     {
         drag::hover_cursor(ui, doc, *selected, state.guide_hover, &f, p);
+        state.hot = f.hot_at(doc, *selected, p);
+    } else if state.drag.is_none() {
+        state.hot = None;
     }
 
     state.snapped = snapped.anchor;

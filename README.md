@@ -121,10 +121,13 @@ layers panel on the right](doc/capture.png)
   line below them), in the Colors in use panel and in every color picker. Esc goes back to selecting.
 - **Gradients**: a shape's fill and stroke, a text's letters and the page background can
   each be one color or a linear or radial gradient (Solid / Linear gradient / Radial
-  gradient, next to its color). A linear gradient runs at an angle, from one corner of
-  the layer's box to the opposite one; a radial one grows from a center (its position and
+  gradient, next to its color). A linear gradient runs at an angle (0° upward, turning
+  clockwise: 90° from left to right), from one corner of the layer's box to the opposite
+  one; a radial one grows from a center (its position and
   radius can be set) in an ellipse the shape of the box. Its colors sit on a bar: click
   the bar to add one, drag one along it, right-click it to remove it (two always stay).
+  The box under the bar, pointing at the selected one, sets its color, its place (a
+  slider) and removes it.
   Each color has its own opacity and can be linked to a color variable.
 - **Pattern fills**: a shape's fill, a text's letters and the page background can be an
   image repeated side by side: pick **Pattern** in the fill's switch, then the image
@@ -754,6 +757,11 @@ On the canvas, with a layer selected:
 - **Edge handles** stretch one side; **Alt** stretches both sides from the center.
 - **Rotation handle** rotates; **Shift** snaps to 15° steps. A selected group has one
   too, above its dashed box, turning the whole group.
+- **Angle dials**, next to each angle's field in the panels (a layer's rotation, a group's
+  turn, a linear gradient's and a pattern's angle, an effect's angles, the calligraphy
+  nib): drag or click on one to turn it; **Shift** snaps to 15° steps; a double click
+  puts it back to its default. The angle fields themselves aren't dragged: click one
+  to type a value.
 - **Ctrl+Alt** on a corner or edge handle of a shape painted in: its paint does the
   other way than its **Stretch paint** setting says, for that drag only.
 

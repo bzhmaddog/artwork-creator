@@ -333,21 +333,22 @@ fn param_ui(
         ParamKind::Float {
             min,
             max,
+            default,
             unit,
             decimals,
-            ..
         } => {
             let mut v = p.f32(id);
             // Sizes in pixels span a wide range where small values matter most:
             // logarithmic, the slider moves in fine steps there.
-            let slider = Slider::new(&mut v, *min..=*max).logarithmic(unit.trim() == "px");
+            let log = unit.trim() == "px";
             let r = ui
                 .horizontal(|ui| match in_mm(unit) {
                     Some((k, hint)) => {
                         let k = f64::from(k.max(1e-6));
                         let r = ui
                             .add(
-                                slider
+                                Slider::new(&mut v, *min..=*max)
+                                    .logarithmic(log)
                                     .custom_formatter(move |n, _| format!("{:.2}", n * k))
                                     .custom_parser(move |s| {
                                         s.trim().parse::<f64>().ok().map(|mm| mm / k)
@@ -357,8 +358,36 @@ fn param_ui(
                         layers::unit(ui, "mm");
                         r
                     }
+                    // An angle: its value, and a dial to turn it, counterclockwise as
+                    // effects take angles.
+                    None if unit.trim() == "°" => {
+                        let r = ui
+                            .add(
+                                egui::DragValue::new(&mut v)
+                                    .range(*min..=*max)
+                                    .speed(0.0)
+                                    .fixed_decimals(*decimals),
+                            )
+                            .on_hover_cursor(egui::CursorIcon::Text);
+                        layers::unit(ui, unit);
+                        let mut a = v;
+                        let dial = crate::ui::dial::angle_dial(
+                            ui,
+                            &mut a,
+                            crate::ui::dial::Turn::FromRight,
+                            *default,
+                        );
+                        if dial.changed() {
+                            v = a.clamp(*min, *max);
+                        }
+                        r | dial
+                    }
                     None => {
-                        let r = ui.add(slider.fixed_decimals(*decimals));
+                        let r = ui.add(
+                            Slider::new(&mut v, *min..=*max)
+                                .logarithmic(log)
+                                .fixed_decimals(*decimals),
+                        );
                         layers::unit(ui, unit);
                         r
                     }

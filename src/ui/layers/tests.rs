@@ -310,7 +310,7 @@ fn padlock_right_of_the_size_toggles_the_aspect_ratio() {
     let labels = h.frame(vec![]);
     let (_, hpos) = labels
         .iter()
-        .find(|(t, _)| t == "h ")
+        .find(|(t, _)| t == "h")
         .unwrap_or_else(|| panic!("height field: {labels:?}"));
     // The closed padlock's body: a filled 10 x 7 rectangle right of the height, on
     // the same line.
@@ -1096,4 +1096,30 @@ fn brush_menu_preview() {
             );
         }
     });
+}
+
+#[test]
+fn position_size_rotation_and_tilt_fields_line_up_in_columns() {
+    let mut h = Harness::new(doc_with(vec![named(1, "alpha")]));
+    h.selected = Some(1);
+    let labels = h.frame(vec![]);
+    let row_of = |name: &str| labels.iter().find(|(t, _)| t == name).expect(name).1.y;
+    // The fields' fx buttons, left to right, on the row of `name`.
+    let fx = |name: &str| -> Vec<f32> {
+        let y = row_of(name);
+        let mut xs: Vec<f32> = labels
+            .iter()
+            .filter(|(t, p)| t == "fx" && (p.y - y).abs() < 6.0)
+            .map(|(_, p)| p.x)
+            .collect();
+        xs.sort_by(f32::total_cmp);
+        xs
+    };
+    let position = fx("Position");
+    assert_eq!(position.len(), 2);
+    for row in ["Size", "3D tilt"] {
+        assert_eq!(fx(row), position, "{row}");
+    }
+    // Rotation, one field: in the first column.
+    assert_eq!(fx("Rotation"), position[..1], "Rotation");
 }

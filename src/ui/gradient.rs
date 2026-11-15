@@ -9,7 +9,9 @@
 //! stop picked last shows its color button (linked to color variables like any color),
 //! its position and a button removing it.
 
-use egui::{Color32, ComboBox, DragValue, Id, Mesh, Pos2, Rect, Sense, Stroke, Ui, pos2, vec2};
+use egui::{
+    Color32, ComboBox, DragValue, Id, Mesh, Pos2, Rect, Sense, Slider, Stroke, Ui, pos2, vec2,
+};
 
 use crate::document::gradient::{Gradient, GradientKind, MAX_STOPS, Stop};
 use crate::document::pattern::Pattern;
@@ -57,15 +59,15 @@ fn pattern_rows(ui: &mut Ui, p: &mut Pattern, units_per_mm: f32) -> (bool, bool)
     // A length in the fill's units, shown in mm.
     let mm = |ui: &mut Ui, v: &mut f32, prefix: &str, min: f32, hint: &str| {
         let mut x = *v / k;
-        let r = ui
-            .add(
+        let r = crate::ui::layers::prefixed(ui, prefix, |ui| {
+            ui.add(
                 DragValue::new(&mut x)
-                    .prefix(prefix)
                     .range(min..=f32::MAX)
                     .speed(0.1)
                     .fixed_decimals(1),
             )
-            .on_hover_text(hint);
+        })
+        .on_hover_text(hint);
         if r.changed() {
             *v = x * k;
         }
@@ -100,12 +102,21 @@ fn pattern_rows(ui: &mut Ui, p: &mut Pattern, units_per_mm: f32) -> (bool, bool)
                 .add(
                     DragValue::new(&mut p.angle_deg)
                         .range(-180.0..=180.0)
-                        .speed(1.0)
-                        .fixed_decimals(0)
-                        .suffix("°"),
+                        .speed(0.0)
+                        .fixed_decimals(0),
                 )
+                .on_hover_cursor(egui::CursorIcon::Text)
                 .on_hover_text(tr!("PATTERN_ANGLE_HINT"))
                 .changed();
+            crate::ui::layers::unit(ui, "°");
+            changed |= crate::ui::dial::angle_dial(
+                ui,
+                &mut p.angle_deg,
+                crate::ui::dial::Turn::FromTop,
+                0.0,
+            )
+            .on_hover_text(tr!("PATTERN_ANGLE_HINT"))
+            .changed();
         });
         ui.horizontal(|ui| {
             ui.label(tr!("PATTERN_OFFSET"));
@@ -121,6 +132,11 @@ fn pattern_rows(ui: &mut Ui, p: &mut Pattern, units_per_mm: f32) -> (bool, bool)
 /// Height of the stops bar, and of the stops' markers under it.
 const BAR: f32 = 18.0;
 const MARKER: f32 = 12.0;
+/// A new linear gradient's angle as kept (from the right, counterclockwise): 0° as shown,
+/// its colors running upward.
+const NEW_ANGLE: f32 = 90.0;
+/// How far the selected color's box points up at its marker.
+const NOTCH: f32 = 5.0;
 
 /// The switch between one color and a gradient, then the color button or a swatch of
 /// the gradient. Returns whether anything changed. `ui_key` tells this fill from others.
@@ -169,10 +185,10 @@ pub fn inline(ui: &mut Ui, ui_key: impl std::hash::Hash + std::fmt::Debug, f: &m
             Kind::Gradient(k) => {
                 changed = true;
                 // From the color, or the gradient as it was with the other spread.
-                let mut g = f
-                    .gradient
-                    .take()
-                    .unwrap_or_else(|| Gradient::from_color(*f.color));
+                let mut g = f.gradient.take().unwrap_or_else(|| Gradient {
+                    angle: NEW_ANGLE,
+                    ..Gradient::from_color(*f.color)
+                });
                 g.kind = k;
                 *f.gradient = Some(g);
             }
@@ -196,7 +212,7 @@ pub fn inline(ui: &mut Ui, ui_key: impl std::hash::Hash + std::fmt::Debug, f: &m
                 ),
                 Sense::hover(),
             );
-            paint_strip(ui, rect, g);
+            paint_preview(ui, rect, g);
             ui.painter().rect_stroke(
                 rect,
                 2.0,
@@ -223,99 +239,178 @@ pub fn rows(ui: &mut Ui, ui_key: impl std::hash::Hash + std::fmt::Debug, f: &mut
     let id = ui.make_persistent_id(("fill", ui_key));
     let mut changed = false;
     ui.vertical(|ui| {
-        ui.horizontal(|ui| match g.kind {
-            GradientKind::Linear => {
-                ui.label(tr!("GRADIENT_ANGLE"));
-                changed |= ui
-                    .add(
-                        DragValue::new(&mut g.angle)
-                            .range(-180.0..=180.0)
-                            .speed(1.0)
-                            .fixed_decimals(0)
-                            .suffix("°"),
-                    )
-                    .on_hover_text(tr!("GRADIENT_ANGLE_HINT"))
-                    .changed();
-            }
-            GradientKind::Radial => {
-                let mut percent = |ui: &mut Ui, v: &mut f32, max: f32, prefix: &str, hint: &str| {
-                    let mut p = *v * 100.0;
-                    let r = ui
-                        .add(
-                            DragValue::new(&mut p)
-                                .prefix(prefix)
-                                .range(0.0..=max)
-                                .speed(1.0)
-                                .fixed_decimals(0)
-                                .suffix("%"),
+        // Labels in a column, the controls lined up after them.
+        egui::Grid::new(id.with("grid"))
+            .num_columns(2)
+            .show(ui, |ui| match g.kind {
+                GradientKind::Linear => {
+                    ui.label(tr!("GRADIENT_ANGLE"));
+                    ui.horizontal(|ui| {
+                        // Shown from the top, clockwise (0° upward, 90° rightward), as
+                        // the dial's dot points where the colors run; kept from the
+                        // right, counterclockwise.
+                        let mut shown = from_top(g.angle);
+                        if ui
+                            .add(
+                                DragValue::new(&mut shown)
+                                    .range(-180.0..=180.0)
+                                    .speed(0.0)
+                                    .fixed_decimals(0),
+                            )
+                            .on_hover_cursor(egui::CursorIcon::Text)
+                            .on_hover_text(tr!("GRADIENT_ANGLE_HINT"))
+                            .changed()
+                        {
+                            g.angle = from_top(shown);
+                            changed = true;
+                        }
+                        crate::ui::layers::unit(ui, "°");
+                        changed |= crate::ui::dial::angle_dial(
+                            ui,
+                            &mut g.angle,
+                            crate::ui::dial::Turn::FromRight,
+                            NEW_ANGLE,
                         )
-                        .on_hover_text(hint);
-                    if r.changed() {
-                        *v = p / 100.0;
-                        changed = true;
-                    }
-                };
-                ui.label(tr!("GRADIENT_CENTER"));
-                percent(
-                    ui,
-                    &mut g.center[0],
-                    100.0,
-                    "x ",
-                    tr!("GRADIENT_CENTER_X_HINT"),
-                );
-                percent(
-                    ui,
-                    &mut g.center[1],
-                    100.0,
-                    "y ",
-                    tr!("GRADIENT_CENTER_Y_HINT"),
-                );
-                ui.label(tr!("GRADIENT_RADIUS"));
-                percent(ui, &mut g.radius, 300.0, "", tr!("GRADIENT_RADIUS_HINT"));
-            }
-        });
+                        .on_hover_text(tr!("GRADIENT_ANGLE_HINT"))
+                        .changed();
+                    });
+                    ui.end_row();
+                }
+                GradientKind::Radial => {
+                    // A fraction shown in percent: a slider up to 100 %, a field beyond.
+                    let mut percent =
+                        |ui: &mut Ui, v: &mut f32, max: f32, prefix: &str, hint: &str| {
+                            ui.horizontal(|ui| {
+                                if !prefix.is_empty() {
+                                    ui.label(prefix);
+                                }
+                                let mut p = *v * 100.0;
+                                let r = if max <= 100.0 {
+                                    ui.add(Slider::new(&mut p, 0.0..=max).fixed_decimals(0))
+                                } else {
+                                    ui.add(
+                                        DragValue::new(&mut p)
+                                            .range(0.0..=max)
+                                            .speed(1.0)
+                                            .fixed_decimals(0),
+                                    )
+                                }
+                                .on_hover_text(hint);
+                                crate::ui::layers::unit(ui, "%");
+                                if r.changed() {
+                                    *v = p / 100.0;
+                                    changed = true;
+                                }
+                            });
+                        };
+                    ui.label(tr!("GRADIENT_CENTER"));
+                    percent(
+                        ui,
+                        &mut g.center[0],
+                        100.0,
+                        "x",
+                        tr!("GRADIENT_CENTER_X_HINT"),
+                    );
+                    ui.end_row();
+                    ui.label("");
+                    percent(
+                        ui,
+                        &mut g.center[1],
+                        100.0,
+                        "y",
+                        tr!("GRADIENT_CENTER_Y_HINT"),
+                    );
+                    ui.end_row();
+                    ui.label(tr!("GRADIENT_RADIUS"));
+                    percent(ui, &mut g.radius, 300.0, "", tr!("GRADIENT_RADIUS_HINT"));
+                    ui.end_row();
+                }
+            });
         let selected_id = id.with("selected");
         let mut selected = ui
             .data(|d| d.get_temp::<usize>(selected_id))
             .unwrap_or(0)
             .min(g.stops.len().saturating_sub(1));
-        changed |= stops_bar(ui, id, g, &mut selected, f.alpha);
-        // The stop picked last: its color, where it is, and removing it.
-        ui.horizontal(|ui| {
-            let can_remove = g.stops.len() > 2;
-            let Some(stop) = g.stops.get_mut(selected) else {
-                return;
-            };
-            ui.label(tr!("GRADIENT_STOP"));
-            changed |=
-                crate::ui::colors::button(ui, &mut stop.color, f.alpha, Some(&mut stop.link))
-                    .changed();
-            let mut p = stop.pos * 100.0;
-            if ui
-                .add(
-                    DragValue::new(&mut p)
-                        .range(0.0..=100.0)
-                        .speed(0.5)
-                        .fixed_decimals(0)
-                        .suffix("%"),
-                )
-                .on_hover_text(tr!("GRADIENT_STOP_POSITION_HINT"))
-                .changed()
-            {
-                stop.pos = p / 100.0;
-                changed = true;
-            }
-            if crate::ui::layers::tool_button(
-                ui,
-                crate::ui::layers::Tool::Delete,
-                can_remove,
-                tr!("REMOVE_GRADIENT_STOP"),
-            ) {
-                g.stops.remove(selected);
-                selected = selected.saturating_sub(1);
-                changed = true;
-            }
+        let (bar_changed, bar) = stops_bar(ui, id, g, &mut selected, f.alpha);
+        changed |= bar_changed;
+        // The stop picked last, in a box pointing at its marker: its color, where it
+        // is, and removing it.
+        let Some(at) = g
+            .stops
+            .get(selected)
+            .map(|s| bar.left() + s.pos * bar.width())
+        else {
+            return;
+        };
+        ui.add_space(NOTCH);
+        let visuals = ui.visuals().clone();
+        // Outlined like the selected marker.
+        let stroke = Stroke::new(1.0, visuals.selection.stroke.color);
+        let frame = egui::Frame::NONE
+            .fill(visuals.faint_bg_color)
+            .stroke(stroke)
+            .corner_radius(4.0)
+            .inner_margin(egui::Margin::same(6));
+        let width = bar.width() + MARKER;
+        let shown = frame.show(ui, |ui| {
+            ui.set_width(width - 12.0);
+            ui.horizontal(|ui| {
+                let can_remove = g.stops.len() > 2;
+                let Some(stop) = g.stops.get_mut(selected) else {
+                    return;
+                };
+                ui.label(tr!("GRADIENT_STOP"));
+                changed |=
+                    crate::ui::colors::button(ui, &mut stop.color, f.alpha, Some(&mut stop.link))
+                        .changed();
+                // Where it is, to type it exactly: its marker is dragged on the bar.
+                let mut p = stop.pos * 100.0;
+                if ui
+                    .add(
+                        DragValue::new(&mut p)
+                            .range(0.0..=100.0)
+                            .speed(0.5)
+                            .fixed_decimals(0),
+                    )
+                    .on_hover_text(tr!("GRADIENT_STOP_POSITION_HINT"))
+                    .changed()
+                {
+                    stop.pos = p / 100.0;
+                    changed = true;
+                }
+                crate::ui::layers::unit(ui, "%");
+                // Removing it, at the box's right end.
+                let remove = ui
+                    .with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        crate::ui::layers::tool_button(
+                            ui,
+                            crate::ui::layers::Tool::Delete,
+                            can_remove,
+                            tr!("REMOVE_GRADIENT_STOP"),
+                        )
+                    })
+                    .inner;
+                if remove {
+                    g.stops.remove(selected);
+                    selected = selected.saturating_sub(1);
+                    changed = true;
+                }
+            });
         });
+        // The notch on the box's top edge, under the marker.
+        let top = shown.response.rect.top();
+        let notch = [
+            pos2(at - NOTCH, top + 0.5),
+            pos2(at, top - NOTCH),
+            pos2(at + NOTCH, top + 0.5),
+        ];
+        let painter = ui.painter();
+        painter.add(egui::Shape::convex_polygon(
+            notch.to_vec(),
+            visuals.faint_bg_color,
+            Stroke::NONE,
+        ));
+        painter.add(egui::Shape::line(notch.to_vec(), stroke));
         ui.data_mut(|d| d.insert_temp(selected_id, selected));
     });
     changed
@@ -324,7 +419,13 @@ pub fn rows(ui: &mut Ui, ui_key: impl std::hash::Hash + std::fmt::Debug, f: &mut
 /// The gradient as a bar, its stops as markers under it. A click on the bar adds a stop
 /// of the color there; a marker is picked by a click, moved by a drag and removed by a
 /// right click (two stops always stay).
-fn stops_bar(ui: &mut Ui, id: Id, g: &mut Gradient, selected: &mut usize, alpha: bool) -> bool {
+fn stops_bar(
+    ui: &mut Ui,
+    id: Id,
+    g: &mut Gradient,
+    selected: &mut usize,
+    alpha: bool,
+) -> (bool, Rect) {
     let mut changed = false;
     let width = ui.available_width().clamp(150.0, 280.0);
     let (rect, bar_response) = ui.allocate_exact_size(vec2(width, BAR + MARKER), Sense::click());
@@ -413,7 +514,7 @@ fn stops_bar(ui: &mut Ui, id: Id, g: &mut Gradient, selected: &mut usize, alpha:
             ));
         }
     }
-    changed
+    (changed, bar)
 }
 
 /// Where a stop's marker is, its tip at `x` on the bar's bottom edge.
@@ -426,6 +527,54 @@ fn marker_rect(x: f32, bar_bottom: f32) -> Rect {
 
 fn color32(c: [u8; 4]) -> Color32 {
     Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3])
+}
+
+/// A linear gradient's angle counted from the top, clockwise, from one counted from the
+/// right, counterclockwise, or back: the same turn both ways, between -180 and 180.
+fn from_top(deg: f32) -> f32 {
+    let a = (90.0 - deg).rem_euclid(360.0);
+    if a > 180.0 { a - 360.0 } else { a }
+}
+
+/// The gradient over `rect` as it fills a box: at its angle, or around its center.
+fn paint_preview(ui: &Ui, rect: Rect, g: &Gradient) {
+    use crate::document::gradient::Geometry;
+    const STEPS: usize = 24;
+    let Some(frame) =
+        tiny_skia::Rect::from_ltrb(rect.left(), rect.top(), rect.right(), rect.bottom())
+    else {
+        return;
+    };
+    // Where a point is along the gradient, 0 to 1.
+    let geometry = g.geometry(frame);
+    let t_at = |p: Pos2| match geometry {
+        Geometry::Linear { from, to } => {
+            let d = [to[0] - from[0], to[1] - from[1]];
+            let dd = (d[0] * d[0] + d[1] * d[1]).max(1e-6);
+            ((p.x - from[0]) * d[0] + (p.y - from[1]) * d[1]) / dd
+        }
+        Geometry::Radial { ellipse: e } => {
+            let (x, y) = ((p.x - e.tx) / e.sx, (p.y - e.ty) / e.sy);
+            (x * x + y * y).sqrt()
+        }
+    };
+    let mut mesh = Mesh::default();
+    for j in 0..=STEPS {
+        for i in 0..=STEPS {
+            let p = pos2(
+                rect.left() + rect.width() * i as f32 / STEPS as f32,
+                rect.top() + rect.height() * j as f32 / STEPS as f32,
+            );
+            mesh.colored_vertex(p, color32(g.color_at(t_at(p))));
+            if i > 0 && j > 0 {
+                let k = (j * (STEPS + 1) + i) as u32;
+                let row = (STEPS + 1) as u32;
+                mesh.add_triangle(k - row - 1, k - row, k);
+                mesh.add_triangle(k - row - 1, k - 1, k);
+            }
+        }
+    }
+    ui.painter().add(mesh);
 }
 
 /// The gradient's colors from left to right across `rect`, whatever its kind.
@@ -469,6 +618,21 @@ fn checkers(ui: &Ui, rect: Rect) {
 
 #[cfg(test)]
 mod tests {
+    use super::from_top;
+
+    #[test]
+    fn angle_is_shown_from_the_top_clockwise() {
+        // Stored from the right, counterclockwise: 0 rightward, 90 upward.
+        assert_eq!(from_top(90.0), 0.0);
+        assert_eq!(from_top(0.0), 90.0);
+        assert_eq!(from_top(-90.0), 180.0);
+        assert_eq!(from_top(180.0), -90.0);
+        // The same turn back.
+        for a in [-170.0, -45.0, 0.0, 30.0, 135.0, 180.0] {
+            assert_eq!(from_top(from_top(a)), a);
+        }
+    }
+
     use super::*;
 
     /// One frame of a fill's editor; returns where each stop marker was drawn (their

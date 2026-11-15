@@ -500,12 +500,9 @@ impl ArtworkApp {
                     .on_hover_text(tr!("EXPORT_TILE_POSITION_HINT"));
                 ui.horizontal(|ui| {
                     for (v, prefix) in s.tile_offset_mm.iter_mut().zip(["x ", "y "]) {
-                        ui.add(
-                            egui::DragValue::new(v)
-                                .speed(0.5)
-                                .fixed_decimals(1)
-                                .prefix(prefix),
-                        )
+                        crate::ui::layers::prefixed(ui, prefix, |ui| {
+                            ui.add(egui::DragValue::new(v).speed(0.5).fixed_decimals(1))
+                        })
                         .on_hover_text(tr!("EXPORT_TILE_POSITION_HINT"));
                     }
                     crate::ui::layers::unit(ui, "mm");

@@ -11,11 +11,11 @@ pub(super) fn shape_size(ui: &mut Ui, layer: &mut Layer, state: &mut LayersPanel
     let [mut w, mut h] = old;
     let b = &mut layer.bindings;
     let links = [Field::Width, Field::Height].map(|f| b.get(&f).cloned());
-    let rw = variables_ui::field(ui, b, Field::Width, &mut w, |d| {
-        mm_value(d, tr!("LAYER_WIDTH_PREFIX"), 0.0)
+    let rw = prefixed(ui, tr!("LAYER_WIDTH_PREFIX"), |ui| {
+        variables_ui::field(ui, b, Field::Width, &mut w, |d| mm_value(d, 0.0))
     });
-    let rh = variables_ui::field(ui, b, Field::Height, &mut h, |d| {
-        mm_value(d, tr!("LAYER_HEIGHT_PREFIX"), 0.0)
+    let rh = prefixed(ui, tr!("LAYER_HEIGHT_PREFIX"), |ui| {
+        variables_ui::field(ui, b, Field::Height, &mut h, |d| mm_value(d, 0.0))
     });
     unit(ui, "mm");
     aspect_lock(ui, &mut state.free_aspect);
@@ -101,12 +101,7 @@ pub(super) fn shape_section(
                             let mut pct = s.inner_ratio * 100.0;
                             ui.horizontal(|ui| {
                                 if ui
-                                    .add(
-                                        DragValue::new(&mut pct)
-                                            .range(1.0..=100.0)
-                                            .speed(0.5)
-                                            .fixed_decimals(0),
-                                    )
+                                    .add(Slider::new(&mut pct, 1.0..=100.0).fixed_decimals(0))
                                     .on_hover_text(tr!("SHAPE_INNER_RADIUS_HINT"))
                                     .changed()
                                 {

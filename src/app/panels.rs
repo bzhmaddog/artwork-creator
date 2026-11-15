@@ -27,13 +27,14 @@ impl ArtworkApp {
             let changed = ui
                 .horizontal(|ui| {
                     let field = |ui: &mut egui::Ui, v: &mut f32, prefix: &str| {
-                        ui.add(
-                            egui::DragValue::new(v)
-                                .range(document::CUSTOM_PAGE_RANGE_MM)
-                                .speed(1.0)
-                                .fixed_decimals(1)
-                                .prefix(prefix),
-                        )
+                        crate::ui::layers::prefixed(ui, prefix, |ui| {
+                            ui.add(
+                                egui::DragValue::new(v)
+                                    .range(document::CUSTOM_PAGE_RANGE_MM)
+                                    .speed(1.0)
+                                    .fixed_decimals(1),
+                            )
+                        })
                         .changed()
                     };
                     let a = field(ui, &mut w, tr!("PAGE_CUSTOM_WIDTH"));

@@ -316,7 +316,7 @@
   "FORMULA_WRONG_KIND": "{name} ne peut pas servir ici : ce champ prend des variables {kind} et {number}",
   "GO_TO_PARENT_FOLDER": "Dossier parent",
   "GRADIENT_ANGLE": "Angle",
-  "GRADIENT_ANGLE_HINT": "Sens des couleurs : 0° de gauche à droite, 90° de bas en haut",
+  "GRADIENT_ANGLE_HINT": "Sens des couleurs : 0° de bas en haut, 90° de gauche à droite",
   "GRADIENT_BAR_HINT": "Cliquez pour ajouter une couleur ici. Faites glisser une couleur sous la barre pour la déplacer, clic droit pour la retirer.",
   "GRADIENT_CENTER": "Centre",
   "GRADIENT_CENTER_X_HINT": "Horizontalement, depuis le bord gauche",

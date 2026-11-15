@@ -18,7 +18,7 @@ pub use ops::{
     step_selection, toggle_clip, turned_about, ungroup,
 };
 use properties::{PROP_ROW_GAP, StyleIcon, choice, mm_value, prop_grid, style_toggle};
-pub use properties::{field_frames, properties_panel, section, unit};
+pub use properties::{field_frames, prefixed, properties_panel, section, unit};
 use shape_properties::{shape_section, shape_size};
 use text_properties::text_section;
 
@@ -740,6 +740,67 @@ pub fn show(
     }
 
     out
+}
+
+/// The layer panel's own small widgets, one of each kind, for the widget gallery
+/// (`ui::gallery`).
+#[cfg(test)]
+pub(crate) fn sample_widgets(ui: &mut egui::Ui) {
+    use crate::document::paint::BrushKind;
+    use crate::document::text::TextAlign;
+    ui.horizontal(|ui| {
+        let (mut on, mut off) = (true, false);
+        icons::eye_toggle(ui, &mut on, false);
+        icons::eye_toggle(ui, &mut off, false);
+        icons::lock_toggle(ui, &mut on, false);
+        icons::lock_toggle(ui, &mut off, false);
+        icons::expander(ui, &mut on);
+        icons::expander(ui, &mut off);
+        icons::folder_icon(ui);
+        icons::clip_mark(ui);
+        icons::error_mark(ui, "error");
+        icons::aspect_lock(ui, &mut off);
+        icons::aspect_lock(ui, &mut on);
+    });
+    ui.horizontal_wrapped(|ui| {
+        let tools = [
+            Tool::Add,
+            Tool::AddElement,
+            Tool::AddImage,
+            Tool::AddText,
+            Tool::AddShape,
+            Tool::AddCanvas,
+            Tool::Group,
+            Tool::Ungroup,
+            Tool::Duplicate,
+            Tool::Delete,
+            Tool::Top,
+            Tool::Up,
+            Tool::Down,
+            Tool::Bottom,
+            Tool::Reset,
+            Tool::Select,
+            Tool::Pencil,
+            Tool::Eraser,
+            Tool::Eyedropper,
+            Tool::ClearPaint,
+        ];
+        let more = BrushKind::ALL
+            .map(Tool::Brush)
+            .into_iter()
+            .chain(Align::ALL.map(Tool::Align));
+        for tool in tools.into_iter().chain(more) {
+            tool_icon(ui, tool, true, "");
+        }
+        tool_icon(ui, Tool::Delete, false, "");
+    });
+    ui.horizontal(|ui| {
+        style_toggle(ui, true, StyleIcon::Bold, "");
+        style_toggle(ui, false, StyleIcon::Italic, "");
+        for align in [TextAlign::Left, TextAlign::Center, TextAlign::Right] {
+            style_toggle(ui, align == TextAlign::Left, StyleIcon::Align(align), "");
+        }
+    });
 }
 
 #[cfg(test)]

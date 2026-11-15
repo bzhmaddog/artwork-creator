@@ -198,8 +198,15 @@ pub fn button(
             rect,
         );
         let radius = visuals.corner_radius.at_most(2);
+        // Always outlined, so that a color like the panel's (white on white) shows; the
+        // widget's own outline when hovered or open.
+        let stroke = if open || response.hovered() {
+            visuals.bg_stroke
+        } else {
+            egui::Stroke::new(1.0, ui.visuals().weak_text_color())
+        };
         ui.painter()
-            .rect_stroke(rect, radius, visuals.bg_stroke, egui::StrokeKind::Inside);
+            .rect_stroke(rect, radius, stroke, egui::StrokeKind::Inside);
         if link.is_some() {
             paint_chain(ui.painter(), rect, *color, broken);
         }
@@ -228,6 +235,8 @@ pub fn button(
         .close_behavior(PopupCloseBehavior::CloseOnClickOutside)
         .show(|ui| {
             ui.spacing_mut().slider_width = 275.0;
+            // As wide as the picker: the texts under it wrap.
+            ui.set_max_width(275.0);
             let cached = ui
                 .data(|d| d.get_temp::<([u8; 4], Hsva)>(hsva_id))
                 .filter(|(c, _)| c == color);
@@ -322,9 +331,12 @@ pub fn button(
                         vec2(ui.min_rect().width(), 0.0),
                         egui::Layout::right_to_left(egui::Align::Center),
                         |ui| {
+                            // A button as in the panels: a popup's are drawn flat.
+                            ui.style_mut().visuals.widgets =
+                                ui.ctx().global_style().visuals.widgets.clone();
                             ui.add_enabled(
                                 !is_saved,
-                                egui::Button::new(tr!("SAVE_COLOR_AS_VARIABLE")).small(),
+                                egui::Button::new(tr!("SAVE_COLOR_AS_VARIABLE")).frame(true),
                             )
                             .on_hover_text(tr!("SAVE_COLOR_AS_VARIABLE_HINT"))
                             .clicked()
@@ -412,20 +424,25 @@ fn code_fields(ui: &mut Ui, popup_id: Id, color: &mut [u8; 4], alpha: bool) -> b
         } else if r.has_focus() {
             ui.data_mut(|d| d.insert_temp(id, draft));
         }
-        if alpha {
-            ui.add_space(8.0);
-            ui.label(tr!("OPACITY"));
+    });
+    if alpha {
+        // On its own row, the slider ending under the picker's.
+        let picker = ui.spacing().slider_width;
+        ui.horizontal(|ui| {
+            crate::ui::layers::field_frames(ui);
+            let label = ui.label(tr!("OPACITY")).rect.width();
+            let sp = ui.spacing().item_spacing.x;
+            // The value box and the unit after it.
+            let value = ui.spacing().interact_size.x + 2.0 * sp + 14.0;
+            ui.spacing_mut().slider_width = (picker - label - value - sp).max(60.0);
             let mut pct = opacity_percent(color[3]);
-            if ui
-                .add(egui::DragValue::new(&mut pct).range(0..=100).speed(1.0))
-                .changed()
-            {
+            if ui.add(egui::Slider::new(&mut pct, 0..=100)).changed() {
                 color[3] = (pct as f32 * 2.55).round() as u8;
                 changed = true;
             }
             crate::ui::layers::unit(ui, "%");
-        }
-    });
+        });
+    }
     changed
 }
 

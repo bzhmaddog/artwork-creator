@@ -2,49 +2,13 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod app;
-mod background;
-mod callout;
-mod canvas_points;
-mod canvas_text;
-mod clipboard;
-mod colors;
 mod document;
-mod effects;
-mod effects_ui;
 mod export;
-mod file_dialog;
-mod gradient;
-mod gradient_ui;
-mod history;
+mod files;
 mod i18n;
-mod layers_ui;
-mod paint;
-mod panels;
-mod pattern;
-#[cfg(test)]
-mod preview;
-mod print;
-mod printing;
-mod project;
-mod recent;
-mod recovery;
 mod render;
-mod shape;
-mod shortcuts;
-mod svg;
-mod svg_export;
 mod template;
-mod template_check;
-mod template_edit;
-mod template_geom;
-mod template_reference;
-mod template_svg;
-mod template_ui;
-mod text;
-mod text_links;
-mod theme;
-mod variables;
-mod view;
+mod ui;
 
 /// The app's icon, for its window's title bar and the taskbar or dock (the executable's
 /// own on Windows is built in by `build.rs`).
@@ -99,7 +63,7 @@ fn main() -> eframe::Result {
     // A project file can be passed on the command line (or by double-clicking an associated file).
     let project = std::env::args_os().nth(1).map(std::path::PathBuf::from);
     // Plugins are loaded once, before any effect is used.
-    effects::init(effects::plugin::plugins_dir().as_deref());
+    render::effects::init(render::effects::plugin::plugins_dir().as_deref());
 
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Glow,

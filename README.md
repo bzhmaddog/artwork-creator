@@ -480,7 +480,7 @@ and listed under [Shortcuts](#shortcuts); every text has a translation key, with
 text in `locales/en-US.json` and `locales/fr-FR.json` (and `locales/en-GB.json` when the
 British spelling differs). Before finishing, compare the new feature with the closest
 existing one and fill in what it lacks. A number field's unit goes after the field, not inside it
-(`layers_ui::unit`); a pair of fields on one row (x and y, width and height) shares one. A
+(`ui::layers::unit`); a pair of fields on one row (x and y, width and height) shares one. A
 dialog's buttons sit at the right of its bottom row, the main one rightmost and Cancel on
 its left (`app::dialog_button_row`); a secondary one such as "Close without saving" or Unlink goes
 apart at the left edge (`app::at_left_edge`). A helper text (an explanation, an empty state,

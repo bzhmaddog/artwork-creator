@@ -6,26 +6,26 @@ use std::time::{Duration, Instant, SystemTime};
 
 use egui::{Color32, ColorImage, Key, TextureFilter, TextureOptions};
 
-use crate::canvas_points;
-use crate::clipboard::Clipboard;
+use crate::document::clipboard::Clipboard;
+use crate::document::history::History;
+use crate::document::shape::{self, ShapeKind};
+use crate::document::text::{self, FontLibrary};
+use crate::document::variables;
 use crate::document::{self, Document, Layer, Node, Orientation, P2, PageSize, TemplateCopy};
-use crate::effects::cache::EffectCache;
 use crate::export::{self, ExportSettings};
-use crate::file_dialog::{self, FileBrowser, Filter, Purpose, Request};
-use crate::history::History;
+use crate::files::project;
+use crate::files::recent::{self, RecentFiles};
 use crate::i18n::{self, tr, tr_n, tr_noop, translate};
-use crate::layers_ui::{self, Edit, LayersPanel};
-use crate::panels::{PanelId, Side};
-use crate::project;
-use crate::recent::{self, RecentFiles};
+use crate::render::effects::cache::EffectCache;
 use crate::render::{self, PlacedElement, Scene};
-use crate::shape::{self, ShapeKind};
-use crate::shortcuts::{Command, Shortcuts};
+use crate::template::check::{Problem, Severity};
 use crate::template::{self, ElementKind, Template, TemplateEntry};
-use crate::template_check::{Problem, Severity};
-use crate::text::{self, FontLibrary};
-use crate::variables;
-use crate::view::{self, CanvasState, REAL_SIZE_ZOOM};
+use crate::ui::canvas::points;
+use crate::ui::canvas::{self, CanvasState, REAL_SIZE_ZOOM};
+use crate::ui::file_dialog::{self, FileBrowser, Filter, Purpose, Request};
+use crate::ui::layers::{self, Edit, LayersPanel};
+use crate::ui::panels::{PanelId, Side};
+use crate::ui::shortcuts::{Command, Shortcuts};
 
 /// Longest side of the on-screen texture. Exports always use the full-resolution image.
 const MAX_TEXTURE_SIDE: u32 = 4096;
@@ -44,7 +44,7 @@ const SVG_EXTENSIONS: &[&str] = &["svg", "svgz"];
 const SVG_FILTERS: &[Filter] = &[Filter::new(tr_noop!("FILTER_SVG"), SVG_EXTENSIONS)];
 const REFERENCE_FILTERS: &[Filter] = &[Filter::new(
     tr_noop!("FILTER_TEMPLATE_REFERENCE"),
-    crate::template_reference::EXTENSIONS,
+    crate::template::reference::EXTENSIONS,
 )];
 const EXPORT_FILTERS: &[Filter] = &[Filter::new("PNG / PDF / SVG", &["png", "pdf", "svg"])];
 /// Project files, to open and save.
@@ -65,7 +65,7 @@ pub struct ArtworkApp {
     /// The user's templates folder, in the app's data folder.
     user_templates_dir: Option<PathBuf>,
     /// Duplicating, changing or deleting a template.
-    template_dialog: Option<crate::template_ui::Dialog>,
+    template_dialog: Option<crate::ui::template::Dialog>,
     /// A template being edited instead of the project.
     editing: Option<TemplateEditing>,
     /// Template editing was ended to close the window: close it, asking about the
@@ -123,7 +123,7 @@ pub struct ArtworkApp {
     print_pending: bool,
     /// The printers CUPS offers, asked for when the Print window opens.
     #[cfg(not(windows))]
-    printers: Option<crate::printing::Printers>,
+    printers: Option<crate::export::printing::Printers>,
     /// The printer picked in the Print window, and the number of copies.
     #[cfg(not(windows))]
     print_to: (String, u32),
@@ -150,11 +150,11 @@ pub struct ArtworkApp {
     /// Interface language: the system's or a chosen one.
     language: i18n::Preference,
     /// Where each panel is: docked on a side, floating or in its own window.
-    panels: crate::panels::Layout,
+    panels: crate::ui::panels::Layout,
     /// Each command's keys.
     shortcuts: Shortcuts,
     /// The Keyboard shortcuts window, while open.
-    shortcuts_editor: Option<crate::shortcuts::Editor>,
+    shortcuts_editor: Option<crate::ui::shortcuts::Editor>,
     /// The project is about to be closed or replaced with unsaved changes: ask whether
     /// to save them first.
     confirm_leave: Option<Leave>,
@@ -166,9 +166,9 @@ pub struct ArtworkApp {
     /// Closing is agreed: let the next close request through.
     closing: bool,
     /// Copies of the project with unsaved changes, for recovery after a crash.
-    autosave: crate::recovery::Autosave,
+    autosave: crate::files::recovery::Autosave,
     /// Copies left by runs that crashed, offered back one at a time.
-    orphans: Vec<crate::recovery::Orphan>,
+    orphans: Vec<crate::files::recovery::Orphan>,
     /// When the project file was last written, for the status bar: by this run, or
     /// before it was opened.
     last_saved: Option<SystemTime>,
@@ -278,7 +278,7 @@ pub(crate) fn template_selector(
                 let gap = egui::Atom::paint(egui::vec2(indent, 0.0), |_, _| {});
                 let origin_mark = origin_mark(ui, origin);
                 let version = egui::RichText::new(version.unwrap_or_default()).weak();
-                let worst = if crate::template_check::has_errors(problems) {
+                let worst = if crate::template::check::has_errors(problems) {
                     Severity::Error
                 } else {
                     Severity::Warning
@@ -286,7 +286,7 @@ pub(crate) fn template_selector(
                 let mark = if problems.is_empty() {
                     egui::Atom::paint(egui::Vec2::ZERO, |_, _| {})
                 } else {
-                    crate::callout::warning_mark(problem_color(ui, worst))
+                    crate::ui::callout::warning_mark(problem_color(ui, worst))
                 };
                 let button = egui::Button::selectable(
                     choice == id,
@@ -418,7 +418,7 @@ fn problems_tooltip(ui: &mut egui::Ui, problems: &[Problem]) {
     ui.label(tr!("TEMPLATE_CHECK_LIST_HINT"));
     for p in sorted {
         ui.horizontal_top(|ui| {
-            crate::callout::warning_icon(ui, problem_color(ui, p.severity));
+            crate::ui::callout::warning_icon(ui, problem_color(ui, p.severity));
             ui.label(&p.text);
         });
     }
@@ -428,7 +428,7 @@ fn problems_tooltip(ui: &mut egui::Ui, problems: &[Problem]) {
 /// about a shape is a button selecting it. Returns the layer clicked.
 fn problem_list(ui: &mut egui::Ui, problems: &[Problem], selected: Option<u64>) -> Option<u64> {
     if problems.is_empty() {
-        crate::callout::callout(ui, crate::callout::Tone::Info, tr!("TEMPLATE_CHECK_OK"));
+        crate::ui::callout::callout(ui, crate::ui::callout::Tone::Info, tr!("TEMPLATE_CHECK_OK"));
         return None;
     }
     let mut sorted: Vec<&Problem> = problems.iter().collect();
@@ -450,7 +450,7 @@ fn problem_list(ui: &mut egui::Ui, problems: &[Problem], selected: Option<u64>) 
     let mut clicked = None;
     for p in sorted {
         ui.horizontal_top(|ui| {
-            crate::callout::warning_icon(ui, problem_color(ui, p.severity));
+            crate::ui::callout::warning_icon(ui, problem_color(ui, p.severity));
             match p.layer {
                 Some(id) => {
                     let button = egui::Button::selectable(selected == Some(id), p.text.as_str())
@@ -598,7 +598,7 @@ struct TemplateEditing {
     /// The Template properties panel's form, and the settings it was last made from or
     /// changed to: made again when they change otherwise (Undo).
     form: Option<(
-        Box<crate::template_ui::PropertiesForm>,
+        Box<crate::ui::template::PropertiesForm>,
         template::TemplateConfig,
     )>,
     /// It was saved: the templates are read again when editing ends.
@@ -624,7 +624,7 @@ struct TemplateEditing {
 
 /// The name of the template edited in `doc`, as shown: vendor and name.
 fn edited_name(doc: &Document) -> String {
-    let Some(config) = crate::template_edit::config(doc) else {
+    let Some(config) = crate::template::edit::config(doc) else {
         return String::new();
     };
     let name = config.name.clone().unwrap_or_default();
@@ -777,7 +777,7 @@ impl ArtworkApp {
     /// `project` is an optional project file to open, e.g. from the command line.
     pub fn new(cc: &eframe::CreationContext<'_>, project: Option<PathBuf>) -> Self {
         set_interaction(&cc.egui_ctx);
-        crate::theme::detect_in_background(&cc.egui_ctx);
+        crate::ui::theme::detect_in_background(&cc.egui_ctx);
         let language = i18n::Preference::load(cc.storage);
         i18n::set(language.language());
         let templates_dir = template::templates_dir();
@@ -841,22 +841,22 @@ impl ArtworkApp {
             template_stamp: Vec::new(),
             last_template_check: Instant::now(),
             language,
-            panels: crate::panels::Layout::load(cc.storage),
+            panels: crate::ui::panels::Layout::load(cc.storage),
             shortcuts: Shortcuts::load(cc.storage),
             shortcuts_editor: None,
             confirm_leave: None,
             about: false,
             leave_after_save: None,
             closing: false,
-            autosave: crate::recovery::Autosave::new(
-                crate::recovery::root(),
+            autosave: crate::files::recovery::Autosave::new(
+                crate::files::recovery::root(),
                 cc.storage
-                    .and_then(|s| eframe::get_value(s, crate::recovery::STORAGE_KEY))
-                    .unwrap_or(crate::recovery::DEFAULT_INTERVAL),
+                    .and_then(|s| eframe::get_value(s, crate::files::recovery::STORAGE_KEY))
+                    .unwrap_or(crate::files::recovery::DEFAULT_INTERVAL),
             ),
-            orphans: crate::recovery::root()
+            orphans: crate::files::recovery::root()
                 .as_deref()
-                .map(crate::recovery::orphans)
+                .map(crate::files::recovery::orphans)
                 .unwrap_or_default(),
             last_saved: None,
         };
@@ -1013,7 +1013,7 @@ impl ArtworkApp {
             Ok(t) => {
                 // Each element's lines shown, in its color.
                 self.canvas.element_show = vec![true; t.elements.len()];
-                self.canvas.element_color = view::element_colors(&t);
+                self.canvas.element_color = canvas::element_colors(&t);
                 self.template = Some(t);
                 // Its variables, which the project's layers can use.
                 self.doc.template_variables = entry.config.variables.clone();
@@ -1080,9 +1080,9 @@ impl ArtworkApp {
             return;
         }
         ui.add_space(4.0);
-        crate::callout::callout_small(
+        crate::ui::callout::callout_small(
             ui,
-            crate::callout::Tone::Info,
+            crate::ui::callout::Tone::Info,
             tr!("TEMPLATE_DIFFERS_TITLE"),
         );
         if ui.button(tr!("REVIEW_TEMPLATE_CHANGE")).clicked() {
@@ -1243,7 +1243,7 @@ impl ArtworkApp {
         let (_, t) = self.comparing.as_ref()?;
         Some((
             render::placed_elements(&self.doc, t),
-            view::element_colors(t),
+            canvas::element_colors(t),
         ))
     }
 
@@ -1316,7 +1316,7 @@ impl ArtworkApp {
     }
 
     fn template_dialog_modal(&mut self, ctx: &egui::Context) {
-        use crate::template_ui::Outcome;
+        use crate::ui::template::Outcome;
         let Some(dialog) = &mut self.template_dialog else {
             return;
         };
@@ -1349,18 +1349,18 @@ impl ArtworkApp {
             .template_source_entry()
             .map(|_| self.editing.as_ref().is_some_and(|e| e.comparing.is_some()));
         let keys = self.shortcuts.texts(ui.ctx());
-        let compare_hint = crate::shortcuts::with_key(
+        let compare_hint = crate::ui::shortcuts::with_key(
             tr!("COMPARE_TEMPLATE_SOURCE_HINT"),
             keys.get(&Command::CompareTemplateSource),
         );
         let (Some(editing), Some(config)) =
-            (&mut self.editing, crate::template_edit::config(&self.doc))
+            (&mut self.editing, crate::template::edit::config(&self.doc))
         else {
             return;
         };
         if editing.form.as_ref().is_none_or(|(_, seen)| seen != config) {
             editing.form = Some((
-                Box::new(crate::template_ui::PropertiesForm::new(config)),
+                Box::new(crate::ui::template::PropertiesForm::new(config)),
                 config.clone(),
             ));
         }
@@ -1379,7 +1379,7 @@ impl ArtworkApp {
             return;
         };
         let page = self.doc.page_mm();
-        crate::template_edit::set_config(&mut self.doc, config);
+        crate::template::edit::set_config(&mut self.doc, config);
         // Moved with their shapes, linked positions are not changes by hand.
         self.applied.clear();
         if page != self.doc.page_mm() {
@@ -1393,7 +1393,7 @@ impl ArtworkApp {
     fn template_folder_buttons(&mut self, ui: &mut egui::Ui) {
         let keys = self.shortcuts.texts(ui.ctx());
         let tip =
-            |hint: &str, command: Command| crate::shortcuts::with_key(hint, keys.get(&command));
+            |hint: &str, command: Command| crate::ui::shortcuts::with_key(hint, keys.get(&command));
         let can_delete = self.edited_user_template().is_some();
         let can_open = self.edited_template_folder().is_some();
         let (mut open, mut delete) = (false, false);
@@ -1446,7 +1446,7 @@ impl ArtworkApp {
         match &editing.check {
             Some((checked, problems)) if checked == key => problems.clone(),
             _ => {
-                let problems = crate::template_check::check_document(&self.doc);
+                let problems = crate::template::check::check_document(&self.doc);
                 editing.check = Some((key.to_owned(), problems.clone()));
                 problems
             }
@@ -1482,7 +1482,7 @@ impl ArtworkApp {
         if let Some(e) = &editing.copy_of {
             return Some(e);
         }
-        let source = crate::template_edit::config(&self.doc)?.source.as_ref()?;
+        let source = crate::template::edit::config(&self.doc)?.source.as_ref()?;
         self.templates.iter().find(|t| {
             editing.id.as_ref() != Some(&t.id)
                 && t.name.eq_ignore_ascii_case(source.name.trim())
@@ -1542,7 +1542,7 @@ impl ArtworkApp {
                         ui.spacing_mut().button_padding = egui::vec2(16.0, 8.0);
                         end = ui
                             .button(egui::RichText::new(tr!("END_COMPARE")).size(16.0))
-                            .on_hover_text(crate::shortcuts::with_key(
+                            .on_hover_text(crate::ui::shortcuts::with_key(
                                 tr!("END_COMPARE_HINT"),
                                 Some(&"Esc".to_owned()),
                             ))
@@ -1632,7 +1632,7 @@ impl ArtworkApp {
                 && self
                     .installed(&entry.id)
                     .is_some_and(|e| e.folder == entry.folder);
-            self.template_dialog = Some(crate::template_ui::Dialog::EditCopy {
+            self.template_dialog = Some(crate::ui::template::Dialog::EditCopy {
                 name: entry.full_name(),
                 copy: self.copy_name(&entry.name, entry.vendor.as_deref()),
                 provided,
@@ -1657,7 +1657,7 @@ impl ArtworkApp {
             );
             (None, Some(entry.clone()))
         };
-        let doc = match crate::template_edit::open(entry, config) {
+        let doc = match crate::template::edit::open(entry, config) {
             Ok(doc) => doc,
             Err(e) => {
                 self.messages.push(e);
@@ -1665,7 +1665,7 @@ impl ArtworkApp {
             }
         };
         // A reference whose file couldn't be read: said, and shown crossed out.
-        if let Some(l) = crate::template_edit::reference(&doc).filter(|l| l.broken) {
+        if let Some(l) = crate::template::edit::reference(&doc).filter(|l| l.broken) {
             self.messages.push(tr!(
                 "TEMPLATE_REFERENCE_NOT_LOADED",
                 path = l.source.display()
@@ -1683,7 +1683,12 @@ impl ArtworkApp {
             version: Some(template::FIRST_VERSION.to_owned()),
             ..Default::default()
         };
-        self.start_template_editing(None, None, None, crate::template_edit::new_document(config));
+        self.start_template_editing(
+            None,
+            None,
+            None,
+            crate::template::edit::new_document(config),
+        );
     }
 
     /// Puts the project aside and edits `doc`, the template of folder `id`.
@@ -1697,7 +1702,7 @@ impl ArtworkApp {
         if self.editing.is_some() {
             return;
         }
-        let config_before = crate::template_edit::config(&doc)
+        let config_before = crate::template::edit::config(&doc)
             .cloned()
             .unwrap_or_default();
         let last_saved = id
@@ -1753,7 +1758,7 @@ impl ArtworkApp {
                 .push(tr!("NO_USER_TEMPLATES_FOLDER").to_owned());
             return;
         };
-        let Some(config) = crate::template_edit::config(&self.doc).cloned() else {
+        let Some(config) = crate::template::edit::config(&self.doc).cloned() else {
             return;
         };
         if config.name.is_none() {
@@ -1783,7 +1788,7 @@ impl ArtworkApp {
         let id = folder
             .file_name()
             .map_or(id, |f| f.to_string_lossy().into_owned());
-        match crate::template_edit::save(&self.doc, &folder) {
+        match crate::template::edit::save(&self.doc, &folder) {
             Ok(saved) => {
                 // The files it lists now: the next save deletes those it no longer does.
                 // Its shapes keep their ids.
@@ -1845,7 +1850,7 @@ impl ArtworkApp {
         let Some(editing) = self.editing.take() else {
             return;
         };
-        let config = crate::template_edit::config(&self.doc)
+        let config = crate::template::edit::config(&self.doc)
             .cloned()
             .unwrap_or_default();
         self.doc = editing.project;
@@ -1925,9 +1930,9 @@ impl ArtworkApp {
             ui.set_max_width(420.0);
             ui.strong(tr!("CONFIRM_SAVE_TEMPLATE", name = name));
             ui.add_space(4.0);
-            crate::callout::callout(
+            crate::ui::callout::callout(
                 ui,
-                crate::callout::Tone::Warning,
+                crate::ui::callout::Tone::Warning,
                 tr!("UNSAVED_TEMPLATE_WARNING"),
             );
             ui.add_space(8.0);
@@ -1979,7 +1984,7 @@ impl ArtworkApp {
     /// Shows the folder of the template being edited in the system's file manager.
     fn open_template_folder(&mut self) {
         if let Some(folder) = self.edited_template_folder()
-            && let Err(e) = crate::file_dialog::open_folder(folder)
+            && let Err(e) = crate::ui::file_dialog::open_folder(folder)
         {
             self.messages.push(e);
         }
@@ -2031,7 +2036,7 @@ impl ArtworkApp {
                 .cloned()
                 .collect()
         });
-        self.template_dialog = Some(crate::template_ui::Dialog::Delete {
+        self.template_dialog = Some(crate::ui::template::Dialog::Delete {
             name: entry.full_name(),
             others,
             replacement: None,
@@ -2065,7 +2070,7 @@ impl ArtworkApp {
             // From the same folder, checked again.
             *slot = TemplateEntry {
                 origin: slot.origin,
-                problems: crate::template_check::check_entry(&fresh),
+                problems: crate::template::check::check_entry(&fresh),
                 ..fresh
             };
         }
@@ -2185,9 +2190,9 @@ impl ArtworkApp {
         let id = self.doc.alloc_id();
         let center = self.new_layer_center();
         // A random word to type over, which names it until it is renamed.
-        let word = layers_ui::random_name(&self.doc);
+        let word = layers::random_name(&self.doc);
         let layer = text::new_layer(id, &word, self.fonts.default_family(), center);
-        let at = layers_ui::insertion_path(&mut self.doc, self.selected);
+        let at = layers::insertion_path(&mut self.doc, self.selected);
         self.doc.insert(&at, Node::Layer(Box::new(layer)));
         self.selected = Some(id);
         self.layers_panel.show_text = true;
@@ -2207,7 +2212,7 @@ impl ArtworkApp {
         if self.editing.is_some()
             && self
                 .selected
-                .and_then(|id| crate::template_edit::element_of(&self.doc, id))
+                .and_then(|id| crate::template::edit::element_of(&self.doc, id))
                 .is_none()
         {
             return;
@@ -2218,7 +2223,7 @@ impl ArtworkApp {
             return;
         }
         if kind.has_points() {
-            self.canvas.drawing = Some(view::Drawing::new(kind));
+            self.canvas.drawing = Some(canvas::Drawing::new(kind));
             self.canvas.points = None;
             self.layers_panel.edit_points = None;
             return;
@@ -2226,8 +2231,8 @@ impl ArtworkApp {
         let id = self.doc.alloc_id();
         let center = self.new_layer_center();
         let mut layer = shape::new_layer(id, kind, center);
-        layer.name = layers_ui::random_name(&self.doc);
-        let at = layers_ui::insertion_path(&mut self.doc, self.selected);
+        layer.name = layers::random_name(&self.doc);
+        let at = layers::insertion_path(&mut self.doc, self.selected);
         self.doc.insert(&at, Node::Layer(Box::new(layer)));
         self.selected = Some(id);
         shape::sync(ctx, &mut self.doc, true);
@@ -2255,7 +2260,7 @@ impl ArtworkApp {
         }
         let key = h.finish();
         if self.background_rings.0 != key {
-            self.background_rings = (key, crate::background::rings(elements, bleed));
+            self.background_rings = (key, crate::document::background::rings(elements, bleed));
         }
         self.background_rings.1.clone()
     }
@@ -2274,7 +2279,7 @@ impl ArtworkApp {
         };
         let id = self.doc.alloc_id();
         let name = tr!("BACKGROUND_LAYER_NAME").to_owned();
-        let layer = crate::background::new_layer(id, name, &rings, &self.doc);
+        let layer = crate::document::background::new_layer(id, name, &rings, &self.doc);
         self.doc.insert(&[0], Node::Layer(Box::new(layer)));
         self.selected = Some(id);
         self.dirty = true;
@@ -2284,7 +2289,7 @@ impl ArtworkApp {
         self.layers_panel.canvas_kind = kind;
         self.canvas.brushes.tool = None;
         if kind.has_points() {
-            let mut drawing = view::Drawing::new(kind);
+            let mut drawing = canvas::Drawing::new(kind);
             drawing.canvas = true;
             self.canvas.drawing = Some(drawing);
             self.canvas.points = None;
@@ -2304,8 +2309,8 @@ impl ArtworkApp {
         }
         let mut layer =
             shape::new_canvas_layer(id, kind, [c[0] - w, c[1] - h], [c[0] + w, c[1] + h]);
-        layer.name = layers_ui::random_name(&self.doc);
-        let at = layers_ui::insertion_path(&mut self.doc, self.selected);
+        layer.name = layers::random_name(&self.doc);
+        let at = layers::insertion_path(&mut self.doc, self.selected);
         self.doc.insert(&at, Node::Layer(Box::new(layer)));
         self.selected = Some(id);
         self.canvas.drawing = None;
@@ -2345,7 +2350,7 @@ impl ArtworkApp {
             match Self::load_image(ctx, &mut layer) {
                 Ok(()) => {
                     layer.fit_to(self.doc.page_center(), self.doc.page_mm(), false);
-                    let at = layers_ui::insertion_path(&mut self.doc, self.selected);
+                    let at = layers::insertion_path(&mut self.doc, self.selected);
                     self.doc.insert(&at, Node::Layer(Box::new(layer)));
                     self.selected = Some(id);
                     self.dirty = true;
@@ -2362,7 +2367,7 @@ impl ArtworkApp {
         if self.editing.is_some()
             && self
                 .selected
-                .and_then(|id| crate::template_edit::element_of(&self.doc, id))
+                .and_then(|id| crate::template::edit::element_of(&self.doc, id))
                 .is_none()
         {
             self.messages
@@ -2371,11 +2376,11 @@ impl ArtworkApp {
         }
         let (page, center) = (self.doc.page_mm(), self.doc.page_center());
         let doc = &mut self.doc;
-        match crate::svg::import(path, page, center, &mut || doc.alloc_id()) {
+        match crate::files::svg_import::import(path, page, center, &mut || doc.alloc_id()) {
             Ok(imported) => {
                 // Bottom first, each just above the one before (not inside it, when it
                 // is a group); the top one ends selected.
-                let mut at = layers_ui::insertion_path(&mut self.doc, self.selected);
+                let mut at = layers::insertion_path(&mut self.doc, self.selected);
                 for node in imported.nodes {
                     self.selected = Some(node.id());
                     self.doc.insert(&at, node);
@@ -2512,9 +2517,9 @@ impl ArtworkApp {
             for name in &names {
                 ui.label(name);
             }
-            crate::callout::callout(
+            crate::ui::callout::callout(
                 ui,
-                crate::callout::Tone::Warning,
+                crate::ui::callout::Tone::Warning,
                 &tr_n!("FILES_ALREADY_EXIST", names.len(), folder = folder),
             );
             ui.add_space(8.0);
@@ -2558,19 +2563,19 @@ impl ArtworkApp {
             return;
         }
         let id = self.doc.alloc_id();
-        let mut layer = match crate::template_reference::layer(id, path) {
+        let mut layer = match crate::template::reference::layer(id, path) {
             Ok(layer) => layer,
             Err(e) => return self.messages.push(e),
         };
         if let Err(e) = Self::load_image(ctx, &mut layer) {
             return self.messages.push(e);
         }
-        self.selected = Some(crate::template_edit::set_reference(&mut self.doc, layer));
+        self.selected = Some(crate::template::edit::set_reference(&mut self.doc, layer));
         self.dirty = true;
     }
 
     /// Opens the dialog choosing the image of a pattern fill.
-    fn pick_pattern(&mut self, ctx: &egui::Context, target: crate::pattern::Target) {
+    fn pick_pattern(&mut self, ctx: &egui::Context, target: crate::document::pattern::Target) {
         self.request_file(
             ctx,
             Request {
@@ -2586,8 +2591,8 @@ impl ArtworkApp {
 
     /// Fills `target` with a pattern of the image at `path`. A pattern it already has
     /// keeps its tile's width, turn and offset; a new one gets the image's own size.
-    fn set_pattern(&mut self, target: crate::pattern::Target, path: PathBuf) {
-        use crate::pattern::{Pattern, Target};
+    fn set_pattern(&mut self, target: crate::document::pattern::Target, path: PathBuf) {
+        use crate::document::pattern::{Pattern, Target};
         let (slot, units_per_mm) = match target {
             Target::Background => (Some(&mut self.doc.background_pattern), 1.0),
             Target::Layer(id) => match self.doc.layer_mut(id) {
@@ -2758,7 +2763,7 @@ impl ArtworkApp {
 
     /// File > Autosave: how often a copy of unsaved changes is kept, or off.
     fn autosave_menu(&mut self, ui: &mut egui::Ui) {
-        for minutes in crate::recovery::INTERVALS {
+        for minutes in crate::files::recovery::INTERVALS {
             let label = if minutes == 0 {
                 tr!("AUTOSAVE_OFF").to_owned()
             } else {
@@ -2992,15 +2997,17 @@ impl ArtworkApp {
             RawWindowHandle::Win32(w) => Some(w.hwnd.get()),
             _ => None,
         });
-        let paper = crate::printing::Paper::of(&self.doc, &self.export_settings);
-        match crate::printing::choose(owner, &paper) {
+        let paper = crate::export::printing::Paper::of(&self.doc, &self.export_settings);
+        match crate::export::printing::choose(owner, &paper) {
             Ok(Some(printer)) => {
-                let scene = self.output_scene(crate::printing::MAX_PRINT_DPI);
+                let scene = self.output_scene(crate::export::printing::MAX_PRINT_DPI);
                 let settings = self.export_settings.clone();
                 let title = self.project_name();
                 self.start_job(true, move |progress| {
-                    crate::printing::print(printer, &scene, &settings, &title, None, progress)
-                        .map(|()| Vec::new())
+                    crate::export::printing::print(
+                        printer, &scene, &settings, &title, None, progress,
+                    )
+                    .map(|()| Vec::new())
                 });
             }
             Ok(None) => {}
@@ -3012,12 +3019,12 @@ impl ArtworkApp {
     #[cfg(not(windows))]
     fn start_print(&mut self) {
         let (printer, copies) = self.print_to.clone();
-        let paper = crate::printing::Paper::of(&self.doc, &self.export_settings);
+        let paper = crate::export::printing::Paper::of(&self.doc, &self.export_settings);
         let scene = self.output_scene(self.export_settings.dpi.clamp(72, 1200) as f32);
         let settings = self.export_settings.clone();
         let title = self.project_name();
         self.start_job(true, move |progress| {
-            crate::printing::print(
+            crate::export::printing::print(
                 &printer, copies, &paper, &scene, &settings, &title, progress,
             )
             .map(|()| Vec::new())
@@ -3159,19 +3166,19 @@ impl ArtworkApp {
                 }
                 let duplicate = entry(tr_noop!("DUPLICATE_LAYER"), Command::Duplicate);
                 if ui.add_enabled(has, duplicate).clicked() {
-                    self.dirty |= layers_ui::duplicate(&mut self.doc, &mut self.selected);
+                    self.dirty |= layers::duplicate(&mut self.doc, &mut self.selected);
                 }
                 if ui
                     .add_enabled(has, entry(tr_noop!("DELETE_LAYER"), Command::Delete))
                     .clicked()
                 {
-                    self.dirty |= layers_ui::delete(&mut self.doc, &mut self.selected);
+                    self.dirty |= layers::delete(&mut self.doc, &mut self.selected);
                 }
             });
             ui.menu_button(tr!("MENU_VIEW"), |ui| {
                 let keys = self.shortcuts.texts(ui.ctx());
                 ui.menu_button(tr!("MENU_PANELS"), |ui| self.panels_menu(ui));
-                ui.menu_button(tr!("MENU_THEME"), crate::theme::menu);
+                ui.menu_button(tr!("MENU_THEME"), crate::ui::theme::menu);
                 ui.menu_button(tr!("MENU_LANGUAGE"), |ui| {
                     i18n::menu(ui, &mut self.language)
                 });
@@ -3291,7 +3298,7 @@ impl ArtworkApp {
                     };
                     let a = field(ui, &mut w, tr!("PAGE_CUSTOM_WIDTH"));
                     let b = field(ui, &mut h, tr!("PAGE_CUSTOM_HEIGHT"));
-                    crate::layers_ui::unit(ui, "mm");
+                    crate::ui::layers::unit(ui, "mm");
                     a || b
                 })
                 .inner;
@@ -3325,7 +3332,7 @@ impl ArtworkApp {
         let doc = &mut self.doc;
         let [r, g, b] = doc.background;
         let mut color = [r, g, b, 255];
-        let mut fill = crate::gradient_ui::Fill {
+        let mut fill = crate::ui::gradient::Fill {
             color: &mut color,
             link: &mut doc.background_link,
             gradient: &mut doc.background_gradient,
@@ -3338,16 +3345,16 @@ impl ArtworkApp {
         panel_grid(ui, "page-background").show(ui, |ui| {
             ui.label(tr!("PAGE_BACKGROUND"));
             ui.horizontal(|ui| {
-                changed |= crate::gradient_ui::inline(ui, "background", &mut fill);
+                changed |= crate::ui::gradient::inline(ui, "background", &mut fill);
             });
             ui.end_row();
         });
-        changed |= crate::gradient_ui::rows(ui, "background", &mut fill);
+        changed |= crate::ui::gradient::rows(ui, "background", &mut fill);
         let pick = fill.pick_pattern;
         doc.background = [color[0], color[1], color[2]];
         self.dirty |= changed;
         if pick {
-            self.pick_pattern(ui.ctx(), crate::pattern::Target::Background);
+            self.pick_pattern(ui.ctx(), crate::document::pattern::Target::Background);
         }
     }
 
@@ -3359,7 +3366,7 @@ impl ArtworkApp {
         // how much the cut preview covers.
         let keys = self.shortcuts.texts(ui.ctx());
         let tip =
-            |hint: &str, command: Command| crate::shortcuts::with_key(hint, keys.get(&command));
+            |hint: &str, command: Command| crate::ui::shortcuts::with_key(hint, keys.get(&command));
         ui.checkbox(&mut self.canvas.show_template, tr!("SHOW_TEMPLATE_LINES"))
             .on_hover_text(tip(tr!("SHOW_TEMPLATE_LINES_HINT"), Command::ShowTemplate));
         ui.horizontal(|ui| {
@@ -3395,18 +3402,18 @@ impl ArtworkApp {
             ui.add_enabled(
                 self.canvas.preview_safe_area,
                 egui::DragValue::new(&mut self.canvas.safe_margin_mm)
-                    .range(0.0..=crate::print::MAX_MARGIN_MM)
+                    .range(0.0..=crate::export::marks::MAX_MARGIN_MM)
                     .speed(0.1)
                     .fixed_decimals(1),
             )
             .on_hover_text(tr!("SAFE_MARGIN_HINT"));
-            crate::layers_ui::unit(ui, "mm");
+            crate::ui::layers::unit(ui, "mm");
         });
 
         // What layers snap to while dragged.
         let has_centers = self.has_centers();
         let canvas = &mut self.canvas;
-        crate::layers_ui::section(
+        crate::ui::layers::section(
             ui,
             "page_snapping",
             egui::RichText::new(tr!("SNAPPING_SECTION")),
@@ -3428,7 +3435,7 @@ impl ArtworkApp {
         // The rulers, and the guides dragged out of them.
         let doc = &mut self.doc;
         let mut cleared = false;
-        crate::layers_ui::section(
+        crate::ui::layers::section(
             ui,
             "page_rulers",
             egui::RichText::new(tr!("RULERS_AND_GUIDES_SECTION")),
@@ -3451,7 +3458,7 @@ impl ArtworkApp {
                         .on_hover_text(tip(tr!("CLEAR_GUIDES_HINT"), Command::ClearGuides))
                         .clicked()
                     {
-                        cleared = view::clear_guides(doc);
+                        cleared = canvas::clear_guides(doc);
                     }
                 });
             },
@@ -3479,11 +3486,12 @@ impl ArtworkApp {
                 self.dirty |= variables::variables_ui(ui, &mut self.doc, kinds)
             }
             PanelId::ColorsInUse => {
-                self.dirty |= crate::colors::in_use_ui(ui, &mut self.doc, &self.canvas.picked)
+                self.dirty |=
+                    crate::document::colors::in_use_ui(ui, &mut self.doc, &self.canvas.picked)
             }
             PanelId::Layers => {
                 self.layers_panel.can_paste = self.clipboard.has_content();
-                let out = layers_ui::show(
+                let out = layers::show(
                     ui,
                     &mut self.doc,
                     &mut self.selected,
@@ -3495,7 +3503,7 @@ impl ArtworkApp {
             }
             PanelId::Properties => {
                 let bounds = Self::outline_bounds(&self.elements());
-                let out = layers_ui::properties_panel(
+                let out = layers::properties_panel(
                     ui,
                     &mut self.doc,
                     self.selected,
@@ -3505,7 +3513,7 @@ impl ArtworkApp {
                 );
                 self.layers_output(ui.ctx(), out);
                 if let Some(id) = self.layers_panel.pick_pattern.take() {
-                    self.pick_pattern(ui.ctx(), crate::pattern::Target::Layer(id));
+                    self.pick_pattern(ui.ctx(), crate::document::pattern::Target::Layer(id));
                 }
             }
         }
@@ -3513,7 +3521,7 @@ impl ArtworkApp {
     }
 
     /// Carries out what was asked in the Layers or Properties panel.
-    fn layers_output(&mut self, ctx: &egui::Context, out: layers_ui::LayersOutput) {
+    fn layers_output(&mut self, ctx: &egui::Context, out: layers::LayersOutput) {
         self.dirty |= out.changed;
         if out.add_images {
             self.pick_images(ctx);
@@ -3534,7 +3542,7 @@ impl ArtworkApp {
             self.edit(ctx, edit);
         }
         if let Some(kind) = out.add_element {
-            let id = crate::template_edit::add_element(&mut self.doc, kind);
+            let id = crate::template::edit::add_element(&mut self.doc, kind);
             self.selected = Some(id);
             self.dirty = true;
         }
@@ -3605,7 +3613,7 @@ impl ArtworkApp {
                 });
                 let line = &mut self.canvas.element_color[k];
                 let mut c = line.to_srgba_unmultiplied();
-                if crate::colors::button(ui, &mut c, true, None)
+                if crate::document::colors::button(ui, &mut c, true, None)
                     .on_hover_text(tr!("ELEMENT_LINE_COLOR"))
                     .changed()
                 {
@@ -3633,7 +3641,7 @@ impl ArtworkApp {
         };
         if ui
             .button(tr!("EDIT_TEMPLATE_BUTTON"))
-            .on_hover_text(crate::shortcuts::with_key(
+            .on_hover_text(crate::ui::shortcuts::with_key(
                 hint,
                 keys.get(&Command::EditTemplate),
             ))
@@ -3662,7 +3670,7 @@ impl ArtworkApp {
             }
             if ui
                 .small_button(tr!("FIT_PAGE_IN_VIEW_SHORT"))
-                .on_hover_text(crate::shortcuts::with_key(
+                .on_hover_text(crate::ui::shortcuts::with_key(
                     tr!("FIT_PAGE_IN_VIEW"),
                     self.shortcuts.text(ui.ctx(), Command::FitPage).as_ref(),
                 ))
@@ -3672,7 +3680,7 @@ impl ArtworkApp {
             }
             if ui
                 .small_button("100%")
-                .on_hover_text(crate::shortcuts::with_key(
+                .on_hover_text(crate::ui::shortcuts::with_key(
                     tr!("ZOOM_REAL_SIZE_HINT"),
                     self.shortcuts.text(ui.ctx(), Command::RealSize).as_ref(),
                 ))
@@ -3976,9 +3984,9 @@ impl ArtworkApp {
                 .iter()
                 .map(|(l, dpi)| format!("{} ({dpi:.0} DPI)", l.name))
                 .collect();
-            crate::callout::callout(
+            crate::ui::callout::callout(
                 ui,
-                crate::callout::Tone::Warning,
+                crate::ui::callout::Tone::Warning,
                 &tr_n!("EXPORT_LOW_RESOLUTION", low.len()),
             )
             .on_hover_text(names.join("\n"));
@@ -3992,7 +4000,7 @@ impl ArtworkApp {
         let elements = render::placed_elements(&self.doc, template);
         let marks = render::trim_box(elements.iter()).map(|trim| {
             let mut marks =
-                crate::print::marks(trim, s.bleed_mm, s.crop_marks, s.registration_marks);
+                crate::export::marks::marks(trim, s.bleed_mm, s.crop_marks, s.registration_marks);
             // Where they print: the sheets lie over the mirrored page.
             for p in marks.iter_mut().flat_map(|m| &mut m.points) {
                 if s.mirror {
@@ -4012,14 +4020,14 @@ impl ArtworkApp {
         };
         let off = marks
             .as_ref()
-            .and_then(crate::print::bounds)
+            .and_then(crate::export::marks::bounds)
             .is_some_and(|(mn, mx)| {
                 mn[0] < lo[0] || mn[1] < lo[1] || mx[0] > hi[0] || mx[1] > hi[1]
             });
         if off {
-            crate::callout::callout(
+            crate::ui::callout::callout(
                 ui,
-                crate::callout::Tone::Warning,
+                crate::ui::callout::Tone::Warning,
                 if s.tile {
                     tr!("EXPORT_MARKS_OFF_SHEETS")
                 } else {
@@ -4041,7 +4049,7 @@ impl ArtworkApp {
             ui.horizontal(|ui| {
                 ui.add(egui::DragValue::new(&mut s.dpi).range(72..=1200))
                     .on_hover_text(tr!("EXPORT_RESOLUTION_HINT"));
-                crate::layers_ui::unit(ui, "DPI");
+                crate::ui::layers::unit(ui, "DPI");
             });
             ui.end_row();
             ui.label(tr!("EXPORT_MIN_IMAGE_DPI"))
@@ -4049,7 +4057,7 @@ impl ArtworkApp {
             ui.horizontal(|ui| {
                 ui.add(egui::DragValue::new(&mut s.min_image_dpi).range(0..=1200))
                     .on_hover_text(tr!("EXPORT_MIN_IMAGE_DPI_HINT"));
-                crate::layers_ui::unit(ui, "DPI");
+                crate::ui::layers::unit(ui, "DPI");
             });
             ui.end_row();
         });
@@ -4080,12 +4088,12 @@ impl ArtworkApp {
             ui.horizontal(|ui| {
                 ui.add(
                     egui::DragValue::new(&mut s.bleed_mm)
-                        .range(0.0..=crate::print::MAX_MARGIN_MM)
+                        .range(0.0..=crate::export::marks::MAX_MARGIN_MM)
                         .speed(0.1)
                         .fixed_decimals(1),
                 )
                 .on_hover_text(tr!("BLEED_HINT"));
-                crate::layers_ui::unit(ui, "mm");
+                crate::ui::layers::unit(ui, "mm");
             });
             ui.end_row();
             ui.label(tr!("EXPORT_MARKS"));
@@ -4137,7 +4145,7 @@ impl ArtworkApp {
                 ui.horizontal(|ui| {
                     ui.add(mm(&mut s.sheet_margin_mm))
                         .on_hover_text(tr!("EXPORT_SHEET_MARGIN_HINT"));
-                    crate::layers_ui::unit(ui, "mm");
+                    crate::ui::layers::unit(ui, "mm");
                 });
                 ui.end_row();
                 ui.label(tr!("EXPORT_TILE_OVERLAP"))
@@ -4145,7 +4153,7 @@ impl ArtworkApp {
                 ui.horizontal(|ui| {
                     ui.add(mm(&mut s.tile_overlap_mm))
                         .on_hover_text(tr!("EXPORT_TILE_OVERLAP_HINT"));
-                    crate::layers_ui::unit(ui, "mm");
+                    crate::ui::layers::unit(ui, "mm");
                 });
                 ui.end_row();
                 ui.label(tr!("EXPORT_TILE_POSITION"))
@@ -4160,7 +4168,7 @@ impl ArtworkApp {
                         )
                         .on_hover_text(tr!("EXPORT_TILE_POSITION_HINT"));
                     }
-                    crate::layers_ui::unit(ui, "mm");
+                    crate::ui::layers::unit(ui, "mm");
                     if ui
                         .add_enabled(
                             s.tile_offset_mm != [0.0, 0.0],
@@ -4263,7 +4271,7 @@ impl ArtworkApp {
         self.export_open = false;
         #[cfg(not(windows))]
         {
-            let printers = crate::printing::printers();
+            let printers = crate::export::printing::printers();
             if !printers.names.contains(&self.print_to.0) {
                 self.print_to.0 = printers
                     .default
@@ -4279,7 +4287,7 @@ impl ArtworkApp {
     /// whether it can be printed.
     fn print_controls(&mut self, ui: &mut egui::Ui) -> bool {
         let s = &self.export_settings;
-        let paper = crate::printing::Paper::of(&self.doc, s);
+        let paper = crate::export::printing::Paper::of(&self.doc, s);
         let paper_name = match paper.preset {
             Some(p) => p.label([0.0; 2]),
             None => format!("{:.0} x {:.0} mm", paper.size_mm[0], paper.size_mm[1]),
@@ -4313,9 +4321,9 @@ impl ArtworkApp {
         {
             let printers = self.printers.clone().unwrap_or_default();
             if printers.names.is_empty() {
-                crate::callout::callout(
+                crate::ui::callout::callout(
                     ui,
-                    crate::callout::Tone::Warning,
+                    crate::ui::callout::Tone::Warning,
                     tr!("PRINT_NO_PRINTERS"),
                 );
             } else {
@@ -4342,9 +4350,9 @@ impl ArtworkApp {
         }
         #[cfg(windows)]
         {
-            crate::callout::callout(
+            crate::ui::callout::callout(
                 ui,
-                crate::callout::Tone::Info,
+                crate::ui::callout::Tone::Info,
                 tr!("PRINT_SYSTEM_DIALOG_HINT"),
             );
             self.export_job.is_none()
@@ -4372,9 +4380,9 @@ impl ArtworkApp {
                         ui.vertical(|ui| {
                             ui.set_min_width(250.0);
                             self.output_settings(ui, true);
-                            crate::callout::callout(
+                            crate::ui::callout::callout(
                                 ui,
-                                crate::callout::Tone::Info,
+                                crate::ui::callout::Tone::Info,
                                 tr!("PRINT_SETTINGS_SHARED"),
                             );
                             ui.add_space(6.0);
@@ -4471,7 +4479,7 @@ impl ArtworkApp {
                 p.pop();
                 p
             });
-            if !parent.is_some_and(|p| crate::template_edit::fits_in(&self.doc, pasted.id, &p)) {
+            if !parent.is_some_and(|p| crate::template::edit::fits_in(&self.doc, pasted.id, &p)) {
                 self.doc.remove(pasted.id);
                 self.selected = before;
                 self.messages
@@ -4555,19 +4563,19 @@ impl ArtworkApp {
         // The layer list clicked last: Up and Down select the row above or below.
         let mut arrows = arrows;
         if self.layers_panel.list_focused && !self.point_picked() && arrows[1] != 0.0 {
-            if layers_ui::step_selection(&self.doc, &mut self.selected, arrows[1] > 0.0) {
+            if layers::step_selection(&self.doc, &mut self.selected, arrows[1] > 0.0) {
                 self.layers_panel.scroll_to_selected = true;
             }
             arrows[1] = 0.0;
         }
         if arrows != [0.0, 0.0] {
             self.dirty |= if self.point_picked() {
-                canvas_points::nudge_selected(&self.canvas.points, &mut self.doc, arrows)
+                points::nudge_selected(&self.canvas.points, &mut self.doc, arrows)
             } else {
                 // A position linked to a variable stays where its formula puts it.
-                let linked = layers_ui::linked_axes(&self.doc, self.selected);
+                let linked = layers::linked_axes(&self.doc, self.selected);
                 let d = [0, 1].map(|k| if linked[k] { 0.0 } else { arrows[k] });
-                d != [0.0, 0.0] && layers_ui::nudge(&mut self.doc, self.selected, d)
+                d != [0.0, 0.0] && layers::nudge(&mut self.doc, self.selected, d)
             };
         }
     }
@@ -4646,13 +4654,13 @@ impl ArtworkApp {
             Command::Undo => self.undo(),
             Command::Redo => self.redo(),
             Command::Duplicate => {
-                self.dirty |= layers_ui::duplicate(&mut self.doc, &mut self.selected);
+                self.dirty |= layers::duplicate(&mut self.doc, &mut self.selected);
             }
             Command::Delete => {
                 self.dirty |= if self.point_picked() {
-                    canvas_points::delete_selected(&mut self.canvas.points, &mut self.doc)
+                    points::delete_selected(&mut self.canvas.points, &mut self.doc)
                 } else {
-                    layers_ui::delete(&mut self.doc, &mut self.selected)
+                    layers::delete(&mut self.doc, &mut self.selected)
                 };
             }
             Command::AddImages => self.pick_images(ctx),
@@ -4660,11 +4668,11 @@ impl ArtworkApp {
             Command::AddShape => self.add_shape(ctx, self.layers_panel.shape_kind),
             Command::AddCanvas => self.add_canvas(ctx, self.layers_panel.canvas_kind),
             Command::AddBackground => self.add_background(),
-            Command::Group => self.dirty |= layers_ui::group(&mut self.doc, &mut self.selected),
+            Command::Group => self.dirty |= layers::group(&mut self.doc, &mut self.selected),
             Command::Ungroup => {
-                self.dirty |= layers_ui::ungroup(&mut self.doc, &mut self.selected);
+                self.dirty |= layers::ungroup(&mut self.doc, &mut self.selected);
             }
-            Command::Clip => self.dirty |= layers_ui::toggle_clip(&mut self.doc, self.selected),
+            Command::Clip => self.dirty |= layers::toggle_clip(&mut self.doc, self.selected),
             Command::FitPage => self.canvas.fit_pending = true,
             Command::RealSize => self.canvas.set_zoom(REAL_SIZE_ZOOM),
             Command::ShowTemplate => self.canvas.show_template ^= true,
@@ -4681,10 +4689,10 @@ impl ArtworkApp {
             Command::ShowRulers => self.canvas.show_rulers ^= true,
             Command::ShowGuides => self.canvas.show_guides ^= true,
             Command::LockGuides => self.canvas.lock_guides ^= true,
-            Command::ClearGuides => self.dirty |= view::clear_guides(&mut self.doc),
+            Command::ClearGuides => self.dirty |= canvas::clear_guides(&mut self.doc),
             Command::KeyboardShortcuts => self.open_shortcuts(),
             Command::NewTemplate => {
-                self.template_dialog = Some(crate::template_ui::Dialog::New {
+                self.template_dialog = Some(crate::ui::template::Dialog::New {
                     name: String::new(),
                     vendor: String::new(),
                 });
@@ -4701,12 +4709,12 @@ impl ArtworkApp {
                 self.canvas.eyedropper = false;
             }
             Command::EyedropperTool => self.canvas.eyedropper = true,
-            Command::ClearPaint => self.dirty |= view::clear_paint(&mut self.doc, self.selected),
+            Command::ClearPaint => self.dirty |= canvas::clear_paint(&mut self.doc, self.selected),
             // Only while a closed shape is selected, to paint in.
             Command::PencilTool | Command::BrushTool | Command::EraserTool => {
-                if view::can_paint(&self.doc, self.selected) {
+                if canvas::can_paint(&self.doc, self.selected) {
                     self.canvas.eyedropper = false;
-                    self.canvas.brushes.tool = view::TOOLS
+                    self.canvas.brushes.tool = canvas::TOOLS
                         .iter()
                         .find(|(c, _)| *c == command)
                         .and_then(|(_, t)| *t);
@@ -4718,7 +4726,7 @@ impl ArtworkApp {
     }
 
     fn open_shortcuts(&mut self) {
-        self.shortcuts_editor = Some(crate::shortcuts::Editor::new(&self.shortcuts));
+        self.shortcuts_editor = Some(crate::ui::shortcuts::Editor::new(&self.shortcuts));
     }
 
     /// The Keyboard shortcuts window, while open. OK uses the shortcuts it shows.
@@ -4727,12 +4735,12 @@ impl ArtworkApp {
             return;
         };
         match editor.show(ctx) {
-            crate::shortcuts::Outcome::Open => {}
-            crate::shortcuts::Outcome::Apply(s) => {
+            crate::ui::shortcuts::Outcome::Open => {}
+            crate::ui::shortcuts::Outcome::Apply(s) => {
                 self.shortcuts = s;
                 self.shortcuts_editor = None;
             }
-            crate::shortcuts::Outcome::Cancel => self.shortcuts_editor = None,
+            crate::ui::shortcuts::Outcome::Cancel => self.shortcuts_editor = None,
         }
     }
 
@@ -4775,9 +4783,9 @@ impl ArtworkApp {
                     tr!("CONFIRM_SAVE_BEFORE_REPLACING", name = name)
                 });
                 ui.add_space(4.0);
-                crate::callout::callout(
+                crate::ui::callout::callout(
                     ui,
-                    crate::callout::Tone::Warning,
+                    crate::ui::callout::Tone::Warning,
                     tr!("UNSAVED_CHANGES_WARNING"),
                 );
                 ui.add_space(8.0);
@@ -4840,7 +4848,7 @@ impl ArtworkApp {
     }
 }
 
-impl crate::panels::Contents for ArtworkApp {
+impl crate::ui::panels::Contents for ArtworkApp {
     fn contents(&mut self, ui: &mut egui::Ui, id: PanelId) -> Option<f32> {
         self.panel_body(ui, id)
     }
@@ -4861,7 +4869,7 @@ impl eframe::App for ArtworkApp {
         self.save_settings(storage);
         eframe::set_value(
             storage,
-            crate::recovery::STORAGE_KEY,
+            crate::files::recovery::STORAGE_KEY,
             &self.autosave.minutes,
         );
     }
@@ -4901,7 +4909,7 @@ impl eframe::App for ArtworkApp {
             self.add_dropped(&ctx, dropped);
         }
         self.guard_close(&ctx);
-        crate::colors::publish(&ctx, &self.doc, &self.canvas.picked);
+        crate::document::colors::publish(&ctx, &self.doc, &self.canvas.picked);
         // The template's points on the page, which layer positions can be linked to.
         self.doc.template_points = match (&self.template, &self.editing) {
             (Some(t), None) => {
@@ -4937,7 +4945,7 @@ impl eframe::App for ArtworkApp {
         // Set here, not when editing starts: a panel's button may start it while the
         // layout is taken out.
         panels.set_hidden(self.hidden_panels());
-        crate::panels::Layout::set_template_editing(self.editing.is_some());
+        crate::ui::panels::Layout::set_template_editing(self.editing.is_some());
         panels.begin_frame(ui.available_rect_before_wrap());
         panels.show_dock(ui, Side::Left, self);
         panels.show_dock(ui, Side::Right, self);
@@ -4954,7 +4962,7 @@ impl eframe::App for ArtworkApp {
         // Background layers stay on the outline grown by the bleed.
         if self.editing.is_none() {
             let rings = self.background_rings(&elements);
-            crate::background::sync(&mut self.doc, rings.as_deref());
+            crate::document::background::sync(&mut self.doc, rings.as_deref());
         }
         self.layers_panel.min_dpi = self.export_settings.min_image_dpi as f32;
         // The panel is cut along the outline and through every hole, whatever the export
@@ -4967,15 +4975,15 @@ impl eframe::App for ArtworkApp {
         // Edit points is turned on and off in Properties as well as on the canvas.
         let panel_points = self.layers_panel.edit_points;
         if panel_points != self.canvas.points.as_ref().map(|e| e.layer) {
-            self.canvas.points = panel_points.map(view::PointEdit::new);
+            self.canvas.points = panel_points.map(canvas::PointEdit::new);
         }
         // While comparing, the installed template right of the divider, the project's
         // copy, usually older, left of it; in the template editor, the source of the
         // template being edited left of it: before, then after.
         self.canvas.compare = match self.editing.as_ref().map(|e| &e.comparing) {
-            Some(Some((name, t))) => Some(view::Compare {
+            Some(Some((name, t))) => Some(canvas::Compare {
                 elements: render::placed_elements(&self.doc, t),
-                colors: view::element_colors(t),
+                colors: canvas::element_colors(t),
                 labels: [
                     tr!("COMPARE_SOURCE_LABEL", name = name),
                     tr!("COMPARE_EDITED_LABEL").to_owned(),
@@ -4985,7 +4993,7 @@ impl eframe::App for ArtworkApp {
             Some(None) => None,
             None => self.compared_elements().map(|(elements, colors)| {
                 let (project, installed) = self.template_versions();
-                view::Compare {
+                canvas::Compare {
                     elements,
                     colors,
                     labels: [
@@ -4997,7 +5005,7 @@ impl eframe::App for ArtworkApp {
             }),
         };
         egui::CentralPanel::no_frame().show(ui, |ui| {
-            self.dirty |= view::show(
+            self.dirty |= canvas::show(
                 ui,
                 &mut self.doc,
                 &elements,
@@ -5021,8 +5029,8 @@ impl eframe::App for ArtworkApp {
             self.on_files(&ctx, purpose, paths, false);
         }
         // Colors saved from a picker become color variables.
-        for var in crate::colors::take_saved(&ctx) {
-            self.dirty |= crate::colors::save(&mut self.doc, var);
+        for var in crate::document::colors::take_saved(&ctx) {
+            self.dirty |= crate::document::colors::save(&mut self.doc, var);
         }
         self.overwrite_modal(&ctx);
         self.message_modal(&ctx);
@@ -5045,16 +5053,16 @@ impl eframe::App for ArtworkApp {
         // Linked fields follow their variables, and linked colors their color variables,
         // before shapes and texts are laid out.
         variables::apply(&mut self.doc, &mut self.applied, &self.canvas.held_layers());
-        crate::colors::apply(&mut self.doc);
-        crate::text_links::apply(&mut self.doc);
+        crate::document::colors::apply(&mut self.doc);
+        crate::document::text_links::apply(&mut self.doc);
         shape::sync(&ctx, &mut self.doc, !ctx.input(|i| i.pointer.any_down()));
         // Texts following a shape edited on the canvas go with it in the same step.
         text::sync(&ctx, &mut self.doc, &self.fonts);
         // A template's shapes take their element's look; its reference's image, rendered
         // when the template was opened, goes to the screen.
         if self.editing.is_some() {
-            crate::template_edit::sync(&mut self.doc);
-            let reference = crate::template_edit::reference_mut(&mut self.doc)
+            crate::template::edit::sync(&mut self.doc);
+            let reference = crate::template::edit::reference_mut(&mut self.doc)
                 .filter(|l| l.texture.is_none() && !l.broken && l.data.is_some());
             if let Some(l) = reference {
                 if let Err(e) = Self::load_image(&ctx, l) {
@@ -5067,7 +5075,7 @@ impl eframe::App for ArtworkApp {
         self.history.update(&self.doc, finished);
         self.dirty = self.is_modified();
         self.update_title(&ctx);
-        let project = crate::recovery::Project {
+        let project = crate::files::recovery::Project {
             doc: &self.doc,
             key: self.history.key(),
             export: &self.export_settings,
@@ -5103,7 +5111,7 @@ mod tests {
             last.origin = template::Origin::User;
         }
         let chosen = templates.first().map(|t| t.id.clone());
-        crate::preview::render(&path, egui::vec2(320.0, 200.0), |ui| {
+        crate::ui::preview::render(&path, egui::vec2(320.0, 200.0), |ui| {
             ui.set_width(300.0);
             let (_, field) = template_selector(ui, "Cosmox - T16 (1.0)", &templates, &chosen);
             egui::Popup::open_id(ui.ctx(), egui::Popup::default_response_id(&field));
@@ -5137,7 +5145,7 @@ mod tests {
                 Some(2),
             ),
         ];
-        crate::preview::render(&path, egui::vec2(560.0, 260.0), |ui| {
+        crate::ui::preview::render(&path, egui::vec2(560.0, 260.0), |ui| {
             ui.horizontal_top(|ui| {
                 ui.vertical(|ui| {
                     ui.set_width(260.0);
@@ -5152,7 +5160,7 @@ mod tests {
                         problems_tooltip(ui, &problems);
                     });
                     ui.add_space(12.0);
-                    let mark = crate::callout::warning_mark(problem_color(ui, Severity::Error));
+                    let mark = crate::ui::callout::warning_mark(problem_color(ui, Severity::Error));
                     let _ = ui.add(egui::Button::selectable(
                         false,
                         (
@@ -5162,7 +5170,7 @@ mod tests {
                             egui::RichText::new("1.2").weak(),
                         ),
                     ));
-                    let mark = crate::callout::warning_mark(problem_color(ui, Severity::Error));
+                    let mark = crate::ui::callout::warning_mark(problem_color(ui, Severity::Error));
                     let _ = ui.add(egui::Button::new((mark, "Check")));
                 });
             });
@@ -5177,7 +5185,7 @@ mod tests {
         let Ok(path) = std::env::var("COMPARE_BAR_PREVIEW") else {
             return;
         };
-        crate::preview::render(&path, egui::vec2(520.0, 110.0), |ui| {
+        crate::ui::preview::render(&path, egui::vec2(520.0, 110.0), |ui| {
             ui.add_space(20.0);
             ui.horizontal(|ui| {
                 ui.add_space(20.0);
@@ -5194,7 +5202,7 @@ mod tests {
         let Ok(path) = std::env::var("TEMPLATE_DIFFERS_PREVIEW") else {
             return;
         };
-        crate::preview::render(&path, egui::vec2(520.0, 260.0), |ui| {
+        crate::ui::preview::render(&path, egui::vec2(520.0, 260.0), |ui| {
             egui::Frame::window(ui.style())
                 .inner_margin(egui::Margin::same(DIALOG_MARGIN))
                 .show(ui, |ui| {

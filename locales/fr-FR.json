@@ -702,6 +702,7 @@
   "TEMPLATE_PASTE_OUTSIDE_ELEMENT": "Non collé : dans un gabarit, les formes vont dans un élément et les éléments en haut de la liste. Sélectionnez d'abord où il va.",
   "TEMPLATE_PROJECT_VERSION": "Copie de ce projet",
   "TEMPLATE_PROPERTIES_TITLE": "Propriétés du gabarit",
+  "TEMPLATE_PROJECT_HINT": "Conservé dans ce projet seulement : non installé",
   "TEMPLATE_PROVIDED_HINT": "Fourni avec l'application : le modifier en fait une copie dans vos gabarits",
   "TEMPLATE_REFERENCE_DIALOG_TITLE": "Choisir la référence du gabarit",
   "TEMPLATE_REFERENCE_NOT_LOADED": "La référence du gabarit {path} n'a pas pu être lue.",

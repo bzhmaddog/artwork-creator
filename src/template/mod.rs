@@ -366,6 +366,9 @@ pub enum Origin {
     Provided,
     /// In the user's templates folder: can be changed and deleted.
     User,
+    /// Not installed: only the copy the open project keeps (listed with the others while
+    /// the project is open).
+    Project,
 }
 
 /// An installed template folder, read but not loaded yet.
@@ -840,14 +843,19 @@ pub fn scan_all(provided: Option<&Path>, user: Option<&Path>) -> Vec<TemplateEnt
         .filter(|p| !users.iter().any(|u| u.id == p.id))
         .collect();
     out.extend(users);
-    // Those without a vendor first, then by vendor; by name within.
-    out.sort_by_key(|t| {
+    sort_entries(&mut out);
+    out
+}
+
+/// Sorts templates as they are listed: those without a vendor first, then by vendor; by
+/// name within.
+pub(crate) fn sort_entries(list: &mut [TemplateEntry]) {
+    list.sort_by_key(|t| {
         (
             t.vendor.as_ref().map(|v| v.to_lowercase()),
             t.name.to_lowercase(),
         )
     });
-    out
 }
 
 /// Millimeters per unit for the `units` setting of `template.json`.

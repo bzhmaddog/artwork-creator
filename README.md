@@ -624,7 +624,8 @@ panel then has a **Review...** button that brings the popup back.
 When the project's template isn't installed at all (deleted, or the project comes from
 another computer), opening the project asks whether to **Install** the copy it keeps into
 your templates, where it is listed and can be edited from then on; **Not now** (or Esc)
-opens the project with its copy as usual.
+opens the project with its copy as usual. The Template panel's list then shows that
+template among the others, marked with a sheet as the project's own.
 
 ## Plugins
 

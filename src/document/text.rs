@@ -1559,7 +1559,7 @@ pub(crate) fn px_per_unit(layer: &Layer, size: [u32; 2], px_per_mm: f32, max_sid
         .abs()
         .max(layer.transform.scale[1].abs());
     let side = size[0].max(size[1]).max(1) as f32;
-    (px_per_mm * mm_per_unit).min(max_side / side).max(1e-3)
+    (px_per_mm * mm_per_unit).max(1e-3).min(max_side / side)
 }
 
 /// Resolution of the text drawn for the screen, for a box of `size` units: rounded up
@@ -1569,8 +1569,8 @@ pub(crate) fn screen_ppu(layer: &Layer, size: [u32; 2], max_side: f32) -> f32 {
     let v = px_per_unit(layer, size, SCREEN_PX_PER_MM, max_side);
     let side = size[0].max(size[1]).max(1) as f32;
     2f32.powf((v.log2() * 2.0).ceil() / 2.0)
-        .min(max_side / side)
         .max(1e-3)
+        .min(max_side / side)
 }
 
 fn key(layer: &Layer, ppu: f32) -> u64 {
@@ -2029,6 +2029,17 @@ mod tests {
             let side = layer.size_px[0].max(layer.size_px[1]) as f32 * ppu;
             assert!(side <= SCREEN_SIDE + 0.5, "{pt} pt: {side} px");
         }
+    }
+
+    #[test]
+    fn huge_layer_stays_under_the_size_limit() {
+        let mut layer = new_layer(1, "Text", BUILTIN_FAMILY.into(), [0.0, 0.0]);
+        layer.size_px = [60_000_000, 60_000_000];
+        let side = layer.size_px[0] as f32;
+        let screen = side * screen_ppu(&layer, layer.size_px, SCREEN_SIDE);
+        assert!(screen <= SCREEN_SIDE + 0.5, "screen: {screen} px");
+        let export = side * px_per_unit(&layer, layer.size_px, 300.0 / 25.4, EXPORT_SIDE);
+        assert!(export <= EXPORT_SIDE + 0.5, "export: {export} px");
     }
 
     #[test]

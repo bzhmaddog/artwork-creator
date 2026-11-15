@@ -115,6 +115,9 @@ pub(crate) fn template_selector(
                             Some(template::Origin::User) => {
                                 ui.label(tr!("TEMPLATE_USER_HINT"));
                             }
+                            Some(template::Origin::Project) => {
+                                ui.label(tr!("TEMPLATE_PROJECT_HINT"));
+                            }
                             None => {}
                         }
                         if !problems.is_empty() {
@@ -157,7 +160,8 @@ pub(crate) fn template_selector(
 }
 
 /// The mark before a template's name in the template list: the app's icon for a
-/// template provided with it, a person for one of the user's; drawn, so it shows
+/// template provided with it, a person for one of the user's, a sheet for one only the
+/// project keeps; drawn, so it shows
 /// whatever the font has. Without an origin, an empty space as wide, to line names up.
 pub(super) fn origin_mark(ui: &egui::Ui, origin: Option<template::Origin>) -> egui::Atom<'static> {
     let size = egui::Vec2::splat(14.0);
@@ -209,6 +213,22 @@ pub(super) fn origin_mark(ui: &egui::Ui, origin: Option<template::Origin>) -> eg
                 shoulders,
                 color,
                 egui::Stroke::NONE,
+            ));
+        }),
+        Some(template::Origin::Project) => egui::Atom::paint(size, |ui, args| {
+            // A sheet with a folded corner: the project's file.
+            let c = args.rect.center();
+            let stroke = egui::Stroke::new(1.2, ui.visuals().widgets.inactive.fg_stroke.color);
+            let (l, r, t, b, fold) = (c.x - 4.5, c.x + 4.5, c.y - 6.0, c.y + 6.0, 3.5);
+            let p = egui::pos2;
+            let painter = ui.painter();
+            painter.add(egui::Shape::closed_line(
+                vec![p(l, t), p(r - fold, t), p(r, t + fold), p(r, b), p(l, b)],
+                stroke,
+            ));
+            painter.add(egui::Shape::line(
+                vec![p(r - fold, t), p(r - fold, t + fold), p(r, t + fold)],
+                stroke,
             ));
         }),
     }
@@ -859,13 +879,32 @@ impl ArtworkApp {
         // The field, with Edit at its right; the field takes the rest of the width.
         let row = egui::vec2(ui.available_width(), ui.spacing().interact_size.y);
         let mut choice = self.doc.template.clone();
+        // A template the project keeps but that isn't installed is listed too, as the
+        // project's.
+        let project_only = match (&self.doc.template, self.current_entry()) {
+            (Some(id), Some(entry)) if self.installed(id).is_none() => Some(TemplateEntry {
+                id: id.clone(),
+                origin: template::Origin::Project,
+                ..entry.clone()
+            }),
+            _ => None,
+        };
         ui.allocate_ui_with_layout(
             row,
             egui::Layout::right_to_left(egui::Align::Center),
             |ui| {
                 self.edit_template_button(ui);
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
-                    choice = template_selector(ui, &current, &self.templates, &self.doc.template).0;
+                    let listed: std::borrow::Cow<[TemplateEntry]> = match &project_only {
+                        Some(entry) => {
+                            let mut list = self.templates.clone();
+                            list.push(entry.clone());
+                            template::sort_entries(&mut list);
+                            list.into()
+                        }
+                        None => self.templates.as_slice().into(),
+                    };
+                    choice = template_selector(ui, &current, &listed, &self.doc.template).0;
                 });
             },
         );

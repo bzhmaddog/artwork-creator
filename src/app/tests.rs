@@ -15,9 +15,12 @@ fn template_selector_preview() {
     };
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("templates");
     let mut templates = template::scan(&dir);
-    // One of each origin, to see both marks.
+    // One of each origin, to see their marks; the project's own one chosen.
     if let Some(last) = templates.last_mut() {
         last.origin = template::Origin::User;
+    }
+    if let Some(first) = templates.first_mut() {
+        first.origin = template::Origin::Project;
     }
     let chosen = templates.first().map(|t| t.id.clone());
     crate::ui::preview::render(&path, egui::vec2(320.0, 200.0), |ui| {

@@ -3,8 +3,10 @@
 pub mod points;
 pub mod text;
 
+mod drag;
 mod draw;
 mod handles;
+mod navigate;
 mod rulers;
 mod snap;
 mod tools;
@@ -16,7 +18,7 @@ use handles::{
 };
 pub use rulers::clear_guides;
 use rulers::{
-    guide_at, guide_cursor, guide_dialog, guide_line, guide_targets, paint_rulers, ruler_bands,
+    guide_at, guide_cursor, guide_dialog, guide_line, guide_targets, paint_rulers, ruler_input,
 };
 pub(crate) use snap::{Guides, guides, nearest_snap};
 use snap::{snap_axis, snap_points};
@@ -518,203 +520,27 @@ pub fn show(
     // show over the canvas itself (see the end).
     let cursor_before = ui.ctx().output(|o| o.cursor_icon);
 
-    // Keep the view centered when the window resizes, and fit on demand.
-    if state.fit_pending || !state.rect.is_positive() {
-        state.camera.fit(rect, doc.page_mm());
-        state.fit_pending = false;
-    } else if full == state.full_rect && rect != state.rect {
-        // The rulers were shown or hidden: the page stays where it is on screen.
-        state.camera.pan -= rect.min - state.rect.min;
-    } else if state.rect.size() != rect.size() {
-        state.camera.pan += (rect.size() - state.rect.size()) / 2.0;
-    }
-    state.rect = rect;
-    state.full_rect = full;
-
-    // The comparison's divider, dragged across the canvas.
-    let mut on_divider = false;
-    if state.compare.is_some() {
-        let x = rect.left() + rect.width() * state.compare_split;
-        // Along the line, and a dead area around the handle wider than it: there, the
-        // divider takes the press (click or drag), never what is drawn under it.
-        let line = Rect::from_x_y_ranges(x - DIVIDER_GRAB..=x + DIVIDER_GRAB, rect.y_range());
-        let handle = Rect::from_center_size(
-            pos2(x, rect.center().y),
-            Vec2::splat(2.0 * HANDLE_DEAD_ZONE),
-        );
-        let id = ui.scope_id().with("compare_divider");
-        let r = ui.interact(line, id, Sense::click_and_drag())
-            | ui.interact(handle, id.with("handle"), Sense::click_and_drag());
-        if r.dragged()
-            && let Some(p) = r.interact_pointer_pos()
-        {
-            state.compare_split = ((p.x - rect.left()) / rect.width()).clamp(0.02, 0.98);
-        }
-        if r.hovered() || r.dragged() {
-            ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
-            on_divider = true;
-        }
-    } else {
-        state.compare_cut_preview = None;
-        state.compare_safe_area = None;
-    }
+    navigate::fit(state, doc.page_mm(), full, rect);
+    let on_divider = navigate::divider(ui, state, rect);
 
     // Only when no window, dialog or popup covers the canvas under the pointer.
     let hover = ui
         .input(|i| i.pointer.hover_pos())
         .filter(|_| ui.rect_contains_pointer(rect));
     state.cursor_mm = hover.map(|p| state.camera.to_mm(rect, p));
-
-    // Wheel: a mouse wheel or Ctrl+scroll zooms, a trackpad scroll pans, a pinch zooms.
     if let Some(pos) = hover {
-        let events = ui.input(|i| i.events.clone());
-        for ev in events {
-            match ev {
-                Event::MouseWheel {
-                    unit,
-                    delta,
-                    modifiers,
-                    source,
-                    ..
-                } => {
-                    let is_wheel = match source {
-                        MouseWheelSource::Wheel => true,
-                        MouseWheelSource::Unknown => unit != MouseWheelUnit::Point,
-                        _ => false,
-                    };
-                    if modifiers.command || modifiers.ctrl || is_wheel {
-                        let steps = match unit {
-                            MouseWheelUnit::Point => delta.y / 40.0,
-                            MouseWheelUnit::Line => delta.y,
-                            MouseWheelUnit::Page => delta.y * 5.0,
-                        };
-                        state.camera.zoom_at(rect, pos, 1.15f32.powf(steps));
-                    } else {
-                        state.camera.pan += delta;
-                    }
-                }
-                Event::Zoom(factor) => state.camera.zoom_at(rect, pos, factor),
-                _ => {}
-            }
-        }
+        navigate::wheel(ui, &mut state.camera, rect, pos);
     }
-
-    // Panning: left drag on empty canvas, middle or right drag, or Space + left drag
-    // (except while typing, where Space is a space).
+    // Space pans, except while typing, where it is a space.
     let space = state.typing.is_none() && ui.input(|i| i.key_down(Key::Space));
-    if !ui.input(|i| i.pointer.primary_down()) {
-        state.panning = false;
-    }
-    let panning_now = response.dragged_by(PointerButton::Middle)
-        || response.dragged_by(PointerButton::Secondary)
-        || (response.dragged_by(PointerButton::Primary) && (space || state.panning));
-    if panning_now {
-        state.camera.pan += response.drag_delta();
-        ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
-    } else if space && hover.is_some() {
-        ui.ctx().set_cursor_icon(CursorIcon::Grab);
-    }
+    let panning_now = navigate::pan(ui, state, &response, space, hover);
 
-    let cam = state.camera;
-    let shift = ui.input(|i| i.modifiers.shift);
-    // Ctrl+Alt on a resize handle: the paint in a shape does the other way than its
-    // Stretch paint says, for that drag. Neither key then does what it does alone.
-    let flip_paint = ui.input(|i| i.modifiers.command && i.modifiers.alt);
-    let alt = ui.input(|i| i.modifiers.alt) && !flip_paint;
-    // Ctrl makes the corner handles distort instead of resizing while held.
-    let distorting = ui.input(|i| i.modifiers.command) && !flip_paint;
-    // Snapping reach in mm, when on and the template has shapes with a center.
-    let anchors: Vec<P2> = elements.iter().flat_map(|e| &e.centers).copied().collect();
-    let snap_reach =
-        (state.snap_to_centers && !alt && !anchors.is_empty()).then_some(SNAP_RADIUS / cam.zoom);
-    let mut snapped = None;
-    // The lines layers snap to: the page's and the outline's, and the guides, each when
-    // snapping to them is on; and their reach in mm.
-    let edges = guides(elements, state.cuts.bleed_mm, doc.page_mm());
-    let mut lines = if state.snap_to_edges {
-        edges.clone()
-    } else {
-        Guides::default()
-    };
-    if state.snap_to_guides && state.show_guides {
-        for g in &doc.guides {
-            let axis = if g.vertical {
-                &mut lines.x
-            } else {
-                &mut lines.y
-            };
-            axis.push(g.at);
-        }
-    }
-    let guides = lines.sorted();
-    let guide_reach =
-        (!alt && !(guides.x.is_empty() && guides.y.is_empty())).then_some(SNAP_RADIUS / cam.zoom);
-    let mut snapped_guides = [None; 2];
-
-    // A drag out of a ruler adds a guide: a horizontal one from the top ruler, a vertical
-    // one from the left ruler. Hidden guides are shown again.
+    let f = drag::Frame::new(ui, doc, elements, state, rect);
+    let cam = f.cam;
+    let mut snapped = drag::Snapped::default();
     if state.show_rulers && state.guide_drag.is_none() {
-        let (top, left) = ruler_bands(full, rect);
-        for (band, vertical) in [(top, false), (left, true)] {
-            let r = ui.interact(band, ui.scope_id().with(("ruler", vertical)), Sense::drag());
-            if r.drag_started_by(PointerButton::Primary)
-                && let Some(p) = r.interact_pointer_pos()
-            {
-                let at = cam.to_mm(rect, p)[if vertical { 0 } else { 1 }];
-                doc.guides.push(Guide { vertical, at });
-                state.guide_drag = Some(doc.guides.len() - 1);
-                state.show_guides = true;
-                changed = true;
-            }
-        }
+        changed |= ruler_input(ui, doc, state, full, rect);
     }
-    // The guide under a screen point, when guides can be grabbed.
-    let grab_guides = state.show_guides && !state.lock_guides;
-    let guide_under =
-        |doc: &Document, p: Pos2| grab_guides.then(|| guide_at(doc, cam, rect, p)).flatten();
-
-    // Which handle (if any) of the selected layer is under a screen point. A shape whose
-    // points are being edited shows those instead.
-    let editing_points = state.points.as_ref().map(|e| e.layer);
-    let handle_at = |doc: &Document, sel: Option<u64>, p: Pos2| -> Option<(u64, DragKind)> {
-        let id = sel?;
-        if doc.effectively_locked(id) || !doc.effectively_visible(id) || editing_points == Some(id)
-        {
-            return None;
-        }
-        // A group: the rotation handle above its box (none in the template editor).
-        if let Some(Node::Group(_)) = doc.node(id) {
-            if doc.edited_template.is_some() {
-                return None;
-            }
-            let (_, rot) = group_rotate_handle(group_box(doc, &cam, rect, id)?);
-            return (rot.distance(p) <= HANDLE_RADIUS * 1.5)
-                .then(|| Some((id, DragKind::RotateGroup(layers::group_middle(doc, id)?))))
-                .flatten();
-        }
-        let layer = doc
-            .layer(id)
-            .filter(|l| !crate::document::background::is_fixed(l))?;
-        let (corners, _, rot) = handles(&cam, rect, layer);
-        if rot.distance(p) <= HANDLE_RADIUS * 1.5 {
-            Some((layer.id, DragKind::Rotate))
-        } else if let Some(i) = corners
-            .iter()
-            .position(|c| c.distance(p) <= HANDLE_RADIUS * 1.5)
-        {
-            let kind = if distorting {
-                DragKind::Distort(i)
-            } else {
-                DragKind::Scale
-            };
-            Some((layer.id, kind))
-        } else {
-            edge_handles(&cam, rect, layer)
-                .iter()
-                .position(|c| c.distance(p) <= HANDLE_RADIUS * 1.5)
-                .map(|i| (layer.id, DragKind::Stretch(i)))
-        }
-    };
 
     // A paint tool takes the left button: it paints or erases in the selected closed
     // shape instead of selecting. Esc goes back to selecting. Without one to paint in,
@@ -749,7 +575,7 @@ pub fn show(
     }
 
     // Typing on the canvas takes the clicks and drags on its text.
-    let on_handle = hover.is_some_and(|p| handle_at(doc, *selected, p).is_some());
+    let on_handle = hover.is_some_and(|p| f.handle_at(doc, *selected, p).is_some());
     let typing = text::input(
         ui,
         doc,
@@ -763,10 +589,10 @@ pub fn show(
 
     // Drawing a shape takes the left clicks; its points are edited once it is done.
     let keys = points::Keys {
-        shift,
-        alt,
-        anchors: &anchors,
-        snap_reach,
+        shift: f.shift,
+        alt: f.alt,
+        anchors: &f.anchors,
+        snap_reach: f.snap_reach,
     };
     let drawn = points::draw_input(
         ui,
@@ -795,514 +621,29 @@ pub fn show(
     points.changed |= drawn.changed;
     points.snapped = points.snapped.or(drawn.snapped);
     changed |= points.changed;
-    snapped = snapped.or(points.snapped);
+    snapped.anchor = points.snapped;
 
     if !space && !typing.took && !points.took && paint_tool.is_none() && !dropper {
-        if response.drag_started_by(PointerButton::Primary) {
-            let origin = ui
-                .input(|i| i.pointer.press_origin())
-                .or(response.interact_pointer_pos());
-            // A guide is grabbed unless a handle of the selected layer is there.
-            let on_guide = origin
-                .filter(|&o| handle_at(doc, *selected, o).is_none())
-                .and_then(|o| guide_under(doc, o));
-            if let Some(i) = on_guide {
-                state.guide_drag = Some(i);
-                state.panning = false;
-            } else if let Some(origin) = origin {
-                let m = cam.to_mm(rect, origin);
-                // Ctrl+drag on the selected layer turns it in 3D (not the template's
-                // reference, whose tilt isn't saved).
-                let tilt = ui.input(|i| i.modifiers.command && !i.modifiers.alt);
-                let tiltable = |id: u64| {
-                    doc.layer(id)
-                        .is_some_and(|l| !crate::document::background::is_fixed(l))
-                        && !doc.effectively_locked(id)
-                        && !crate::template::edit::is_reference(doc, id)
-                };
-                let (ids, kind) = match handle_at(doc, *selected, origin) {
-                    Some((id, kind @ DragKind::RotateGroup(_))) => {
-                        (layers::movable_layers(doc, id), kind)
-                    }
-                    Some((id, kind)) => (vec![id], kind),
-                    None => match (topmost_hit(doc, m), *selected) {
-                        (Some(hit), Some(sel)) if tilt && hit == sel && tiltable(sel) => {
-                            (vec![sel], DragKind::Tilt)
-                        }
-                        // Dragging a member of the selected group moves the whole group.
-                        (Some(hit), Some(sel)) if hit != sel && doc.is_within(hit, sel) => {
-                            (layers::movable_layers(doc, sel), DragKind::Move)
-                        }
-                        // A locked layer is selected but stays put: the drag pans.
-                        // A background stays on the outline: the drag pans.
-                        (hit, _) => {
-                            *selected = layer_to_select(doc, m);
-                            let hit = hit.filter(|&id| {
-                                doc.layer(id)
-                                    .is_none_or(|l| !crate::document::background::is_fixed(l))
-                            });
-                            (hit.into_iter().collect(), DragKind::Move)
-                        }
-                    },
-                };
-                // A text following a shape moves with it: the shape is moved.
-                let mut ids = ids;
-                if kind == DragKind::Move {
-                    let shapes: Vec<u64> = ids
-                        .iter()
-                        .filter_map(|&id| {
-                            doc.layer(id)
-                                .and_then(crate::document::text::followed_shape)
-                        })
-                        .filter(|&s| !doc.effectively_locked(s))
-                        .collect();
-                    for s in shapes {
-                        if !ids.contains(&s) {
-                            ids.push(s);
-                        }
-                    }
-                }
-                let layers: Vec<(u64, Transform)> = ids
-                    .into_iter()
-                    .filter_map(|id| Some((id, doc.layer(id)?.transform)))
-                    .collect();
-                if flip_paint && matches!(kind, DragKind::Scale | DragKind::Stretch(_)) {
-                    for (id, _) in &layers {
-                        if let Some(l) = doc.layer_mut(*id) {
-                            crate::document::shape::flip_paint_once(l);
-                        }
-                    }
-                }
-                // A linked position is held a moment before the drag unlinks it.
-                let linked = kind == DragKind::Move
-                    && layers.iter().any(|(id, _)| {
-                        doc.layer(*id).is_some_and(|l| {
-                            l.bindings
-                                .contains_key(&crate::document::variables::Field::X)
-                                || l.bindings
-                                    .contains_key(&crate::document::variables::Field::Y)
-                        })
-                    });
-
-                state.drag = (!layers.is_empty()).then_some(Drag {
-                    kind,
-                    layers,
-                    start_mouse: m,
-                    linked,
-                    held: linked,
-                });
-                // Nothing grabbed: this drag pans the view.
-                state.panning = state.drag.is_none();
-            }
-        } else if response.clicked_by(PointerButton::Primary)
-            && let Some(p) = response.interact_pointer_pos()
-            && handle_at(doc, *selected, p).is_none()
-            && guide_under(doc, p).is_none()
-        {
-            *selected = layer_to_select(doc, cam.to_mm(rect, p));
-        }
-        // A double click on a guide asks for its position.
-        let guide_clicked = response
-            .double_clicked_by(PointerButton::Primary)
-            .then(|| response.interact_pointer_pos())
-            .flatten()
-            .filter(|&p| handle_at(doc, *selected, p).is_none())
-            .and_then(|p| guide_under(doc, p));
-        if let Some(i) = guide_clicked {
-            state.guide_edit = Some(GuideEdit {
-                index: i,
-                at: doc.guides[i].at,
-                focus: true,
-            });
-        }
-        // A double click on a text layer starts typing in it, where it was clicked. Text
-        // on a path is typed in Properties.
-        if response.double_clicked_by(PointerButton::Primary)
-            && guide_clicked.is_none()
-            && let Some(p) = response.interact_pointer_pos()
-            && let Some(layer) = selected.and_then(|id| doc.layer(id))
-            && crate::document::text::is_straight(layer)
-            && !doc.effectively_locked(layer.id)
-        {
-            let i = text::index_at(layer, cam.to_mm(rect, p));
-            text::begin(&mut state.typing, layer.id, i, i);
-        }
-        // On a line, polyline or polygon, it shows its points to edit them.
-        if response.double_clicked_by(PointerButton::Primary)
-            && guide_clicked.is_none()
-            && let Some(id) = *selected
-            && state.points.is_none()
-            && points::can_edit(doc, id)
-        {
-            state.points = Some(PointEdit::new(id));
-        }
+        drag::press_input(ui, doc, selected, state, &response, &f);
     }
     changed |= text::field(ui, doc, &mut state.typing, cam, rect);
-
-    // A guide being dragged follows the pointer; let go off the canvas, it is deleted.
-    if let Some(i) = state.guide_drag {
-        let pointer = ui.input(|i| i.pointer.latest_pos());
-        if i >= doc.guides.len() {
-            state.guide_drag = None;
-        } else if ui.input(|i| i.pointer.primary_down()) {
-            let a = if doc.guides[i].vertical { 0 } else { 1 };
-            if let Some(p) = pointer {
-                let mut at = cam.to_mm(rect, p)[a];
-                // On the canvas, it snaps to the layers, the page and the outline.
-                let reach = (state.snap_to_guides && !alt && rect.contains(p))
-                    .then_some(SNAP_RADIUS / cam.zoom);
-                let target =
-                    reach.and_then(|r| snap_axis(&guide_targets(doc, &edges, a), &[at], r));
-                match target {
-                    Some((_, t)) => {
-                        at = t;
-                        snapped_guides[a] = Some(t);
-                    }
-                    None => at = (at * 10.0).round() / 10.0,
-                }
-                if doc.guides[i].at != at {
-                    doc.guides[i].at = at;
-                    changed = true;
-                }
-            }
-        } else {
-            if pointer.is_none_or(|p| !rect.contains(p)) {
-                doc.guides.remove(i);
-                changed = true;
-            }
-            state.guide_drag = None;
-        }
-    }
+    changed |= drag::guide_input(ui, doc, state, &f, &mut snapped);
     // The guide under the pointer, or the one dragged, is highlighted.
     state.guide_hover = state.guide_drag.or_else(|| {
         hover
             .filter(|_| {
                 state.drag.is_none() && paint_tool.is_none() && !dropper && state.drawing.is_none()
             })
-            .filter(|&p| !space && !points.over_handle && handle_at(doc, *selected, p).is_none())
-            .and_then(|p| guide_under(doc, p))
+            .filter(|&p| !space && !points.over_handle && f.handle_at(doc, *selected, p).is_none())
+            .and_then(|p| f.guide_under(doc, p))
     });
 
-    // A linked position near where it started: a release there puts it back, with a
-    // warning meanwhile; farther, a release unlinks it.
-    if let Some(drag) = &mut state.drag
-        && drag.linked
-    {
-        drag.held = drag.layers.iter().all(|(id, start)| {
-            doc.layer(*id).is_none_or(|l| {
-                let c = l.transform.center;
-                let d = [c[0] - start.center[0], c[1] - start.center[1]];
-                len(d) * cam.zoom <= LINK_HOLD_RADIUS
-            })
-        });
-        if drag.held
-            && let Some(p) = ui.ctx().pointer_hover_pos()
-        {
-            linked_drag_hint(ui, p);
-        }
-    }
-    if let Some(drag) = &state.drag {
-        if response.dragged_by(PointerButton::Primary)
-            && let Some(p) = response.interact_pointer_pos()
-            && drag.kind == DragKind::Move
-        {
-            let m = cam.to_mm(rect, p);
-            let d = [m[0] - drag.start_mouse[0], m[1] - drag.start_mouse[1]];
-            for (id, start) in &drag.layers {
-                if let Some(layer) = doc.layer_mut(*id) {
-                    layer.transform.center = [start.center[0] + d[0], start.center[1] + d[1]];
-                }
-            }
-            // The center or corner nearest an anchor lands on it; everything moves along.
-            if let Some(reach) = snap_reach {
-                let points: Vec<P2> = drag
-                    .layers
-                    .iter()
-                    .filter_map(|(id, _)| doc.layer(*id))
-                    .flat_map(snap_points)
-                    .collect();
-                if let Some((off, a)) = nearest_snap(&anchors, &points, reach) {
-                    for (id, _) in &drag.layers {
-                        if let Some(layer) = doc.layer_mut(*id) {
-                            let c = layer.transform.center;
-                            layer.transform.center = [c[0] + off[0], c[1] + off[1]];
-                        }
-                    }
-                    snapped = Some(a);
-                }
-            }
-            // Otherwise an edge or the middle of what is moved lands on a guide, on
-            // each axis.
-            let ids: Vec<u64> = drag.layers.iter().map(|(id, _)| *id).collect();
-            if snapped.is_none()
-                && let Some(reach) = guide_reach
-                && let Some((lo, hi)) = layers::layers_bounds(doc, &ids)
-            {
-                let mut off = [0.0; 2];
-                for (a, axis) in [&guides.x, &guides.y].into_iter().enumerate() {
-                    let values = [lo[a], (lo[a] + hi[a]) / 2.0, hi[a]];
-                    if let Some((d, g)) = snap_axis(axis, &values, reach) {
-                        off[a] = d;
-                        snapped_guides[a] = Some(g);
-                    }
-                }
-                for id in &ids {
-                    if let Some(layer) = doc.layer_mut(*id) {
-                        let c = layer.transform.center;
-                        layer.transform.center = [c[0] + off[0], c[1] + off[1]];
-                    }
-                }
-            }
-            ui.ctx().set_cursor_icon(CursorIcon::Grabbing);
-            changed = true;
-        } else if response.dragged_by(PointerButton::Primary)
-            && let Some(p) = response.interact_pointer_pos()
-            && let DragKind::RotateGroup(pivot) = drag.kind
-        {
-            // Turned by the angle the pointer went around the middle; Shift: 15° steps.
-            let m = cam.to_mm(rect, p);
-            let (v0, v) = (
-                [
-                    drag.start_mouse[0] - pivot[0],
-                    drag.start_mouse[1] - pivot[1],
-                ],
-                [m[0] - pivot[0], m[1] - pivot[1]],
-            );
-            let mut delta = (v[1].atan2(v[0]) - v0[1].atan2(v0[0])).to_degrees();
-            if shift {
-                delta = (delta / 15.0).round() * 15.0;
-            }
-            for (id, start) in &drag.layers {
-                if let Some(layer) = doc.layer_mut(*id) {
-                    layer.transform = layers::turned_about(*start, pivot, delta);
-                }
-            }
-            ui.ctx().set_cursor_icon(CursorIcon::Alias);
-            changed = true;
-        } else if response.dragged_by(PointerButton::Primary)
-            && let Some(p) = response.interact_pointer_pos()
-            && let Some(&(id, s)) = drag.layers.first()
-            && let Some(layer) = doc.layer_mut(id)
-        {
-            let m = cam.to_mm(rect, p);
-            let c = s.center;
-            let v0 = [drag.start_mouse[0] - c[0], drag.start_mouse[1] - c[1]];
-            let v = [m[0] - c[0], m[1] - c[1]];
-            let t = &mut layer.transform;
-            match drag.kind {
-                // Handled above, for all its layers.
-                DragKind::Move | DragKind::RotateGroup(_) => {}
-                DragKind::Tilt => {
-                    // Screen pixels dragged, in the layer's own frame: up is toward its
-                    // top, whatever its rotation and flips.
-                    let d = [
-                        (m[0] - drag.start_mouse[0]) * cam.zoom,
-                        (m[1] - drag.start_mouse[1]) * cam.zoom,
-                    ];
-                    let r = -s.rotation_deg.to_radians();
-                    let mut dx = d[0] * r.cos() - d[1] * r.sin();
-                    let mut dy = d[0] * r.sin() + d[1] * r.cos();
-                    if s.flip_x {
-                        dx = -dx;
-                    }
-                    if s.flip_y {
-                        dy = -dy;
-                    }
-                    // Dragged up, the top goes away; right, the right side.
-                    let mut x = s.tilt_x_deg - dy * TILT_DEG_PER_PX;
-                    let mut y = s.tilt_y_deg + dx * TILT_DEG_PER_PX;
-                    if shift {
-                        x = (x / 15.0).round() * 15.0;
-                        y = (y / 15.0).round() * 15.0;
-                    }
-                    t.tilt_x_deg = crate::document::variables::clamp_tilt(x);
-                    t.tilt_y_deg = crate::document::variables::clamp_tilt(y);
-                    ui.ctx().set_cursor_icon(CursorIcon::AllScroll);
-                }
-                DragKind::Stretch(edge) => {
-                    // The opposite edge stays put; with Alt, both move (center fixed).
-                    let (dir, extent) = edge_axis(s, layer.size_px, edge);
-                    let axis = if edge % 2 == 0 { 1 } else { 0 };
-                    let px = layer.size_px[axis].max(1) as f32;
-                    if extent > 0.0 {
-                        let d = [m[0] - drag.start_mouse[0], m[1] - drag.start_mouse[1]];
-                        let pull = d[0] * dir[0] + d[1] * dir[1];
-                        let both = if alt { 2.0 } else { 1.0 };
-                        let mut new = (extent + pull * both).max(MIN_STRETCH_MM);
-                        // An edge parallel to a guide lands on it. The edge stands
-                        // `new / 2` from the center with Alt, `new - extent / 2` from
-                        // the starting center without.
-                        let a = (0..2).find(|&a| dir[a].abs() > 0.999);
-                        if let Some(a) = a.filter(|_| !s.is_distorted())
-                            && let Some(reach) = guide_reach
-                        {
-                            let axis = if a == 0 { &guides.x } else { &guides.y };
-                            let from_center =
-                                |new: f32| if alt { new / 2.0 } else { new - extent / 2.0 };
-                            let edge = c[a] + dir[a] * from_center(new);
-                            if let Some((_, g)) = snap_axis(axis, &[edge], reach) {
-                                let e = dir[a] * (g - c[a]);
-                                let snapped_new = if alt { 2.0 * e } else { e + extent / 2.0 };
-                                if snapped_new >= MIN_STRETCH_MM {
-                                    new = snapped_new;
-                                    snapped_guides[a] = Some(g);
-                                }
-                            }
-                        }
-                        t.scale[axis] = new / px;
-                        let shift_c = if alt { 0.0 } else { (new - extent) / 2.0 };
-                        t.center = [
-                            s.center[0] + dir[0] * shift_c,
-                            s.center[1] + dir[1] * shift_c,
-                        ];
-                    }
-                }
-                DragKind::Scale if shift => {
-                    // Free scale along the image's own axes.
-                    let (l0, l) = (
-                        rotate_vec(v0, -s.rotation_deg),
-                        rotate_vec(v, -s.rotation_deg),
-                    );
-                    let ratio = |a: f32, b: f32| if a.abs() > 1e-3 { (b / a).abs() } else { 1.0 };
-                    t.scale = [
-                        (s.scale[0] * ratio(l0[0], l[0])).max(1e-4),
-                        (s.scale[1] * ratio(l0[1], l[1])).max(1e-4),
-                    ];
-                }
-                DragKind::Scale => {
-                    let f = if len(v0) > 1e-3 {
-                        len(v) / len(v0)
-                    } else {
-                        1.0
-                    };
-                    t.scale = [(s.scale[0] * f).max(1e-4), (s.scale[1] * f).max(1e-4)];
-                    // The dragged corner snaps: scaled so it comes as close as it can to
-                    // the anchor along its diagonal, the center staying put.
-                    let start = corners_of(s, layer.size_px);
-                    let i = (0..4)
-                        .min_by(|&a, &b| {
-                            let d = |k: usize| {
-                                len([
-                                    start[k][0] - drag.start_mouse[0],
-                                    start[k][1] - drag.start_mouse[1],
-                                ])
-                            };
-                            d(a).total_cmp(&d(b))
-                        })
-                        .unwrap_or(0);
-                    if let Some(reach) = snap_reach {
-                        let p = corners_of(*t, layer.size_px)[i];
-                        if let Some((_, a)) = nearest_snap(&anchors, &[p], reach) {
-                            let u = [p[0] - c[0], p[1] - c[1]];
-                            let w = [a[0] - c[0], a[1] - c[1]];
-                            let uu = u[0] * u[0] + u[1] * u[1];
-                            let k = if uu > 1e-6 {
-                                (w[0] * u[0] + w[1] * u[1]) / uu
-                            } else {
-                                0.0
-                            };
-                            if k > 1e-3 {
-                                t.scale = [t.scale[0] * k, t.scale[1] * k];
-                                snapped = Some(a);
-                            }
-                        }
-                    }
-                    // Otherwise the corner's x or y lands on a guide, whichever is
-                    // nearer, the center staying put.
-                    if snapped.is_none()
-                        && let Some(reach) = guide_reach
-                    {
-                        let p = corners_of(*t, layer.size_px)[i];
-                        let mut best: Option<(f32, usize, f32)> = None;
-                        for (a, axis) in [&guides.x, &guides.y].into_iter().enumerate() {
-                            if (p[a] - c[a]).abs() > 1e-3
-                                && let Some((d, g)) = snap_axis(axis, &[p[a]], reach)
-                                && best.is_none_or(|(b, _, _)| d.abs() < b.abs())
-                            {
-                                best = Some((d, a, g));
-                            }
-                        }
-                        if let Some((_, a, g)) = best {
-                            let k = (g - c[a]) / (p[a] - c[a]);
-                            if k > 1e-3 {
-                                t.scale = [t.scale[0] * k, t.scale[1] * k];
-                                snapped_guides[a] = Some(g);
-                            }
-                        }
-                    }
-                }
-                DragKind::Distort(i) => {
-                    // Corner offsets live in the undistorted image frame, which this drag
-                    // does not change.
-                    if let (Some(a), Some(b)) =
-                        (layer.page_to_unit(drag.start_mouse), layer.page_to_unit(m))
-                    {
-                        let mut d = s.distort;
-                        d[i] = [d[i][0] + b[0] - a[0], d[i][1] + b[1] - a[1]];
-                        // The corner lands on an anchor within reach.
-                        let mut t2 = s;
-                        t2.distort = d;
-                        if let Some(reach) = snap_reach {
-                            let p = corners_of(t2, layer.size_px)[i];
-                            if let Some((_, anchor)) = nearest_snap(&anchors, &[p], reach)
-                                && let Some(u) = layer.page_to_unit(anchor)
-                            {
-                                let base = s.tilted_corners(layer.size_px)[i];
-                                d[i] = [u[0] - base[0], u[1] - base[1]];
-                                snapped = Some(anchor);
-                            }
-                        }
-                        t2.distort = d;
-                        // A corner dragged across the others would fold the image.
-                        if is_convex(t2.unit_quad(layer.size_px)) {
-                            layer.transform.distort = d;
-                        }
-                    }
-                }
-                DragKind::Rotate => {
-                    let delta = (v[1].atan2(v[0]) - v0[1].atan2(v0[0])).to_degrees();
-                    let mut r = s.rotation_deg + delta;
-                    if shift {
-                        r = (r / 15.0).round() * 15.0;
-                    }
-                    t.rotation_deg = (r + 180.0).rem_euclid(360.0) - 180.0;
-                }
-            }
-            changed = true;
-        }
+    drag::hold_linked(ui, doc, state, &f);
+    if let Some(d) = &state.drag {
+        changed |= drag::update(ui, doc, d, &response, &f, &mut snapped);
         if response.drag_stopped() || !ui.input(|i| i.pointer.primary_down()) {
-            // Released near where it started: it goes back, still linked. Farther, it
-            // stays, and is unlinked once the drag is over (see `held_layers`).
-            if drag.held {
-                for (id, start) in &drag.layers {
-                    if let Some(layer) = doc.layer_mut(*id) {
-                        layer.transform = *start;
-                    }
-                }
-            }
-            // A single layer moved onto a template point: offer to link it there.
-            let held = drag.held;
-            let offer = match (drag.kind, drag.layers.as_slice(), state.snapped) {
-                _ if held => None,
-                (DragKind::Move, [(id, _)], Some(a)) => doc
-                    .template_points
-                    .iter()
-                    .find(|(_, p)| (p[0] - a[0]).abs() < 1e-3 && (p[1] - a[1]).abs() < 1e-3)
-                    .zip(doc.layer(*id))
-                    .map(|((point, p), layer)| LinkOffer {
-                        layer: *id,
-                        point: point.clone(),
-                        offset: [
-                            layer.transform.center[0] - p[0],
-                            layer.transform.center[1] - p[1],
-                        ],
-                    }),
-                _ => None,
-            };
-            state.link_offer = offer.or(state.link_offer.take());
-            state.drag = None;
-            snapped = None;
-            snapped_guides = [None; 2];
+            drag::release(doc, state);
+            snapped = drag::Snapped::default();
         }
     } else if let Some(p) = hover
         && !space
@@ -1312,45 +653,12 @@ pub fn show(
         && !points.took
         && !points.over_handle
     {
-        let hovered_guide = state.guide_hover.and_then(|i| doc.guides.get(i));
-        match handle_at(doc, *selected, p) {
-            Some((_, DragKind::Rotate | DragKind::RotateGroup(_))) => {
-                ui.ctx().set_cursor_icon(CursorIcon::Alias)
-            }
-            Some((id, DragKind::Stretch(edge))) => {
-                // Resize cursor along the edge's direction on screen.
-                let horizontal = doc.layer(id).is_some_and(|l| {
-                    let (dir, _) = edge_axis(l.transform, l.size_px, edge);
-                    dir[0].abs() >= dir[1].abs()
-                });
-                ui.ctx().set_cursor_icon(if horizontal {
-                    CursorIcon::ResizeHorizontal
-                } else {
-                    CursorIcon::ResizeVertical
-                });
-            }
-            Some(_) => ui.ctx().set_cursor_icon(CursorIcon::Crosshair),
-            None if let Some(g) = hovered_guide => {
-                ui.ctx().set_cursor_icon(guide_cursor(g.vertical))
-            }
-            // Ctrl over the selected layer: a drag turns it in 3D.
-            None if ui.input(|i| i.modifiers.command && !i.modifiers.alt)
-                && selected.is_some()
-                && topmost_hit(doc, cam.to_mm(rect, p)) == *selected
-                && selected.is_some_and(|id| doc.layer(id).is_some()) =>
-            {
-                ui.ctx().set_cursor_icon(CursorIcon::AllScroll)
-            }
-            None if topmost_hit(doc, cam.to_mm(rect, p)).is_some() => {
-                ui.ctx().set_cursor_icon(CursorIcon::Move)
-            }
-            None => ui.ctx().set_cursor_icon(CursorIcon::Grab),
-        }
+        drag::hover_cursor(ui, doc, *selected, state.guide_hover, &f, p);
     }
 
-    state.snapped = snapped;
-    state.snapped_guides = snapped_guides;
-    paint(ui, doc, elements, *selected, state, rect, distorting);
+    state.snapped = snapped.anchor;
+    state.snapped_guides = snapped.guides;
+    paint(ui, doc, elements, *selected, state, rect, f.distorting);
     // Not in the template editor, which has nothing to paint or pick colors for.
     let paintable = can_paint(doc, *selected);
     if (paintable || doc.edited_template.is_none())
@@ -1386,32 +694,6 @@ pub fn show(
     }
     changed |= guide_dialog(ui.ctx(), doc, state);
     changed
-}
-
-/// Next to the pointer, while a layer whose position is linked is dragged: says that
-/// going on unlinks it and that releasing puts it back.
-fn linked_drag_hint(ui: &egui::Ui, at: Pos2) {
-    let painter = ui.ctx().layer_painter(egui::LayerId::new(
-        egui::Order::Tooltip,
-        egui::Id::unique("linked_drag_hint"),
-    ));
-    let visuals = ui.visuals();
-    let galley = painter.layout(
-        tr!("LINKED_POSITION_DRAG_HINT").to_owned(),
-        egui::FontId::proportional(13.0),
-        visuals.text_color(),
-        260.0,
-    );
-    let size = galley.size() + vec2(16.0, 10.0);
-    let chip = Rect::from_min_size(at + vec2(16.0, 16.0), size);
-    painter.rect(
-        chip,
-        4.0,
-        visuals.extreme_bg_color,
-        Stroke::new(1.5, visuals.warn_fg_color),
-        StrokeKind::Inside,
-    );
-    painter.galley(chip.min + vec2(8.0, 5.0), galley, visuals.text_color());
 }
 
 /// Half the width of the zone where the comparison's divider is grabbed, in screen

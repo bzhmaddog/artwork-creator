@@ -702,6 +702,7 @@
   "TEMPLATE_PASTE_OUTSIDE_ELEMENT": "Not pasted: in a template, shapes go into an element and elements at the top of the list. Select where it goes first.",
   "TEMPLATE_PROJECT_VERSION": "This project's copy",
   "TEMPLATE_PROPERTIES_TITLE": "Template properties",
+  "TEMPLATE_PROJECT_HINT": "Kept in this project only: not installed",
   "TEMPLATE_PROVIDED_HINT": "Provided with the app: editing it makes a copy in your templates",
   "TEMPLATE_REFERENCE_DIALOG_TITLE": "Choose the template reference",
   "TEMPLATE_REFERENCE_NOT_LOADED": "The template reference {path} could not be read.",

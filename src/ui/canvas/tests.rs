@@ -2342,3 +2342,425 @@ fn fit_centers_page() {
     let c = cam.to_screen(rect, [148.5, 105.0]);
     assert!((c.x - 500.0).abs() < 1e-2 && (c.y - 250.0).abs() < 1e-2);
 }
+
+// ---- Characterization trace of `show` (temporary, for the show() refactor) ----
+
+struct Rng(u64);
+
+impl Rng {
+    fn next(&mut self) -> u64 {
+        self.0 ^= self.0 << 13;
+        self.0 ^= self.0 >> 7;
+        self.0 ^= self.0 << 17;
+        self.0
+    }
+    fn below(&mut self, n: usize) -> usize {
+        (self.next() % n as u64) as usize
+    }
+    fn unit(&mut self) -> f32 {
+        (self.next() % 10_000) as f32 / 10_000.0
+    }
+}
+
+fn trace_doc() -> Document {
+    use crate::document::Group;
+    use crate::document::shape::{self, ShapeKind};
+    let img = |id: u64, c: P2, w: u32, h: u32| {
+        let mut l = Layer::new(id, format!("l{id}"), "x.png".into());
+        l.size_px = [w, h];
+        l.transform.center = c;
+        Node::Layer(Box::new(l))
+    };
+    let mut locked = Layer::new(5, "locked".into(), "x.png".into());
+    locked.size_px = [40, 40];
+    locked.transform.center = [220.0, 60.0];
+    locked.locked = true;
+    let mut linked = Layer::new(6, "linked".into(), "x.png".into());
+    linked.size_px = [30, 30];
+    linked.transform.center = [60.0, 160.0];
+    linked
+        .bindings
+        .insert(crate::document::variables::Field::X, "60".into());
+    let text = crate::document::text::new_layer(7, "Hi", "Sans".into(), [150.0, 40.0]);
+    let poly = shape::new_layer(8, ShapeKind::Polyline, [200.0, 150.0]);
+    let canvas = shape::new_canvas_layer(9, ShapeKind::Rectangle, [20.0, 20.0], [80.0, 60.0]);
+    Document {
+        layers: vec![
+            img(1, [100.0, 100.0], 100, 50),
+            Node::Group(Group {
+                id: 2,
+                name: "g".into(),
+                visible: true,
+                locked: false,
+                opacity: 1.0,
+                clip: false,
+                blend: crate::document::BlendMode::Normal,
+                expanded: true,
+                children: vec![
+                    img(3, [180.0, 110.0], 20, 20),
+                    img(4, [200.0, 120.0], 20, 30),
+                ],
+                element: None,
+            }),
+            Node::Layer(Box::new(locked)),
+            Node::Layer(Box::new(linked)),
+            Node::Layer(Box::new(text)),
+            Node::Layer(Box::new(poly)),
+            Node::Layer(Box::new(canvas)),
+        ],
+        guides: vec![
+            Guide {
+                vertical: true,
+                at: 120.0,
+            },
+            Guide {
+                vertical: false,
+                at: 70.0,
+            },
+        ],
+        template_points: vec![("h1".into(), [70.5, 120.5])],
+        ..Default::default()
+    }
+}
+
+fn drag_kind_name(k: DragKind) -> String {
+    match k {
+        DragKind::Move => "move".into(),
+        DragKind::Scale => "scale".into(),
+        DragKind::Rotate => "rotate".into(),
+        DragKind::Distort(i) => format!("distort{i}"),
+        DragKind::Stretch(i) => format!("stretch{i}"),
+        DragKind::Tilt => "tilt".into(),
+        DragKind::RotateGroup(p) => format!("rotgroup{p:?}"),
+    }
+}
+
+/// Points worth pointing at this frame: the selected layer's handles, layer centers,
+/// guides, the rulers, the divider, or anywhere.
+fn interesting(rng: &mut Rng, doc: &Document, sel: Option<u64>, st: &CanvasState) -> Pos2 {
+    use super::handles::{edge_handles, handles};
+    let (cam, rect, full) = (st.camera, st.rect, st.full_rect);
+    let jitter = |rng: &mut Rng, p: Pos2| p + vec2(rng.unit() * 6.0 - 3.0, rng.unit() * 6.0 - 3.0);
+    match rng.below(9) {
+        0 | 1 => {
+            if let Some(id) = sel.filter(|&id| matches!(doc.node(id), Some(Node::Group(_))))
+                && let Some(b) = super::handles::group_box(doc, &cam, rect, id)
+            {
+                return jitter(rng, super::handles::group_rotate_handle(b).1);
+            }
+            if let Some(l) = sel.and_then(|id| doc.layer(id)) {
+                let (c, _, rot) = handles(&cam, rect, l);
+                let e = edge_handles(&cam, rect, l);
+                let all: Vec<Pos2> = c.into_iter().chain(e).chain([rot]).collect();
+                let i = rng.below(all.len());
+                return jitter(rng, all[i]);
+            }
+            pos2(
+                full.left() + rng.unit() * full.width(),
+                full.top() + rng.unit() * full.height(),
+            )
+        }
+        2 | 3 => {
+            let ids = [1, 3, 4, 5, 6, 7, 8, 9];
+            let id = ids[rng.below(ids.len())];
+            match doc.layer(id) {
+                Some(l) => jitter(rng, cam.to_screen(rect, l.transform.center)),
+                None => rect.center(),
+            }
+        }
+        4 => match doc.guides.get(rng.below(doc.guides.len().max(1))) {
+            Some(g) if g.vertical => pos2(
+                cam.to_screen(rect, [g.at, 0.0]).x + rng.unit() * 4.0 - 2.0,
+                rect.top() + rng.unit() * rect.height(),
+            ),
+            Some(g) => pos2(
+                rect.left() + rng.unit() * rect.width(),
+                cam.to_screen(rect, [0.0, g.at]).y + rng.unit() * 4.0 - 2.0,
+            ),
+            None => rect.center(),
+        },
+        5 => {
+            if rng.below(2) == 0 {
+                pos2(
+                    full.left() + rng.unit() * full.width(),
+                    full.top() + RULER / 2.0,
+                )
+            } else {
+                pos2(
+                    full.left() + RULER / 2.0,
+                    full.top() + rng.unit() * full.height(),
+                )
+            }
+        }
+        6 => pos2(
+            rect.left() + rect.width() * st.compare_split + rng.unit() * 10.0 - 5.0,
+            rect.top() + rng.unit() * rect.height(),
+        ),
+        7 => pos2(rng.unit() * 1000.0, rng.unit() * 800.0),
+        _ => pos2(
+            full.left() + rng.unit() * full.width(),
+            full.top() + rng.unit() * full.height(),
+        ),
+    }
+}
+
+fn trace_run(seed: u64, frames: usize, out: &mut String) {
+    use std::fmt::Write;
+    let mut rng = Rng(seed);
+    let mut doc = trace_doc();
+    let ctx = egui::Context::default();
+    let mut state = CanvasState::default();
+    let mut selected = Some(1 + (seed % 9));
+    let mut time = 0.0;
+    let mut pos = pos2(500.0, 400.0);
+    let mut mods = egui::Modifiers::NONE;
+    let mut down: Option<PointerButton> = None;
+    let fonts = crate::document::text::FontLibrary::builtin_only();
+    // A gesture in progress: the frames left and where it goes.
+    let mut gesture: Option<(usize, Pos2, Pos2)> = None;
+    let elements: Vec<PlacedElement> = outline([30.0, 30.0], [267.0, 180.0])
+        .into_iter()
+        .chain(anchors(&[[70.5, 120.5], [150.0, 60.0]]))
+        .collect();
+    // Settings varied per run.
+    state.show_rulers = seed.is_multiple_of(2);
+    state.snap_to_guides = !seed.is_multiple_of(3);
+    state.snap_to_edges = seed % 4 != 1;
+    state.snap_to_centers = seed % 5 != 2;
+    state.lock_guides = seed % 7 == 3;
+    if seed % 6 == 1 {
+        state.compare = Some(Compare {
+            elements: outline([40.0, 40.0], [250.0, 170.0]),
+            colors: Vec::new(),
+            labels: ["a".into(), "b".into()],
+            on_left: seed % 12 == 1,
+        });
+    }
+    // One frame first, so the canvas has its size.
+    let mut o = ctx.run_ui(
+        egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 800.0))),
+            max_texture_side: Some(8192),
+            ..Default::default()
+        },
+        |ui| {
+            show(ui, &mut doc, &elements, &mut selected, &mut state);
+        },
+    );
+    o.textures_delta.clear();
+    for f in 0..frames {
+        time += if rng.below(10) == 0 { 0.6 } else { 0.03 };
+        let mut events = Vec::new();
+        if let Some((left, from, to)) = gesture {
+            let k = 1.0 - left as f32 / 5.0;
+            pos = from + (to - from) * k;
+            events.push(Event::PointerMoved(pos));
+            if left == 0 {
+                events.push(Event::PointerButton {
+                    pos,
+                    button: PointerButton::Primary,
+                    pressed: false,
+                    modifiers: mods,
+                });
+                down = None;
+                gesture = None;
+            } else {
+                gesture = Some((left - 1, from, to));
+            }
+        } else if down.is_none() && rng.below(6) == 0 {
+            let from = interesting(&mut rng, &doc, selected, &state);
+            let (cam, rect) = (state.camera, state.rect);
+            let to = match rng.below(5) {
+                // Onto an anchor or the template point (snapping, the link offer).
+                0 => cam.to_screen(rect, [[70.5, 120.5], [150.0, 60.0]][rng.below(2)]),
+                // A little way (a linked position held).
+                1 => from + vec2(rng.unit() * 20.0 - 10.0, rng.unit() * 20.0 - 10.0),
+                // Onto a guide.
+                2 => cam.to_screen(rect, [120.0, 70.0]),
+                _ => interesting(&mut rng, &doc, selected, &state),
+            };
+            // Ctrl (distort a corner, tilt) or Shift now and then.
+            mods = egui::Modifiers {
+                alt: rng.below(6) == 0,
+                ctrl: false,
+                shift: rng.below(5) == 0,
+                mac_cmd: false,
+                command: rng.below(3) == 0,
+            };
+            mods.ctrl = mods.command;
+            events.push(Event::ModifiersChanged(mods));
+            events.push(Event::PointerMoved(from));
+            events.push(Event::PointerButton {
+                pos: from,
+                button: PointerButton::Primary,
+                pressed: true,
+                modifiers: mods,
+            });
+            pos = from;
+            down = Some(PointerButton::Primary);
+            gesture = Some((5, from, to));
+        } else {
+            match rng.below(20) {
+                0..=6 => {
+                    pos = if rng.below(3) == 0 {
+                        pos + vec2(rng.unit() * 60.0 - 30.0, rng.unit() * 60.0 - 30.0)
+                    } else {
+                        interesting(&mut rng, &doc, selected, &state)
+                    };
+                    events.push(Event::PointerMoved(pos));
+                }
+                7..=9 => {
+                    let button = match rng.below(8) {
+                        0 => PointerButton::Secondary,
+                        1 => PointerButton::Middle,
+                        _ => PointerButton::Primary,
+                    };
+                    let pressed = down.is_none();
+                    let button = down.unwrap_or(button);
+                    events.push(Event::PointerButton {
+                        pos,
+                        button,
+                        pressed,
+                        modifiers: mods,
+                    });
+                    down = pressed.then_some(button);
+                }
+                10 | 11 => {
+                    mods = egui::Modifiers {
+                        alt: rng.below(4) == 0,
+                        ctrl: false,
+                        shift: rng.below(3) == 0,
+                        mac_cmd: false,
+                        command: rng.below(3) == 0,
+                    };
+                    mods.ctrl = mods.command;
+                    events.push(Event::ModifiersChanged(mods));
+                }
+                12 => {
+                    let unit = [
+                        MouseWheelUnit::Point,
+                        MouseWheelUnit::Line,
+                        MouseWheelUnit::Page,
+                    ][rng.below(3)];
+                    let source = [
+                        MouseWheelSource::Wheel,
+                        MouseWheelSource::Unknown,
+                        MouseWheelSource::Trackpad,
+                    ][rng.below(3)];
+                    events.push(Event::MouseWheel {
+                        unit,
+                        delta: vec2(rng.unit() * 4.0 - 2.0, rng.unit() * 4.0 - 2.0),
+                        modifiers: mods,
+                        phase: egui::TouchPhase::Move,
+                        source,
+                    });
+                }
+                13 => events.push(Event::Zoom(0.8 + rng.unit() * 0.4)),
+                14 => {
+                    let key = [Key::Space, Key::Escape, Key::Enter, Key::A][rng.below(4)];
+                    let pressed = rng.below(2) == 0;
+                    events.push(Event::Key {
+                        key,
+                        physical_key: None,
+                        pressed,
+                        repeat: false,
+                        modifiers: mods,
+                    });
+                }
+                15 => {
+                    // A double click where the pointer is.
+                    if down.is_none() {
+                        for pressed in [true, false, true, false] {
+                            events.push(Event::PointerButton {
+                                pos,
+                                button: PointerButton::Primary,
+                                pressed,
+                                modifiers: mods,
+                            });
+                        }
+                    }
+                }
+                16 => {
+                    // Tools, as the tool bar or the menus set them.
+                    match rng.below(6) {
+                        0 => state.eyedropper = !state.eyedropper,
+                        1 => state.brushes.tool = Some(crate::document::paint::Tool::Pencil),
+                        2 => state.brushes.tool = Some(crate::document::paint::Tool::Eraser),
+                        3 => state.brushes.tool = None,
+                        4 => {
+                            selected = [
+                                None,
+                                Some(1),
+                                Some(2),
+                                Some(5),
+                                Some(6),
+                                Some(7),
+                                Some(8),
+                                Some(9),
+                            ][rng.below(8)]
+                        }
+                        _ => state.show_guides = !state.show_guides,
+                    }
+                }
+                17 => events.push(Event::Text("x".into())),
+                _ => {}
+            }
+        }
+        if std::env::var("TRACE_DEBUG").is_ok()
+            && events.iter().any(
+                |e| matches!(e, Event::PointerMoved(p) if !p.x.is_finite() || !p.y.is_finite()),
+            )
+        {
+            let last: Vec<&str> = out.lines().rev().take(2).collect();
+            panic!(
+                "NaN pointer at {seed}/{f}; last lines:\n{}",
+                last.join("\n")
+            );
+        }
+        let input = egui::RawInput {
+            screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 800.0))),
+            max_texture_side: Some(8192),
+            time: Some(time),
+            events,
+            ..Default::default()
+        };
+        let mut changed = false;
+        let mut o = ctx.run_ui(input, |ui| {
+            crate::document::shape::sync(ui.ctx(), &mut doc, true);
+            crate::document::text::sync(ui.ctx(), &mut doc, &fonts);
+            changed = show(ui, &mut doc, &elements, &mut selected, &mut state);
+        });
+        o.textures_delta.clear();
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        format!("{:?}", o.shapes).hash(&mut h);
+        let drag = state.drag.as_ref().map(|d| {
+            (
+                drag_kind_name(d.kind),
+                d.layers.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+                d.linked,
+                d.held,
+            )
+        });
+        writeln!(
+            out,
+            "{seed}/{f} ch={changed} sel={selected:?} cam={:?} rect={:?} drag={drag:?} pan={} gd={:?} gh={:?} ge={:?} sn={:?} sng={:?} lo={:?} pts={:?} draw={} typ={} cur={:?} mm={:?} split={} sg={} tool={:?} eye={} shapes={:x} doc={}",
+            state.camera, state.rect, state.panning, state.guide_drag, state.guide_hover,
+            state.guide_edit, state.snapped, state.snapped_guides, state.link_offer,
+            state.points.as_ref().map(|p| p.layer), state.drawing.is_some(), state.typing.is_some(),
+            o.platform_output.cursor_icon, state.cursor_mm, state.compare_split, state.show_guides,
+            state.brushes.tool, state.eyedropper, h.finish(),
+            serde_json::to_string(&doc).unwrap(),
+        )
+        .unwrap();
+    }
+}
+
+#[test]
+#[ignore = "writes the trace to $CANVAS_TRACE, to compare before and after a refactor"]
+fn show_trace() {
+    let mut out = String::new();
+    for seed in 1..=60 {
+        trace_run(seed * 0x9E37_79B9 + 1, 300, &mut out);
+    }
+    std::fs::write(std::env::var("CANVAS_TRACE").unwrap(), out).unwrap();
+}

@@ -17,6 +17,32 @@ pub(super) fn ruler_bands(full: Rect, rect: Rect) -> (Rect, Rect) {
     )
 }
 
+/// A drag out of a ruler adds a guide: a horizontal one from the top ruler, a vertical
+/// one from the left ruler. Hidden guides are shown again. Returns true if one was added.
+pub(super) fn ruler_input(
+    ui: &egui::Ui,
+    doc: &mut Document,
+    state: &mut CanvasState,
+    full: Rect,
+    rect: Rect,
+) -> bool {
+    let mut added = false;
+    let (top, left) = ruler_bands(full, rect);
+    for (band, vertical) in [(top, false), (left, true)] {
+        let r = ui.interact(band, ui.scope_id().with(("ruler", vertical)), Sense::drag());
+        if r.drag_started_by(PointerButton::Primary)
+            && let Some(p) = r.interact_pointer_pos()
+        {
+            let at = state.camera.to_mm(rect, p)[if vertical { 0 } else { 1 }];
+            doc.guides.push(Guide { vertical, at });
+            state.guide_drag = Some(doc.guides.len() - 1);
+            state.show_guides = true;
+            added = true;
+        }
+    }
+    added
+}
+
 /// Millimeters between two numbered marks on a ruler at `zoom`, so that they are at least
 /// `RULER_LABEL_SPACING` apart on screen, and how many parts the marks between them cut
 /// that into.

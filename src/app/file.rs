@@ -280,7 +280,12 @@ impl ArtworkApp {
 
     /// Starts an empty project, keeping the current template.
     pub(super) fn new_project(&mut self) {
-        let template = self.doc.template.clone();
+        // The current template, if installed: one only the last project kept is not.
+        let template = self
+            .doc
+            .template
+            .clone()
+            .filter(|id| self.installed(id).is_some());
         self.doc = Document::default();
         self.selected = None;
         self.project_path = None;

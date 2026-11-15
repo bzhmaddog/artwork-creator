@@ -386,7 +386,8 @@ mod tests {
                     dirs.push(path);
                     continue;
                 }
-                if path.extension().is_none_or(|e| e != "rs") {
+                // A module's tests may sit in its own `tests.rs`.
+                if path.extension().is_none_or(|e| e != "rs") || path.ends_with("tests.rs") {
                     continue;
                 }
                 // Comments (such as the examples above) and tests are not texts shown

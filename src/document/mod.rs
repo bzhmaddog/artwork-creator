@@ -1368,6 +1368,12 @@ impl Document {
         doc.next_id = doc.next_id.max(max_id + 1);
         // Saved colors of older projects are color variables now.
         crate::document::colors::migrate_palette(&mut doc);
+        // Shapes painted in before only canvases could be stay canvases.
+        doc.for_each_layer_mut(|l| {
+            if let Some(s) = l.shape.as_deref_mut() {
+                s.canvas |= !s.strokes.is_empty();
+            }
+        });
         Ok(doc)
     }
 }
@@ -1606,6 +1612,41 @@ mod tests {
             "transform":{"center":[0,0],"scale":[1,1],"rotation_deg":0,"flip_x":false,"flip_y":false}}]}"#;
         let d: Document = serde_json::from_str(json).unwrap();
         assert_eq!(d.layers[0].as_layer().unwrap().id, 3);
+    }
+
+    #[test]
+    fn only_canvases_take_paint_and_painted_shapes_load_as_canvases() {
+        use crate::document::shape::{self, ShapeKind};
+        let canvas = shape::new_canvas_layer(1, ShapeKind::Rectangle, [0.0, 0.0], [50.0, 50.0]);
+        let plain = shape::new_layer(2, ShapeKind::Rectangle, [25.0, 25.0]);
+        assert!(shape::paintable(&canvas));
+        assert!(
+            !shape::paintable(&plain),
+            "a closed shape that is no canvas"
+        );
+        // A shape painted in before canvases were marked: it stays paintable.
+        let mut painted = plain.clone();
+        painted.id = 3;
+        let pen = crate::document::paint::Pen::new(
+            crate::document::paint::Tool::Pencil,
+            2.0,
+            [0, 0, 0, 255],
+        );
+        painted.shape.as_deref_mut().unwrap().canvas = true;
+        assert!(shape::add_stroke(
+            &mut painted,
+            &[[20.0, 25.0, 1.0], [30.0, 25.0, 1.0]],
+            &pen
+        ));
+        painted.shape.as_deref_mut().unwrap().canvas = false;
+        let mut doc = Document::default();
+        doc.layers.push(Node::Layer(Box::new(plain)));
+        doc.layers.push(Node::Layer(Box::new(painted)));
+        let json = serde_json::to_string(&doc).unwrap();
+        assert!(!json.contains("\"canvas\""), "not saved when false");
+        let back = Document::from_json(&json).unwrap();
+        assert!(!shape::paintable(back.layer(2).unwrap()));
+        assert!(shape::paintable(back.layer(3).unwrap()));
     }
 
     #[test]

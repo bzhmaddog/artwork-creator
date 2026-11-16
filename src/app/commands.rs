@@ -383,7 +383,7 @@ impl ArtworkApp {
             }
             Command::EyedropperTool => self.canvas.eyedropper = true,
             Command::ClearPaint => self.dirty |= canvas::clear_paint(&mut self.doc, self.selected),
-            // Only while a closed shape is selected, to paint in.
+            // Only while a canvas is selected, to paint in.
             Command::PencilTool | Command::BrushTool | Command::EraserTool => {
                 if canvas::can_paint(&self.doc, self.selected) {
                     self.canvas.eyedropper = false;

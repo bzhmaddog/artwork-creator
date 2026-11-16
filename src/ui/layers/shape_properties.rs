@@ -190,12 +190,14 @@ pub(super) fn shape_section(
                     }
 
                     // What is painted in it, when it is resized.
-                    ui.label(tr!("SHAPE_STRETCH_PAINT"));
-                    changed |= ui
-                        .checkbox(&mut s.stretch_paint, "")
-                        .on_hover_text(tr!("SHAPE_STRETCH_PAINT_HINT"))
-                        .changed();
-                    ui.end_row();
+                    if s.canvas {
+                        ui.label(tr!("SHAPE_STRETCH_PAINT"));
+                        changed |= ui
+                            .checkbox(&mut s.stretch_paint, "")
+                            .on_hover_text(tr!("SHAPE_STRETCH_PAINT_HINT"))
+                            .changed();
+                        ui.end_row();
+                    }
                 }
 
                 ui.label(tr!("SHAPE_STROKE"));

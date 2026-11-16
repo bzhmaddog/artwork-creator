@@ -281,6 +281,9 @@ pub struct Shape {
     pub dash: DashStyle,
     pub cap: Cap,
     pub join: Join,
+    /// Added with the Canvas button: only a canvas gets the paint tools.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub canvas: bool,
     /// Strokes painted inside it, bottom first, in its frame, cut off at its outline;
     /// only a closed shape shows them.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -341,6 +344,7 @@ impl Shape {
             dash: DashStyle::Solid,
             cap: if open { Cap::Round } else { Cap::Butt },
             join: if open { Join::Round } else { Join::Miter },
+            canvas: false,
             strokes: Vec::new(),
             stretch_paint: true,
         }
@@ -894,6 +898,7 @@ pub fn new_canvas_layer(id: u64, kind: ShapeKind, lo: P2, hi: P2) -> Layer {
 pub fn make_canvas(layer: &mut Layer) {
     layer.name = translate(tr_noop!("DEFAULT_CANVAS_LAYER_NAME")).to_owned();
     if let Some(s) = layer.shape.as_deref_mut() {
+        s.canvas = true;
         s.fill = false;
         s.stroke = false;
     }
@@ -980,7 +985,10 @@ pub fn clear_paint(layer: &mut Layer) -> bool {
 
 /// A closed shape: it can be painted in.
 pub fn paintable(layer: &Layer) -> bool {
-    layer.shape.as_deref().is_some_and(|s| s.kind.closed())
+    layer
+        .shape
+        .as_deref()
+        .is_some_and(|s| s.canvas && s.kind.closed())
 }
 
 /// Adds a point at the end of a line, polyline or polygon being drawn. Returns true if

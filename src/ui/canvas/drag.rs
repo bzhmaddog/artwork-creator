@@ -305,8 +305,11 @@ fn start(
             }
             // A locked layer is selected but stays put: the drag pans.
             // A background stays on the outline: the drag pans.
+            // On empty canvas, the drag pans and the selection stays.
             (hit, _) => {
-                *selected = layer_to_select(doc, m);
+                if let Some(id) = layer_to_select(doc, m) {
+                    *selected = Some(id);
+                }
                 let hit = hit.filter(|&id| {
                     doc.layer(id)
                         .is_none_or(|l| !crate::document::background::is_fixed(l))

@@ -22,7 +22,7 @@ pub const TOOLS: [(
     ),
 ];
 
-/// The tool bar at the canvas' top left: Select and the eyedropper; while a closed shape
+/// The tool bar at the canvas' top left: Select and the eyedropper; while a canvas
 /// is selected (`paintable`), the paint tools between them, the button clearing the
 /// shape's paint (`can_clear` says whether it has any), then, for a paint tool, its
 /// color (not the eraser's) and width. Returns true if the clear button was clicked.
@@ -324,7 +324,7 @@ pub fn can_paint(doc: &Document, selected: Option<u64>) -> bool {
     })
 }
 
-/// Painting with the pencil or the brush, or erasing, in the selected closed shape: a
+/// Painting with the pencil or the brush, or erasing, in the selected canvas: a
 /// drag on the page paints a stroke, added when the button is released (what goes past
 /// the shape's outline doesn't show); a click, a dot. The eraser cuts its strokes
 /// as it goes. Returns true if the document changed.

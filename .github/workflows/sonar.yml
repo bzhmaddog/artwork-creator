@@ -23,6 +23,8 @@ jobs:
   sonar:
     name: SonarQube Cloud
     runs-on: ubuntu-latest
+    # Pull requests from forks get no secrets, so there is no SONAR_TOKEN to scan with.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     steps:
       - uses: actions/checkout@v4
         with:
@@ -37,7 +39,13 @@ jobs:
         run: mkdir -p target && cargo clippy --workspace --all-targets --locked --message-format=json > target/clippy.json
       - name: Coverage
         run: cargo llvm-cov --workspace --locked --lcov --output-path target/lcov.info
+      - name: Version
+        id: version
+        run: echo "version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "artwork-creator") | .version')" >> "$GITHUB_OUTPUT"
       - name: Scan
         uses: SonarSource/sonarqube-scan-action@2f77a1ec69fb1d595b06f35ab27e97605bdef703 # v5
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        with:
+          # Tags each analysis with the release, for the "previous version" new code period.
+          args: -Dsonar.projectVersion=${{ steps.version.outputs.version }}

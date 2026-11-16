@@ -2,6 +2,8 @@
 
 [![Test](https://github.com/bzhmaddog/artwork-creator/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/bzhmaddog/artwork-creator/actions/workflows/test.yml)
 [![CodeQL](https://github.com/bzhmaddog/artwork-creator/actions/workflows/github-code-scanning/codeql/badge.svg)](https://github.com/bzhmaddog/artwork-creator/actions/workflows/github-code-scanning/codeql)
+[![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=bzhmaddog_artwork-creator&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=bzhmaddog_artwork-creator)
+[![Coverage](https://sonarcloud.io/api/project_badges/measure?project=bzhmaddog_artwork-creator&metric=coverage)](https://sonarcloud.io/component_measures?id=bzhmaddog_artwork-creator&metric=coverage)
 
 A desktop app for designing printed artwork for arcade controllers and fightsticks.
 

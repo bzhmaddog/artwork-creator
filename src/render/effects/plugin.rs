@@ -180,7 +180,7 @@ pub fn load_dir(dir: &Path) -> Loaded {
 /// Loads one plugin library.
 pub fn load_library(path: &Path) -> Result<(PluginInfo, Vec<NativeEffect>), String> {
     // SAFETY: none can be given: loading runs the library's initializers, and its code
-    // is trusted from here on. The README warns to install only trusted plugins.
+    // is trusted from here on. docs/SPECS.md warns to install only trusted plugins.
     let library = unsafe { Library::new(path) }.map_err(|e| e.to_string())?;
     let entry = {
         // SAFETY: the symbol has the ABI's entry type.

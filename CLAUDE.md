@@ -1,9 +1,9 @@
 # Project notes
 
 - **Consistency**: a new tool or feature gets the same treatment as its siblings
-  (keyboard shortcut shown in its menu entry or tooltip and listed in README's Shortcuts
+  (keyboard shortcut shown in its menu entry or tooltip and listed in docs/SPECS.md's Shortcuts
   table, a translation key with its text in `locales/en-US.json` and `locales/fr-FR.json`,
-  etc.). Before finishing, compare it with
+  its description in docs/SPECS.md, etc.). Before finishing, compare it with
   the closest existing feature and fill in what it lacks. See "Consistency" in README.md.
 - **U.S. English** everywhere in code, comments, docs and UI texts (color, center, gray,
   canceled). British spellings go only in `locales/en-GB.json`, which holds just the

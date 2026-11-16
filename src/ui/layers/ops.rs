@@ -27,8 +27,10 @@ pub(super) fn name_mut(node: &mut Node) -> &mut String {
     }
 }
 
-/// Where a new layer goes: at the top of a selected group, just above a selected layer,
-/// or at the top of the stack.
+/// Where a new layer goes: at the top of a selected group, or at the top level just above
+/// the selected layer (above the group holding it, when it is in one), or at the top of
+/// the stack. In the template editor, a shape goes next to the selected one, in its
+/// element.
 pub fn insertion_path(doc: &mut Document, selected: Option<u64>) -> Vec<usize> {
     let Some(mut path) = selected.and_then(|id| doc.path_of(id)) else {
         return vec![doc.layers.len()];
@@ -36,6 +38,8 @@ pub fn insertion_path(doc: &mut Document, selected: Option<u64>) -> Vec<usize> {
     if let Some(Node::Group(g)) = doc.node_at_mut(&path) {
         g.expanded = true;
         path.push(g.children.len());
+    } else if doc.edited_template.is_none() {
+        path = vec![path[0] + 1];
     } else if let Some(last) = path.last_mut() {
         *last += 1;
     }

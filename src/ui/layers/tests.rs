@@ -1123,3 +1123,31 @@ fn position_size_rotation_and_tilt_fields_line_up_in_columns() {
     // Rotation, one field: in the first column.
     assert_eq!(fx("Rotation"), position[..1], "Rotation");
 }
+
+#[test]
+fn new_layers_go_into_a_group_only_when_the_group_is_selected() {
+    let mut d = doc_with(vec![
+        layer(1),
+        Node::Group(Group {
+            id: 10,
+            name: "g".into(),
+            visible: true,
+            locked: false,
+            opacity: 1.0,
+            clip: false,
+            blend: crate::document::BlendMode::Normal,
+            expanded: false,
+            children: vec![layer(2), layer(3)],
+            element: None,
+        }),
+        layer(4),
+    ]);
+    // The group selected: at its top.
+    assert_eq!(insertion_path(&mut d, Some(10)), [1, 2]);
+    // A layer in the group: above the group, at the top level.
+    assert_eq!(insertion_path(&mut d, Some(2)), [2]);
+    // A top-level layer: just above it.
+    assert_eq!(insertion_path(&mut d, Some(1)), [1]);
+    // Nothing selected: at the top of the stack.
+    assert_eq!(insertion_path(&mut d, None), [3]);
+}

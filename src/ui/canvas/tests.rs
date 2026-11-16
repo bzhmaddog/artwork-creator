@@ -627,6 +627,7 @@ fn clear_paint_empties_the_selected_shape_only() {
         crate::document::shape::ShapeKind::Rectangle,
         [50.0, 50.0],
     );
+    crate::document::shape::make_canvas(&mut l);
     let line = [[45.0, 50.0, 1.0], [55.0, 50.0, 1.0]];
     assert!(crate::document::shape::add_stroke(
         &mut l,
@@ -2201,11 +2202,14 @@ fn the_paint_cursor_leaves_the_tool_bar_alone() {
     let mut state = CanvasState::default();
     state.brushes.tool = Some(crate::document::paint::Tool::Brush);
     let mut doc = Document {
-        layers: vec![Node::Layer(Box::new(crate::document::shape::new_layer(
-            1,
-            crate::document::shape::ShapeKind::Rectangle,
-            [100.0, 100.0],
-        )))],
+        layers: vec![Node::Layer(Box::new(
+            crate::document::shape::new_canvas_layer(
+                1,
+                crate::document::shape::ShapeKind::Rectangle,
+                [50.0, 50.0],
+                [150.0, 150.0],
+            ),
+        ))],
         ..Default::default()
     };
     let mut selected = Some(1);
@@ -2804,4 +2808,16 @@ fn show_trace() {
         trace_run(seed * 0x9E37_79B9 + 1, 300, &mut out);
     }
     std::fs::write(std::env::var("CANVAS_TRACE").unwrap(), out).unwrap();
+}
+
+#[test]
+fn panning_from_empty_canvas_keeps_the_selection() {
+    let mut doc = snap_doc();
+    let mut c = Canvas::new(&mut doc);
+    let pan = c.state.camera.pan;
+    let (from, to) = (c.screen([20.0, 160.0]), c.screen([60.0, 180.0]));
+    c.drag(&mut doc, from, to);
+    assert_ne!(c.state.camera.pan, pan, "the view moved");
+    assert_eq!(c.selected, Some(1));
+    assert_eq!(doc.layer(1).unwrap().transform.center, [100.0, 100.0]);
 }

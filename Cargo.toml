@@ -72,14 +72,15 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 # The Linux .deb package (`make deb`, cargo-deb). The app finds its templates in
-# ../share/artwork-creator/ from the executable. $auto lists the libraries it links to;
-# the others are the ones it loads at run time (OpenGL, X11 or Wayland, fontconfig).
+# ../share/artwork-creator/ from the executable. The release build links only to glibc,
+# at the version it is built for (GLIBC in the Makefile; $auto would ask for the build
+# machine's); the other libraries are loaded at run time (OpenGL, X11 or Wayland, fontconfig).
 [package.metadata.deb]
 maintainer = "bzhmaddog"
 copyright = "bzhmaddog"
 section = "graphics"
 extended-description = "A desktop app for designing printed artwork for arcade controllers and fightsticks: load a controller template, arrange images on it and export print-ready PNG, PDF or SVG at true size."
-depends = "$auto, libgl1, libegl1, libfontconfig1, libxkbcommon0, libwayland-client0, libx11-6, libxcursor1, libxi6, libxrandr2"
+depends = "libc6 (>= 2.28), libgl1, libegl1, libfontconfig1, libxkbcommon0, libwayland-client0, libx11-6, libxcursor1, libxi6, libxrandr2"
 assets = [
     ["target/release/artwork-creator", "usr/bin/", "755"],
     ["templates/**/*", "usr/share/artwork-creator/templates/", "644"],

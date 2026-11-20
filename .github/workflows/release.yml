@@ -43,7 +43,27 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
           key: release
-      - name: Build
+      # Linux: linked against an old glibc (GLIBC in the Makefile, like `make linux-portable`)
+      # so the packages run on older distributions too, with cargo-zigbuild and zig at
+      # pinned versions (zig checked against its SHA-256); raise them on purpose.
+      - name: Build (Linux)
+        if: matrix.name == 'linux'
+        env:
+          ZIG_VERSION: 0.14.1
+          ZIG_SHA256: 24aeeec8af16c381934a6cd7d95c807a8cb2cf7df9fa40d359aa884195c4716c
+        run: |
+          zig="zig-x86_64-linux-$ZIG_VERSION"
+          curl -fsSL -o "$RUNNER_TEMP/zig.tar.xz" "https://ziglang.org/download/$ZIG_VERSION/$zig.tar.xz"
+          echo "$ZIG_SHA256  $RUNNER_TEMP/zig.tar.xz" | sha256sum -c -
+          tar -xJf "$RUNNER_TEMP/zig.tar.xz" -C "$RUNNER_TEMP"
+          export PATH="$RUNNER_TEMP/$zig:$PATH"
+          cargo install cargo-zigbuild --version 0.24.1 --locked
+          glibc=$(sed -n 's/^GLIBC *:= *//p' Makefile)
+          cargo zigbuild --release --locked -p "$APP" --target "x86_64-unknown-linux-gnu.$glibc"
+          mkdir -p target/release
+          cp "target/x86_64-unknown-linux-gnu/release/${{ matrix.exe }}" target/release/
+      - name: Build (Windows)
+        if: matrix.name == 'windows'
         run: cargo build --release --locked -p ${{ env.APP }}
       - name: Package (Linux)
         if: matrix.name == 'linux'
@@ -57,7 +77,7 @@ jobs:
         if: matrix.name == 'linux'
         run: |
           cargo install cargo-deb --version 3.8.0 --locked
-          cargo deb --no-build -o dist/
+          cargo deb --no-build --target x86_64-unknown-linux-gnu -o dist/
           sh scripts/appimage.sh "target/release/${{ matrix.exe }}" "dist/$APP-linux-x86_64.AppImage"
       - name: Package (Windows)
         if: matrix.name == 'windows'

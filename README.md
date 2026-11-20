@@ -54,6 +54,7 @@ make linux      # Linux only
 make windows    # Windows .exe only
 make test       # run the tests
 make plugins    # build the example plugins into plugins/ (.so and .dll)
+make linux-portable  # Linux build that also runs on older distributions (needs zig, cargo-zigbuild)
 make dist       # package each build with the templates folder into dist/
 make deb        # Linux .deb package into dist/ (needs cargo-deb)
 make appimage   # Linux AppImage into dist/
@@ -65,7 +66,9 @@ Windows ([Inno Setup](https://jrsoftware.org/isinfo.php), from
 [`installer/artwork-creator.iss`](installer/artwork-creator.iss)), with a Start menu entry
 and `.artwork` files opened with the app; a `.deb` (settings in `Cargo.toml`, made with
 [cargo-deb](https://github.com/kornelski/cargo-deb)) and an AppImage
-([`scripts/appimage.sh`](scripts/appimage.sh)) for Linux. Installed, the app finds its
+([`scripts/appimage.sh`](scripts/appimage.sh)) for Linux. The Linux packages are built
+against an old glibc (2.28, with [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild)),
+so one `.deb` installs on any Debian or Ubuntu from Debian 10 / Ubuntu 20.04 on. Installed, the app finds its
 templates in `../share/artwork-creator/` from the executable when there are none next to
 it.
 

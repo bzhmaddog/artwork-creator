@@ -16,10 +16,15 @@
 #   make pre-commit   run those checks now: clippy for Linux and Windows, tests on Linux;
 #                     ARGS=--linux or ARGS=--windows checks one target only
 #   make plugins      build the example plugins for Linux and Windows into plugins/
+#   make linux-portable
+#                     release build for Linux that runs on glibc GLIBC and later (older
+#                     distributions too), with cargo-zigbuild: install zig
+#                     (https://ziglang.org/download/) and cargo install cargo-zigbuild --locked
 #   make dist         package each release build with its templates folder into dist/
-#   make deb          Linux .deb package into dist/ (needs cargo-deb:
+#                     (the Linux one is linux-portable)
+#   make deb          Linux .deb package into dist/, from linux-portable (needs cargo-deb:
 #                     cargo install cargo-deb --locked)
-#   make appimage     Linux AppImage into dist/ (see scripts/appimage.sh)
+#   make appimage     Linux AppImage into dist/, from linux-portable (see scripts/appimage.sh)
 #   make windows-setup
 #                     Windows installer into dist/, with Inno Setup in a Docker or
 #                     Podman container (see scripts/windows-setup.sh)
@@ -39,6 +44,10 @@ APP     := artwork-creator
 LINUX   := x86_64-unknown-linux-gnu
 WINDOWS := x86_64-pc-windows-gnu
 DIST    := dist
+
+# Oldest glibc the Linux packages run on (linux-portable); libc6 in Cargo.toml's deb
+# depends must match. 2.28: Debian 10, Ubuntu 18.10, RHEL 8.
+GLIBC   := 2.28
 
 LINUX_BIN   := target/$(LINUX)/release/$(APP)
 WINDOWS_BIN := target/$(WINDOWS)/release/$(APP).exe
@@ -60,13 +69,17 @@ TRIVY_CACHE   ?= $(HOME)/.cache/trivy
 # version-bump-patch, version-bump-minor, version-bump-major (see "Versioning" below).
 VERSION_STEPS := $(foreach p,patch minor major,version-bump-$(p))
 
-.PHONY: all linux windows debug debug-linux debug-windows run run-windows \
+.PHONY: all linux linux-portable windows debug debug-linux debug-windows run run-windows \
         test check check-dependencies fmt clippy hooks pre-commit plugins dist version-check version-bump $(VERSION_STEPS) dist-linux dist-windows deb appimage windows-setup clean
 
 all: linux windows
 
 linux:
 	$(CARGO) build --release --target $(LINUX)
+
+# Same output path as linux, linked against an older glibc (see GLIBC).
+linux-portable:
+	$(CARGO) zigbuild --release --target $(LINUX).$(GLIBC)
 
 windows:
 	$(CARGO) build --release --target $(WINDOWS)
@@ -139,7 +152,7 @@ version-bump:
 # The app looks for templates/ next to the executable, so ship them together.
 dist: dist-linux dist-windows
 
-dist-linux: linux
+dist-linux: linux-portable
 	rm -rf $(DIST)/$(APP)-linux
 	mkdir -p $(DIST)/$(APP)-linux
 	cp $(LINUX_BIN) $(DIST)/$(APP)-linux/
@@ -159,11 +172,11 @@ dist-windows: windows
 		else echo "zip not installed; skipping $(APP)-windows.zip (folder is in $(DIST)/)"; fi
 
 # Installers: the app finds its templates in ../share/artwork-creator/ from the executable.
-deb: linux
+deb: linux-portable
 	mkdir -p $(DIST)
 	$(CARGO) deb --no-build --target $(LINUX) -o $(DIST)/
 
-appimage: linux
+appimage: linux-portable
 	sh scripts/appimage.sh $(LINUX_BIN) $(DIST)/$(APP)-linux-x86_64.AppImage
 
 windows-setup: windows

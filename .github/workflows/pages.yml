@@ -1,0 +1,55 @@
+# Publishes the project's web page (the pages/ folder) to GitHub Pages.
+#
+# The app icon and the screenshot are copied in from assets/ and docs/ so they are kept
+# in one place. Runs on every push to main that touches them, or by hand
+# (Actions > Pages > Run workflow).
+#
+# Needs Settings > Pages > Source set to "GitHub Actions" once.
+name: Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "pages/**"
+      - "assets/icon/artwork-creator.svg"
+      - "docs/capture.png"
+      - ".github/workflows/pages.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# One deployment at a time; a newer push waits rather than canceling one in progress.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/configure-pages@v5
+      - name: Assemble the site
+        run: |
+          mkdir _site
+          cp -r pages/. _site/
+          cp assets/icon/artwork-creator.svg _site/icon.svg
+          cp docs/capture.png _site/capture.png
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

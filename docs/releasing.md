@@ -61,6 +61,11 @@ version too. It asks before committing, and makes no tag and pushes nothing. See
 4. On GitHub, open **Releases**, check the draft (notes, the five files), and click
    **Publish release**.
 
+5. Publishing runs the **Pages** workflow, which puts the Windows installer at
+   `https://bzhmaddog.github.io/artwork-creator/download/vX.Y.Z/artwork-creator-windows-setup.exe`:
+   the link to give the Microsoft Store, which doesn't accept release asset links (they
+   redirect).
+
 ## Building the packages without releasing
 
 Run the **Release** workflow by hand (Actions > Release > Run workflow): it only builds the

@@ -1,8 +1,10 @@
 # Publishes the project's web page (the pages/ folder) to GitHub Pages.
 #
 # The app icon and the screenshot are copied in from assets/ and docs/ so they are kept
-# in one place. Runs on every push to main that touches them, or by hand
-# (Actions > Pages > Run workflow).
+# in one place. The Windows installer of every published release is added under
+# download/vX.Y.Z/, a direct link without redirects (unlike release assets) for the
+# Microsoft Store. Runs on every push to main that touches them, when a release is
+# published, or by hand (Actions > Pages > Run workflow).
 #
 # Needs Settings > Pages > Source set to "GitHub Actions" once.
 name: Pages
@@ -15,6 +17,8 @@ on:
       - "assets/icon/artwork-creator.svg"
       - "docs/capture.png"
       - ".github/workflows/pages.yml"
+  release:
+    types: [published]
   workflow_dispatch:
 
 permissions:
@@ -37,6 +41,15 @@ jobs:
           cp -r pages/. _site/
           cp assets/icon/artwork-creator.svg _site/icon.svg
           cp docs/capture.png _site/capture.png
+      # Each deployment replaces the whole site, so every release's installer is added again.
+      - name: Add the Windows installers
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for tag in $(gh release list --exclude-drafts --limit 1000 --json tagName -q '.[].tagName'); do
+            gh release download "$tag" -p artwork-creator-windows-setup.exe -D "_site/download/$tag" \
+              || echo "$tag has no Windows installer"
+          done
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site

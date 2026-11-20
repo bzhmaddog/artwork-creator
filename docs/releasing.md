@@ -65,6 +65,6 @@ version too. It asks before committing, and makes no tag and pushes nothing. See
 
 Run the **Release** workflow by hand (Actions > Release > Run workflow): it only builds the
 packages and keeps them as the run's artifacts for 7 days. Locally, `make dist` builds the
-same packages into `dist/`, `make deb` and `make appimage` the Linux installers, and
-`make windows-setup` the Windows one (Inno Setup with Wine in a Docker or Podman
-container).
+same packages into `dist/`, `make deb` and `make appimage` the Linux installers (all three
+need zig and cargo-zigbuild: see "Building" in README.md), and `make windows-setup` the
+Windows one (Inno Setup with Wine in a Docker or Podman container).

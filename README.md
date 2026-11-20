@@ -54,11 +54,21 @@ make linux      # Linux only
 make windows    # Windows .exe only
 make test       # run the tests
 make plugins    # build the example plugins into plugins/ (.so and .dll)
-make linux-portable  # Linux build that also runs on older distributions (needs zig, cargo-zigbuild)
+make linux-portable  # Linux build that also runs on older distributions (see below)
 make dist       # package each build with the templates folder into dist/
 make deb        # Linux .deb package into dist/ (needs cargo-deb)
 make appimage   # Linux AppImage into dist/
-make windows-setup  # Windows installer into dist/ (Inno Setup in a Docker/Podman container)
+make windows-setup   # Windows installer into dist/ (Inno Setup in a Docker/Podman container)
+```
+
+The Linux packages (`make dist`, `make deb`, `make appimage`) are made from
+`make linux-portable`, which links against an old glibc (2.28, `GLIBC` in the `Makefile`)
+so they run on older distributions too. It needs [zig](https://ziglang.org/download/) in
+the `PATH` and [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild):
+
+```sh
+cargo install cargo-zigbuild --locked
+cargo install cargo-deb --locked    # for make deb
 ```
 
 Each release also has installers, built by the Release workflow: a setup `.exe` for
@@ -66,11 +76,10 @@ Windows ([Inno Setup](https://jrsoftware.org/isinfo.php), from
 [`installer/artwork-creator.iss`](installer/artwork-creator.iss)), with a Start menu entry
 and `.artwork` files opened with the app; a `.deb` (settings in `Cargo.toml`, made with
 [cargo-deb](https://github.com/kornelski/cargo-deb)) and an AppImage
-([`scripts/appimage.sh`](scripts/appimage.sh)) for Linux. The Linux packages are built
-against an old glibc (2.28, with [cargo-zigbuild](https://github.com/rust-cross/cargo-zigbuild)),
-so one `.deb` installs on any Debian or Ubuntu from Debian 10 / Ubuntu 20.04 on. Installed, the app finds its
-templates in `../share/artwork-creator/` from the executable when there are none next to
-it.
+([`scripts/appimage.sh`](scripts/appimage.sh)) for Linux. Built for glibc 2.28, the `.deb`
+installs on any Debian or Ubuntu from Debian 10 / Ubuntu 20.04 on. Installed, the app finds
+its templates in `../share/artwork-creator/` from the executable when there are none next
+to it.
 
 The app's icon is in [`assets/icon`](assets/icon): the SVG it is drawn from, PNGs from 16
 to 1024 px and the Windows `.ico`. `build.rs` builds the `.ico` into the Windows

@@ -3,3 +3,6 @@
 /plugins
 /tmp
 *:Zone.Identifier
+
+.env
+.envrc

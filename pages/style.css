@@ -74,6 +74,43 @@ li { margin-bottom: 6px; }
 
 a { color: var(--accent); }
 
+.muted { color: var(--muted); }
+
+/* Download page */
+.release { text-align: center; color: var(--muted); }
+
+.badge {
+  padding: 1px 8px;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-size: 0.85rem;
+}
+
+.cards {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 16px;
+  margin-top: 16px;
+}
+
+.card {
+  padding: 4px 20px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.card h3 { margin: 16px 0 0; font-size: 1.2rem; }
+.needs { margin: 0 0 16px; font-size: 0.9rem; color: var(--muted); }
+.file { margin: 0 0 18px; }
+.file .button { display: inline-block; padding: 6px 16px; }
+.size { margin-left: 6px; font-size: 0.85rem; color: var(--muted); }
+.how { font-size: 0.85rem; color: var(--muted); }
+
+table { width: 100%; border-collapse: collapse; font-size: 0.95rem; }
+th, td { padding: 8px 6px; border-bottom: 1px solid var(--border); text-align: left; vertical-align: top; }
+th { color: var(--muted); font-weight: 600; }
+td:first-child, td:nth-child(2) { white-space: nowrap; }
+
 footer {
   margin-top: 56px;
   padding-top: 20px;

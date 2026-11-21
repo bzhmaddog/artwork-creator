@@ -3,22 +3,31 @@
 # the lines added or changed since the branch left main that the tests run.
 #
 # Usage: coverage.sh [MIN]
-#   Runs the tests under cargo-llvm-cov (install it with `make dev-setup`), writes
-#   target/lcov.info, then fails when new code is covered below MIN percent (default 80,
+#   Runs the Rust tests under cargo-llvm-cov (install it with `make dev-setup`) and the
+#   script tests (scripts/test_*.py) under Python's coverage (from .venv), writes target/lcov.info and
+#   target/python-lcov.info, then fails when new code is covered below MIN percent (default 80,
 #   the gate's threshold). Files Sonar leaves out of coverage (sonar.exclusions and
 #   sonar.coverage.exclusions in sonar-project.properties) are left out here too.
 set -e
 
 MIN=${1:-80}
 LCOV=target/lcov.info
+PY_LCOV=target/python-lcov.info
 
 if ! cargo llvm-cov --version >/dev/null 2>&1; then
     echo "coverage: cargo-llvm-cov is not installed; run 'make dev-setup'." >&2
     exit 1
 fi
+if ! .venv/bin/python3 -m coverage --version >/dev/null 2>&1; then
+    echo "coverage: Python's coverage is not installed; run 'make dev-setup'." >&2
+    exit 1
+fi
 
 # Build progress shown (the first, instrumented build is long); tests as dots.
 cargo llvm-cov --workspace --locked --lcov --output-path $LCOV -- -q
+.venv/bin/python3 -m coverage run --data-file=target/.coverage --source=scripts --omit='scripts/test_*.py' \
+    -m unittest discover -s scripts
+.venv/bin/python3 -m coverage lcov --data-file=target/.coverage -q -o $PY_LCOV
 
 # Where the branch left main (origin/main when there is one).
 BASE_BRANCH=main
@@ -30,7 +39,7 @@ EXCLUDED=$(sed -n 's/^sonar\.\(coverage\.\)\{0,1\}exclusions=//p' sonar-project.
     tr ',' '\n' | sed 's|\*\*/|*|g')
 
 # The new lines: "file line" for each line added since BASE (committed, staged or not).
-NEW=$(git diff -U0 --no-color "$BASE" -- '*.rs' | awk '
+NEW=$(git diff -U0 --no-color "$BASE" -- '*.rs' '*.py' | awk '
     /^\+\+\+ / { file = substr($2, 3); next }
     /^@@/ {
         split($3, a, ","); start = substr(a[1], 2); n = (a[2] == "" ? 1 : a[2])
@@ -57,7 +66,7 @@ REPORT=$(printf '%s\n' "$NEW" | awk -v root="$(pwd)/" -v excluded="$EXCLUDED" '
     END {
         for (f in miss) printf "  %4d uncovered  %s\n", miss[f], f
         printf "TOTAL %d %d\n", total, hit
-    }' - $LCOV)
+    }' - $LCOV $PY_LCOV)
 
 TOTAL=$(printf '%s\n' "$REPORT" | awk '/^TOTAL/ { print $2 }')
 HIT=$(printf '%s\n' "$REPORT" | awk '/^TOTAL/ { print $3 }')

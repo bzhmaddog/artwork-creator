@@ -97,13 +97,16 @@ After cloning, install the tools the quality checks need and the git hooks once:
 git clone https://github.com/bzhmaddog/artwork-creator.git
 cd artwork-creator
 
-# Install rustfmt, clippy, the Windows target, cargo-llvm-cov, rust-analyzer and the hooks
+# Install rustfmt, clippy, the Windows target, cargo-llvm-cov, rust-analyzer, a .venv with
+# Python's coverage and the hooks, then check that every tool is there
 make dev-setup
 ```
 
 rust-analyzer is there for code completion and checks in an editor (VS Code's
-rust-analyzer extension and others). The Windows checks also need mingw-w64
-(`sudo apt install mingw-w64`), which `make dev-setup` only checks for.
+rust-analyzer extension and others). `make dev-setup` first checks the tools it can't
+install itself (git, rustup, mingw-w64 for the Windows checks, python3 and python3-venv
+for the .venv) and stops, saying how to install them, while one is missing.
+`make check-tools` lists every tool, what it is for and whether it is installed.
 
 Before each commit, the hook runs the CI checks: `cargo fmt --check`, clippy for Linux and
 Windows (some lints only fire on one of them), and the tests on Linux under coverage. It

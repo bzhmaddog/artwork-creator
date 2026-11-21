@@ -12,7 +12,12 @@
 #   make run          run the Linux debug build
 #   make run-windows  run the Windows debug build (from WSL)
 #   make dev-setup    install what the quality checks need (rustfmt, clippy, the Windows
-#                     target, llvm-tools and cargo-llvm-cov, rust-analyzer) and the hooks
+#                     target, llvm-tools and cargo-llvm-cov, rust-analyzer, a .venv with
+#                     Python's coverage for the script tests) and the hooks; first
+#                     checks the system packages it needs and stops while one is missing
+#   make check-tools  check that the tools the targets below need are installed, and say
+#                     how to install the missing ones; fails when a build or quality
+#                     check tool is missing (also run at the end of make dev-setup)
 #   make test         run the test suite
 #   make coverage     run the tests with coverage; fails when new code (since main) is
 #                     covered below MIN percent (80, the Sonar gate)
@@ -78,7 +83,7 @@ TRIVY_CACHE   ?= $(HOME)/.cache/trivy
 VERSION_STEPS := $(foreach p,patch minor major,version-bump-$(p))
 
 .PHONY: all linux linux-portable windows debug debug-linux debug-windows run run-windows \
-        test coverage dev-setup check check-dependencies fmt clippy hooks pre-commit plugins dist version-check version-bump $(VERSION_STEPS) dist-linux dist-windows deb appimage windows-setup store-listing clean
+        test coverage dev-setup check check-tools check-dependencies fmt clippy hooks pre-commit plugins dist version-check version-bump $(VERSION_STEPS) dist-linux dist-windows deb appimage windows-setup store-listing clean
 
 all: linux windows
 
@@ -108,20 +113,29 @@ run-windows: debug-windows
 
 test:
 	$(CARGO) test --workspace
+	python3 -m unittest discover -s scripts
 
 # Coverage of new code, as the Sonar quality gate measures it (see scripts/coverage.sh).
 MIN ?= 80
-coverage:
+coverage: .venv/bin/coverage
 	sh scripts/coverage.sh $(MIN)
 
-# Everything the quality checks (make pre-commit) need. The Windows clippy check also
-# needs mingw-w64 (sudo apt install mingw-w64), which this only checks for.
-dev-setup: hooks
+# Python's coverage for the script tests, in a virtual environment of the project.
+.venv/bin/coverage:
+	python3 -m venv .venv
+	.venv/bin/pip install -q coverage
+
+# Everything the quality checks (make pre-commit) need. First checks the tools it can't
+# install itself (system packages such as mingw-w64 and python3-venv) and stops, saying
+# how to install them, while one is missing; ends with the whole check-tools list.
+dev-setup:
+	@sh scripts/check-tools.sh --prerequisites
+	$(MAKE) --no-print-directory hooks
 	rustup component add rustfmt clippy llvm-tools-preview rust-analyzer
-	rustup target add $(WINDOWS)
+	rustup target add $(LINUX) $(WINDOWS)
 	$(CARGO) install cargo-llvm-cov --locked
-	@command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1 || \
-		echo "dev-setup: mingw-w64 is missing, needed for the Windows checks: sudo apt install mingw-w64"
+	$(MAKE) --no-print-directory .venv/bin/coverage
+	@sh scripts/check-tools.sh
 
 plugins:
 	$(CARGO) build --release --target $(LINUX) $(PLUGINS:%=-p %)
@@ -143,6 +157,9 @@ pre-commit:
 check:
 	$(CARGO) check --workspace --target $(LINUX)
 	$(CARGO) check --workspace --target $(WINDOWS)
+
+check-tools:
+	sh scripts/check-tools.sh
 
 # Fails (exit code 1) when Trivy finds an advisory.
 check-dependencies:

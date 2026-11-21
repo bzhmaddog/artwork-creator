@@ -155,6 +155,14 @@ impl ArtworkApp {
                         ui.close();
                     }
                 });
+                ui.menu_button(tr!("MENU_PLUGINS"), |ui| {
+                    let keys = self.shortcuts.texts(ui.ctx());
+                    let c = Command::ManagePlugins;
+                    if ui.add(menu_entry(c.label(), keys.get(&c))).clicked() {
+                        self.run_command(ui.ctx(), c);
+                        ui.close();
+                    }
+                });
             });
             ui.menu_button(tr!("MENU_HELP"), |ui| {
                 let keys = self.shortcuts.texts(ui.ctx());
@@ -385,6 +393,9 @@ impl ArtworkApp {
             }
             Command::EyedropperTool => self.canvas.eyedropper = true,
             Command::ClearPaint => self.dirty |= canvas::clear_paint(&mut self.doc, self.selected),
+            Command::ManagePlugins => {
+                self.plugin_manager = Some(crate::ui::plugins::Manager::new());
+            }
             // Only while a canvas is selected, to paint in.
             Command::PencilTool | Command::BrushTool | Command::EraserTool => {
                 if canvas::can_paint(&self.doc, self.selected) {
@@ -402,6 +413,41 @@ impl ArtworkApp {
 
     pub(super) fn open_shortcuts(&mut self) {
         self.shortcuts_editor = Some(crate::ui::shortcuts::Editor::new(&self.shortcuts));
+    }
+
+    /// Opens the plugin manager at the start when Python plugins wait to be allowed,
+    /// after the recovery questions.
+    pub(super) fn offer_plugins(&mut self) {
+        if self.plugins_offered
+            || !self.orphans.is_empty()
+            || self.confirm_leave.is_some()
+            || self.leave_after_save.is_some()
+        {
+            return;
+        }
+        self.plugins_offered = true;
+        if !crate::render::effects::registry().pending().is_empty() {
+            self.plugin_manager = Some(crate::ui::plugins::Manager::new());
+        }
+    }
+
+    /// The plugin manager, while open.
+    pub(super) fn plugins_window(&mut self, ctx: &egui::Context) {
+        let Some(manager) = &mut self.plugin_manager else {
+            return;
+        };
+        match manager.show(ctx) {
+            crate::ui::plugins::Outcome::Open => {}
+            crate::ui::plugins::Outcome::Closed => self.plugin_manager = None,
+            crate::ui::plugins::Outcome::Restart => {
+                // Closed as by the window's close button: unsaved changes are asked
+                // about first, and canceling that cancels the restart.
+                self.plugin_manager = None;
+                self.restarting = true;
+                ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+            }
+            crate::ui::plugins::Outcome::Error(e) => self.messages.push(e),
+        }
     }
 
     /// The Keyboard shortcuts window, while open. OK uses the shortcuts it shows.

@@ -159,8 +159,10 @@ release to publish by hand. Don't create the release on GitHub: see
 
 ## Plugins
 
-Plugins are shared libraries (`.dll` on Windows, `.so` on Linux) adding effects and
-generators (a shape's generated fill), loaded at startup from a `plugins` folder; see "Plugins" in [docs/specs.md](docs/specs.md#plugins) for how the app finds
+Plugins are shared libraries (`.dll` on Windows, `.so` on Linux) or Python scripts
+(`.py`) adding effects and generators (a shape's generated fill), loaded at startup from
+the `plugins` folder next to the app and from the one in its data folder (never from the
+current directory, except in debug builds); see "Plugins" in [docs/specs.md](docs/specs.md#plugins) for how the app finds
 and uses them.
 
 ### Writing a plugin
@@ -177,6 +179,16 @@ Other languages can implement the C interface described in
 exported function, `artwork_plugin_entry`, returning a table of effects and generators
 whose parameters and values are passed as JSON. The app still loads plugins made for
 version 1 of this interface, which had effects only.
+
+In Python, write one `.py` file defining `plugin = Plugin(name, version, effects=[...],
+generators=[...])` with subclasses of `Effect` (`apply(image, values, scale)`) and
+`Generator` (`generate(image, values, px_per_mm)`) from the
+[`artwork_plugin_sdk`](plugin-sdk/python/artwork_plugin_sdk.py) module, which the app provides
+when it runs the file. Pixels are a `bytearray` (a writable numpy view works too, if
+numpy is installed); values are a dict. The module's docstring also describes the
+protocol between the app and the plugin: a line of JSON each way over stdin and stdout.
+See [`plugin-examples/python/posterize.py`](plugin-examples/python/posterize.py), copied
+into `plugins/` by `make plugins`; its tests run with `make test`.
 
 Effect and generator ids are saved in projects, so keep them stable and prefix them with
 something unique to your plugin (`builtin.` is reserved). Both may run on several threads

@@ -539,6 +539,9 @@ impl ArtworkApp {
             if save || discard || cancel {
                 self.confirm_leave = None;
             }
+            if cancel {
+                self.restarting = false;
+            }
             if discard {
                 self.leave_now(ctx, leave);
             } else if save {

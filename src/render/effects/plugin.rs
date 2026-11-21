@@ -1,5 +1,6 @@
 //! Effects and generators from plugin libraries (`.dll` on Windows, `.so` on Linux) found in the
-//! `plugins` folder, through the C ABI of `artwork_plugin_sdk::abi`.
+//! `plugins` folder, through the C ABI of `artwork_plugin_sdk::abi`, and from Python
+//! plugins (`.py`) in the same folder, run in processes of their own (see [`python`]).
 //!
 //! Plugins run in the app's process with its full rights: a crash in one takes the app
 //! down. They are loaded once at startup and never unloaded.
@@ -12,7 +13,7 @@ use artwork_plugin_sdk::{self as sdk, abi};
 use image::RgbaImage;
 use libloading::Library;
 
-use super::{Effect, Generator, ParamKind, ParamSpec, Params, color_from_hex};
+use super::{Effect, Generator, ParamKind, ParamSpec, Params, color_from_hex, python};
 
 /// A plugin that loaded.
 #[derive(Clone, Debug)]
@@ -194,9 +195,161 @@ fn values_json(params: &Params) -> CString {
     CString::new(params.resolved().to_string()).unwrap_or_default()
 }
 
-/// Folder holding the plugins (see [`crate::shipped_dir`]).
-pub fn plugins_dir() -> Option<PathBuf> {
-    crate::shipped_dir("plugins")
+/// The folders holding plugins, those that exist, in loading order: `plugins` next to
+/// the executable, in `../share/artwork-creator/` from it, and in the app's data folder
+/// (the user's plugins). Never the working directory, which may be any folder (one a
+/// project was opened from): its plugins would run unasked. Debug builds also look there,
+/// for `make run` from the repository.
+pub fn plugins_dirs() -> Vec<PathBuf> {
+    let mut dirs = Vec::new();
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        dirs.push(dir.join("plugins"));
+        dirs.push(dir.join("../share").join(crate::APP_ID).join("plugins"));
+    }
+    dirs.extend(user_plugins_dir());
+    if cfg!(debug_assertions)
+        && let Ok(cwd) = std::env::current_dir()
+    {
+        dirs.push(cwd.join("plugins"));
+    }
+    let mut found: Vec<PathBuf> = Vec::new();
+    for dir in dirs {
+        if let Ok(dir) = dir.canonicalize()
+            && dir.is_dir()
+            && !found.contains(&dir)
+        {
+            found.push(dir);
+        }
+    }
+    found
+}
+
+/// The user's plugins folder, in the app's data folder; it may not exist yet.
+pub fn user_plugins_dir() -> Option<PathBuf> {
+    crate::data_dir().map(|d| d.join("plugins"))
+}
+
+/// The user's choices about plugins, kept in `plugins.json` in the app's data folder:
+/// the Python plugins allowed to run, each file's path with the SHA-256 of the content
+/// allowed (a file that changed is asked about again), and the plugins disabled.
+#[derive(Debug, Default)]
+pub struct Settings {
+    /// Where it is saved; `None`: not saved.
+    file: Option<PathBuf>,
+    saved: Saved,
+}
+
+#[derive(Debug, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+struct Saved {
+    /// Path to hash.
+    allowed: std::collections::BTreeMap<String, String>,
+    disabled: std::collections::BTreeSet<String>,
+}
+
+impl Settings {
+    /// The user's, from the data folder (none if it can't be read).
+    pub fn read() -> Self {
+        Self::read_from(crate::data_dir().map(|d| d.join("plugins.json")))
+    }
+
+    pub(super) fn read_from(file: Option<PathBuf>) -> Self {
+        let saved = file
+            .as_ref()
+            .and_then(|f| std::fs::read(f).ok())
+            .and_then(|data| serde_json::from_slice(&data).ok())
+            .unwrap_or_default();
+        Self { file, saved }
+    }
+
+    /// Whether this Python plugin, with this content, was allowed.
+    pub fn is_allowed(&self, p: &Pending) -> bool {
+        self.saved.allowed.get(&key(&p.path)) == Some(&p.hash)
+    }
+
+    pub fn allow(&mut self, p: &Pending) {
+        self.saved.allowed.insert(key(&p.path), p.hash.clone());
+    }
+
+    pub fn is_disabled(&self, path: &Path) -> bool {
+        self.saved.disabled.contains(&key(path))
+    }
+
+    pub fn set_disabled(&mut self, path: &Path, disabled: bool) {
+        if disabled {
+            self.saved.disabled.insert(key(path));
+        } else {
+            self.saved.disabled.remove(&key(path));
+        }
+    }
+
+    /// Allows every plugin file of `dir`, as it is now.
+    #[cfg(test)]
+    pub(super) fn allow_all(&mut self, dir: &Path) {
+        for entry in std::fs::read_dir(dir).unwrap().flatten() {
+            if let Ok(p) = pending(&entry.path()) {
+                self.allow(&p);
+            }
+        }
+    }
+
+    /// Writes it to its file; an error is logged.
+    pub fn save(&self) {
+        let Some(file) = &self.file else {
+            return;
+        };
+        let result = file
+            .parent()
+            .map_or(Ok(()), std::fs::create_dir_all)
+            .and_then(|()| {
+                let json = serde_json::to_vec_pretty(&self.saved).unwrap_or_default();
+                std::fs::write(file, json)
+            });
+        if let Err(e) = result {
+            log::warn!("cannot save {}: {e}", file.display());
+        }
+    }
+}
+
+fn key(path: &Path) -> String {
+    path.to_string_lossy().into_owned()
+}
+
+/// A plugin file found, and what became of it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct PluginFile {
+    pub path: PathBuf,
+    pub python: bool,
+    pub status: Status,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum Status {
+    /// Loaded: the plugin's name and version.
+    Loaded { name: String, version: String },
+    /// Disabled by the user: not loaded.
+    Disabled,
+    /// Waiting for the user to allow it.
+    Waiting,
+    /// It failed to load, for this reason.
+    Failed(String),
+}
+
+impl PluginFile {
+    /// Its plugin's name once loaded, else its file name.
+    pub fn name(&self) -> String {
+        match &self.status {
+            Status::Loaded { name, .. } => name.clone(),
+            _ => self
+                .path
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy()
+                .into_owned(),
+        }
+    }
 }
 
 /// What loading the plugins of a folder gave.
@@ -207,10 +360,33 @@ pub struct Loaded {
     pub plugins: Vec<PluginInfo>,
     /// One message per library that failed to load.
     pub errors: Vec<String>,
+    /// Plugins not loaded: new, or changed since they were allowed.
+    pub pending: Vec<Pending>,
+    /// Every plugin file, in loading order.
+    pub files: Vec<PluginFile>,
+}
+
+/// A plugin waiting to be allowed to run.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Pending {
+    pub path: PathBuf,
+    /// SHA-256 of the file, in hex: what is allowed is this content.
+    pub hash: String,
 }
 
 /// Loads every library of this platform (`.dll` or `.so`) in `dir`, in name order.
-pub fn load_dir(dir: &Path) -> Loaded {
+/// Plugins disabled in `settings` are not loaded, and the others only if `settings`
+/// allows them with their content; those are in [`Loaded::pending`].
+pub fn load_dir(dir: &Path, settings: &Settings) -> Loaded {
+    load_dir_with(dir, python::python(), settings)
+}
+
+/// [`load_dir`], running the Python plugins with `python`; none load without it.
+pub(super) fn load_dir_with(
+    dir: &Path,
+    python: Option<&'static python::Python>,
+    settings: &Settings,
+) -> Loaded {
     let mut loaded = Loaded::default();
     let Ok(read) = std::fs::read_dir(dir) else {
         return loaded;
@@ -220,14 +396,43 @@ pub fn load_dir(dir: &Path) -> Loaded {
         .map(|e| e.path())
         .filter(|p| {
             p.is_file()
-                && p.extension()
-                    .is_some_and(|e| e.eq_ignore_ascii_case(std::env::consts::DLL_EXTENSION))
+                && p.extension().is_some_and(|e| {
+                    e.eq_ignore_ascii_case(std::env::consts::DLL_EXTENSION) || is_python(p)
+                })
         })
         .collect();
     paths.sort();
+    let mut python_missing = false;
     for path in paths {
         let file = path.file_name().unwrap_or_default().to_string_lossy();
-        match load_library(&path) {
+        let mut found = PluginFile {
+            path: path.clone(),
+            python: is_python(&path),
+            status: Status::Disabled,
+        };
+        if settings.is_disabled(&path) {
+            log::info!("plugin {} disabled", path.display());
+            loaded.files.push(found);
+            continue;
+        }
+        if found.python && python.is_none() {
+            python_missing = true;
+            found.status = Status::Failed(python::PYTHON_MISSING.to_owned());
+            loaded.files.push(found);
+            continue;
+        }
+        let result = match pending(&path) {
+            Ok(p) if !settings.is_allowed(&p) => {
+                log::info!("plugin {} waits to be allowed", path.display());
+                loaded.pending.push(p);
+                found.status = Status::Waiting;
+                loaded.files.push(found);
+                continue;
+            }
+            Ok(_) => load_file(&path, python),
+            Err(e) => Err(e),
+        };
+        match result {
             Ok((info, effects, generators)) => {
                 log::info!(
                     "loaded plugin {} {} from {} ({} effects, {} generators)",
@@ -237,23 +442,71 @@ pub fn load_dir(dir: &Path) -> Loaded {
                     effects.len(),
                     generators.len()
                 );
+                found.status = Status::Loaded {
+                    name: info.name.clone(),
+                    version: info.version.clone(),
+                };
                 loaded.plugins.push(info);
-                loaded
-                    .effects
-                    .extend(effects.into_iter().map(|e| Box::new(e) as Box<dyn Effect>));
-                loaded.generators.extend(
-                    generators
-                        .into_iter()
-                        .map(|g| Box::new(g) as Box<dyn Generator>),
-                );
+                loaded.effects.extend(effects);
+                loaded.generators.extend(generators);
             }
             Err(e) => {
                 log::warn!("plugin {} not loaded: {e}", path.display());
                 loaded.errors.push(format!("{file}: {e}"));
+                found.status = Status::Failed(e);
             }
         }
+        loaded.files.push(found);
+    }
+    if python_missing {
+        log::warn!("{}", python::PYTHON_MISSING);
+        loaded.errors.push(python::PYTHON_MISSING.to_owned());
     }
     loaded
+}
+
+/// Loads one plugin file, a library or a Python plugin run with `python`.
+pub(super) fn load_file(
+    path: &Path,
+    python: Option<&'static python::Python>,
+) -> Result<python::Contents, String> {
+    if is_python(path) {
+        let python = python.ok_or_else(|| python::PYTHON_MISSING.to_owned())?;
+        return python::load_script(path, python);
+    }
+    load_library(path).map(|(info, effects, generators)| {
+        (
+            info,
+            effects
+                .into_iter()
+                .map(|e| Box::new(e) as Box<dyn Effect>)
+                .collect(),
+            generators
+                .into_iter()
+                .map(|g| Box::new(g) as Box<dyn Generator>)
+                .collect(),
+        )
+    })
+}
+
+/// The plugin file `path` with the hash of its content.
+pub fn pending(path: &Path) -> Result<Pending, String> {
+    use sha2::{Digest, Sha256};
+    let data = std::fs::read(path).map_err(|e| e.to_string())?;
+    let hash = Sha256::digest(&data)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
+    Ok(Pending {
+        path: path.to_owned(),
+        hash,
+    })
+}
+
+/// A Python plugin, by its `.py` extension.
+pub(super) fn is_python(path: &Path) -> bool {
+    path.extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("py"))
 }
 
 /// Loads one plugin library.
@@ -388,11 +641,11 @@ unsafe fn slice<'a, T>(ptr: *const T, count: u32) -> &'a [T] {
 }
 
 /// What an effect or a generator of a plugin says about itself, checked.
-struct Described {
-    id: String,
-    name: String,
-    description: String,
-    params: Vec<ParamSpec>,
+pub(super) struct Described {
+    pub id: String,
+    pub name: String,
+    pub description: String,
+    pub params: Vec<ParamSpec>,
 }
 
 /// Reads and checks the description of an effect or generator (`what`), whose id must
@@ -416,6 +669,19 @@ unsafe fn describe(
             string(params),
         )
     };
+    check(what, id, name, description, &params, taken)
+}
+
+/// Checks the description of an effect or generator (`what`), whose id must not be one
+/// of `taken`; `params` is its JSON parameter list.
+pub(super) fn check(
+    what: &str,
+    id: String,
+    name: String,
+    description: String,
+    params: &str,
+    taken: &[String],
+) -> Result<Described, String> {
     let err = |m: String| format!("{what} \"{id}\": {m}");
     if id.is_empty() {
         return Err(format!("{what} without an id"));
@@ -426,7 +692,7 @@ unsafe fn describe(
     if taken.contains(&id) {
         return Err(err("id used twice".into()));
     }
-    let params = param_specs(&params).map_err(err)?;
+    let params = param_specs(params).map_err(err)?;
     Ok(Described {
         name: if name.is_empty() { id.clone() } else { name },
         id,
@@ -711,6 +977,65 @@ mod tests {
             assert!(param_specs(bad).is_err(), "{bad}");
         }
         assert!(param_specs("").unwrap().is_empty());
+    }
+
+    #[test]
+    fn disabled_plugins_are_not_loaded_and_settings_are_kept() {
+        let dir = std::env::temp_dir().join(format!("artwork-disabled-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let library = dir.join(format!("junk.{}", std::env::consts::DLL_EXTENSION));
+        let script = dir.join("off.py");
+        for f in [&library, &script] {
+            std::fs::write(f, "plugin = None\n").unwrap();
+        }
+        let saved = dir.join("plugins.json");
+        let mut settings = Settings::read_from(Some(saved.clone()));
+        settings.set_disabled(&library, true);
+        settings.set_disabled(&script, true);
+        settings.allow(&pending(&script).unwrap());
+        settings.save();
+        let settings = Settings::read_from(Some(saved.clone()));
+        let loaded = load_dir_with(&dir, None, &settings);
+        assert!(loaded.errors.is_empty(), "{:?}", loaded.errors);
+        let status: Vec<_> = loaded
+            .files
+            .iter()
+            .map(|f| (f.python, f.status.clone()))
+            .collect();
+        assert_eq!(
+            status,
+            [(false, Status::Disabled), (true, Status::Disabled)]
+        );
+        assert_eq!(loaded.files[1].name(), "off.py");
+        // Enabled again: waiting to be allowed, then loaded (or failing).
+        let mut settings = settings;
+        settings.set_disabled(&library, false);
+        let loaded = load_dir_with(&dir, None, &settings);
+        assert_eq!(loaded.files[0].status, Status::Waiting);
+        assert_eq!(loaded.pending[0].path, library);
+        settings.allow(&pending(&library).unwrap());
+        let loaded = load_dir_with(&dir, None, &settings);
+        assert!(matches!(loaded.files[0].status, Status::Failed(_)));
+        Settings::default().save();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn python_plugins_need_python() {
+        let dir = std::env::temp_dir().join(format!("artwork-plugins-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let library = format!("junk.{}", std::env::consts::DLL_EXTENSION);
+        for name in ["a.py", "b.py", library.as_str(), "notes.txt"] {
+            std::fs::write(dir.join(name), "plugin = None\n").unwrap();
+        }
+        let mut settings = Settings::default();
+        settings.allow_all(&dir);
+        let loaded = load_dir_with(&dir, None, &settings);
+        assert_eq!(loaded.errors.len(), 2, "{:?}", loaded.errors);
+        assert!(loaded.errors[0].starts_with(&library));
+        assert_eq!(loaded.errors[1], python::PYTHON_MISSING);
+        assert!(loaded.plugins.is_empty());
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     /// Loads a real library, e.g. the halftone example built by `make plugins`:

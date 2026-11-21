@@ -174,6 +174,13 @@ pub struct ArtworkApp {
     shortcuts: Shortcuts,
     /// The Keyboard shortcuts window, while open.
     shortcuts_editor: Option<crate::ui::shortcuts::Editor>,
+    /// Tools > Plugins > Manage plugins, while open.
+    plugin_manager: Option<crate::ui::plugins::Manager>,
+    /// The plugin manager was opened at the start for Python plugins waiting to be
+    /// allowed (once).
+    plugins_offered: bool,
+    /// Closing to start again (the plugin manager's Restart); canceled with the close.
+    restarting: bool,
     /// The project is about to be closed or replaced with unsaved changes: ask whether
     /// to save them first.
     confirm_leave: Option<Leave>,
@@ -351,6 +358,9 @@ impl ArtworkApp {
             panels: crate::ui::panels::Layout::load(cc.storage),
             shortcuts: Shortcuts::load(cc.storage),
             shortcuts_editor: None,
+            plugin_manager: None,
+            plugins_offered: false,
+            restarting: false,
             confirm_leave: None,
             about: false,
             leave_after_save: None,
@@ -585,6 +595,9 @@ impl eframe::App for ArtworkApp {
     /// Closing normally: nothing to recover, so the autosave copy goes.
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.autosave.end();
+        if self.restarting {
+            let _ = crate::RESTART.set(self.project_path.clone());
+        }
     }
 
     /// One frame: input, panels, canvas and dialogs, then an undo step if the project
@@ -752,7 +765,9 @@ impl eframe::App for ArtworkApp {
         self.close_modal(&ctx);
         self.template_end_modal(&ctx);
         self.recovery_modal(&ctx);
+        self.offer_plugins();
         self.shortcuts_window(&ctx);
+        self.plugins_window(&ctx);
 
         // Record a step once the edit is over: no button held, no text being typed. A
         // shape scaled by a drag that just ended takes its new size first, so the drag

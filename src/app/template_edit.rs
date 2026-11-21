@@ -594,6 +594,7 @@ impl ArtworkApp {
             editing.confirm_end = false;
             if cancel {
                 editing.then_quit = false;
+                self.restarting = false;
             }
         }
         if save {

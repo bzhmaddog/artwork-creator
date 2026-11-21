@@ -81,6 +81,7 @@ pub enum Command {
     EraserTool,
     EyedropperTool,
     ClearPaint,
+    ManagePlugins,
     About,
 }
 
@@ -96,17 +97,20 @@ enum Group {
     /// Tools > Templates and the Template panel.
     Templates,
     Tools,
+    /// Tools > Plugins.
+    Plugins,
     Help,
 }
 
 impl Group {
-    const ALL: [Group; 7] = [
+    const ALL: [Group; 8] = [
         Group::File,
         Group::Edit,
         Group::Layers,
         Group::View,
         Group::Templates,
         Group::Tools,
+        Group::Plugins,
         Group::Help,
     ];
 
@@ -118,6 +122,7 @@ impl Group {
             Group::View => tr_noop!("MENU_VIEW"),
             Group::Templates => tr_noop!("MENU_TEMPLATES"),
             Group::Tools => tr_noop!("MENU_TOOLS"),
+            Group::Plugins => tr_noop!("MENU_PLUGINS"),
             Group::Help => tr_noop!("MENU_HELP"),
         })
     }
@@ -134,7 +139,7 @@ const NONE: Modifiers = Modifiers::NONE;
 
 impl Command {
     /// In the order of the window.
-    pub const ALL: [Command; 53] = [
+    pub const ALL: [Command; 54] = [
         Command::NewProject,
         Command::OpenProject,
         Command::Save,
@@ -187,6 +192,7 @@ impl Command {
         Command::EraserTool,
         Command::EyedropperTool,
         Command::ClearPaint,
+        Command::ManagePlugins,
         Command::About,
     ];
 
@@ -245,6 +251,7 @@ impl Command {
             Command::EraserTool => tr_noop!("TOOL_ERASER"),
             Command::EyedropperTool => tr_noop!("TOOL_EYEDROPPER"),
             Command::ClearPaint => tr_noop!("CLEAR_PAINT"),
+            Command::ManagePlugins => tr_noop!("MANAGE_PLUGINS"),
             Command::About => tr_noop!("MENU_ABOUT"),
         })
     }
@@ -303,6 +310,7 @@ impl Command {
             | Command::EraserTool
             | Command::EyedropperTool
             | Command::ClearPaint => Group::Tools,
+            Command::ManagePlugins => Group::Plugins,
             Command::About => Group::Help,
         }
     }
@@ -409,6 +417,7 @@ impl Command {
             Command::EraserTool => "eraser_tool",
             Command::EyedropperTool => "eyedropper_tool",
             Command::ClearPaint => "clear_paint",
+            Command::ManagePlugins => "manage_plugins",
             Command::About => "about",
         }
     }

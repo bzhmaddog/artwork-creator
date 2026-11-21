@@ -9,6 +9,7 @@ mod gallery;
 pub mod gradient;
 pub mod layers;
 pub mod panels;
+pub mod plugins;
 #[cfg(test)]
 pub mod preview;
 pub mod shortcuts;

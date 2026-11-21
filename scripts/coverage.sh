@@ -4,7 +4,7 @@
 #
 # Usage: coverage.sh [MIN]
 #   Runs the Rust tests under cargo-llvm-cov (install it with `make dev-setup`) and the
-#   script tests (scripts/test_*.py) under Python's coverage (from .venv), writes target/lcov.info and
+#   script and Python SDK tests (scripts/test_*.py, plugin-sdk/python/test_*.py) under Python's coverage (from .venv), writes target/lcov.info and
 #   target/python-lcov.info, then fails when new code is covered below MIN percent (default 80,
 #   the gate's threshold). Files Sonar leaves out of coverage (sonar.exclusions and
 #   sonar.coverage.exclusions in sonar-project.properties) are left out here too.
@@ -27,6 +27,9 @@ fi
 cargo llvm-cov --workspace --locked --lcov --output-path $LCOV -- -q
 .venv/bin/python3 -m coverage run --data-file=target/.coverage --source=scripts --omit='scripts/test_*.py' \
     -m unittest discover -s scripts
+.venv/bin/python3 -m coverage run --data-file=target/.coverage --append \
+    --source=plugin-sdk/python,plugin-examples/python --omit='*/test_*.py' \
+    -m unittest discover -s plugin-sdk/python
 .venv/bin/python3 -m coverage lcov --data-file=target/.coverage -q -o $PY_LCOV
 
 # Where the branch left main (origin/main when there is one).

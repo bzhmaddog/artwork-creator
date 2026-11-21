@@ -43,6 +43,7 @@ jobs:
         run: |
           pip install --only-binary :all: coverage==7.17.4
           coverage run --source=scripts -m unittest discover -s scripts
+          coverage run --append --source=plugin-sdk/python,plugin-examples/python --omit='*/test_*.py' -m unittest discover -s plugin-sdk/python
           coverage xml -o target/python-coverage.xml
       - name: Version
         id: version

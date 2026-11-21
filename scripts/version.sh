@@ -200,7 +200,7 @@ cmd_check() {
         if [ "$next" = "$current" ]; then
             echo "Cargo.toml is at it: tag v$next to release it (see doc/releasing.md)"
         else
-            echo "Set it with: make version-bump V=$next"
+            echo "Set it with: make version-bump APP=$next"
         fi
     fi
 }
@@ -226,7 +226,7 @@ cmd_bump() {
     done
 
     [ -z "$(git status --porcelain)" ] || die "the working tree has changes; commit or stash them first"
-    [ -n "$want" ] || die "give the version: make version-bump-patch|minor|major, or make version-bump V=X.Y.Z (make version-check suggests one)"
+    [ -n "$want" ] || die "give the version: make version-bump-patch|minor|major, or make version-bump APP=X.Y.Z (make version-check suggests one)"
 
     analyze_bumped
     new=$(resolve "$current" "$want")

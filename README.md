@@ -149,7 +149,7 @@ the text is for, in upper snake case: `ADD_TEXT_LAYER`, `EXPORT_CANCELED`.
 ### Releasing
 
 `make version-check` suggests the next version, `make version-bump-patch` (or -minor,
--major, `V=X.Y.Z`) sets it, to merge through a pull request, and pushing a `vX.Y.Z` tag of
+-major, `APP=X.Y.Z`) sets it, to merge through a pull request, and pushing a `vX.Y.Z` tag of
 the merged `main`, made by hand, makes GitHub Actions build the packages into a draft
 release to publish by hand. Don't create the release on GitHub: see
 [Versioning and releasing](doc/releasing.md) for the steps and why.

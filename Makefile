@@ -40,7 +40,7 @@
 #                     show the commits since the last release and suggest the next version
 #   make version-bump-patch, version-bump-minor, version-bump-major
 #                     set the version and commit "Bump version to X.Y.Z"; make version-bump
-#                     V=X.Y.Z sets an exact one (SDK=... sets the plugin SDK's too). A
+#                     APP=X.Y.Z sets an exact one (SDK=... sets the plugin SDK's too). A
 #                     release is a vX.Y.Z tag pushed by hand: see doc/releasing.md
 #   make check-dependencies
 #                     scan Cargo.lock for known vulnerable or malicious crates with
@@ -164,12 +164,12 @@ clippy:
 version-check:
 	sh scripts/version.sh check
 
-# version-bump-minor is version-bump V=minor, and so on.
+# version-bump-minor is version-bump APP=minor, and so on.
 $(VERSION_STEPS): version-bump-%:
 	sh scripts/version.sh bump $* $(if $(SDK),--sdk $(SDK))
 
 version-bump:
-	sh scripts/version.sh bump $(V) $(if $(SDK),--sdk $(SDK))
+	sh scripts/version.sh bump $(APP) $(if $(SDK),--sdk $(SDK))
 
 # The app looks for templates/ next to the executable, so ship them together.
 dist: dist-linux dist-windows

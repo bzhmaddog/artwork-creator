@@ -63,8 +63,8 @@ tool 1 cargo-llvm-cov "coverage (make coverage, pre-commit)" "cargo install carg
 tool 1 "coverage in .venv" "script coverage (make coverage)" "make .venv/bin/coverage" .venv/bin/python3 -m coverage --version
 
 echo "Optional, for packaging and the dependency scan:"
-tool 0 zig "old-glibc Linux build (make linux-portable)" "https://ziglang.org/download/" has zig
-tool 0 cargo-zigbuild "old-glibc Linux build (make linux-portable)" "cargo install cargo-zigbuild --locked" cargo zigbuild --version
+tool 0 zig "old-glibc Linux build (make linux-portable)" "unpack the x86_64 Linux .tar.xz from https://ziglang.org/download/ into ~/.local/opt and link its zig into ~/.local/bin (ln -s ~/.local/opt/zig-*/zig ~/.local/bin/zig)" has zig
+tool 0 cargo-zigbuild "old-glibc Linux build (make linux-portable)" "cargo install cargo-zigbuild --locked" cargo-zigbuild --version
 tool 0 cargo-deb "Debian package (make deb)" "cargo install cargo-deb --locked" cargo deb --version
 tool 0 zip "Windows .zip (make dist)" "sudo apt install zip" has zip
 tool 0 curl "AppImage tools download (make appimage)" "sudo apt install curl" has curl

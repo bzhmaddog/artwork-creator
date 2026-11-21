@@ -135,6 +135,7 @@ dev-setup:
 	rustup component add rustfmt clippy llvm-tools-preview rust-analyzer
 	rustup target add $(LINUX) $(WINDOWS)
 	$(CARGO) install cargo-llvm-cov --locked
+	$(CARGO) install cargo-zigbuild --locked
 	$(MAKE) --no-print-directory .venv/bin/coverage
 	@sh scripts/check-tools.sh
 

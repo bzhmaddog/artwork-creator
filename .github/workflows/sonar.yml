@@ -41,7 +41,7 @@ jobs:
         run: cargo llvm-cov --workspace --locked --lcov --output-path target/lcov.info
       - name: Python coverage
         run: |
-          pip install coverage
+          pip install --only-binary :all: coverage==7.17.4
           coverage run --source=scripts -m unittest discover -s scripts
           coverage xml -o target/python-coverage.xml
       - name: Version

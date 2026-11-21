@@ -120,10 +120,11 @@ MIN ?= 80
 coverage: .venv/bin/coverage
 	sh scripts/coverage.sh $(MIN)
 
-# Python's coverage for the script tests, in a virtual environment of the project.
+# Python's coverage for the script tests, in a virtual environment of the project. Pinned,
+# from a wheel only (no setup script run), at the version of the Sonar workflow.
 .venv/bin/coverage:
 	python3 -m venv .venv
-	.venv/bin/pip install -q coverage
+	.venv/bin/pip install -q --only-binary :all: coverage==7.17.4
 
 # Everything the quality checks (make pre-commit) need. First checks the tools it can't
 # install itself (system packages such as mingw-w64 and python3-venv) and stops, saying

@@ -2,6 +2,9 @@
 /dist
 /plugins
 /tmp
+/.venv
+__pycache__/
+ 
 
 # Files created by Windows when copying from windows fs to wsl fs
 *:Zone.Identifier

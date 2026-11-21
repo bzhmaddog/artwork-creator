@@ -39,6 +39,11 @@ jobs:
         run: mkdir -p target && cargo clippy --workspace --all-targets --locked --message-format=json > target/clippy.json
       - name: Coverage
         run: cargo llvm-cov --workspace --locked --lcov --output-path target/lcov.info
+      - name: Python coverage
+        run: |
+          pip install --only-binary :all: coverage==7.17.4
+          coverage run --source=scripts -m unittest discover -s scripts
+          coverage xml -o target/python-coverage.xml
       - name: Version
         id: version
         run: echo "version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "artwork-creator") | .version')" >> "$GITHUB_OUTPUT"

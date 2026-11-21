@@ -1,0 +1,99 @@
+﻿Field,Type,French,English
+ProductName,Text,Artwork Creator,Artwork Creator
+Description,Text,"Artwork Creator est une application de bureau pour créer des illustrations à imprimer pour les manettes arcade et les fightsticks.
+
+Chargez un gabarit de manette (un contour et des trous), disposez vos images, textes et formes par-dessus, et exportez en PNG, PDF ou SVG prêts à imprimer, en taille réelle. L'illustration est découpée selon le contour du panneau et laissée vide dans les trous des boutons et les découpes : ce que vous imprimez s'ajuste à votre manette.
+
+Calques et groupes d'images, de textes (droits ou le long d'un tracé), de formes vectorielles, de tracés SVG et de canevas où peindre, avec masques d'écrêtage, modes de fusion et opacité. Couleurs unies, dégradés et motifs d'image, et une pile d'effets par calque, complétée par des plugins.
+
+Déplacez, redimensionnez, faites pivoter, déformez et inclinez en 3D sur le canevas, avec magnétisme sur les trous du gabarit, la page, le contour et les repères. Des variables et des formules lient tailles, positions, couleurs et textes.
+
+Un éditeur de gabarits permet de créer les vôtres, avec vérifications, versions et un dessin de référence à décalquer.
+
+Export en PNG, PDF et SVG (vecteurs conservés), ou impression, avec fond perdu, traits de coupe, miroir et découpage sur plusieurs feuilles.
+
+Sauvegarde automatique et récupération après plantage, raccourcis configurables et panneaux déplaçables. En français et en anglais.
+
+Gratuit pour un usage non commercial. Créer des illustrations, panneaux ou manettes destinés à la vente nécessite l'autorisation de l'auteur (voir la licence).","Artwork Creator is a desktop app for designing printed artwork for arcade controllers and fightsticks.
+
+Load a controller template (an outline and holes), arrange your images, texts and shapes on top, and export print-ready PNG, PDF or SVG at true size. The artwork is clipped to the panel outline and left blank in the button and cutout holes, so what you print fits your controller.
+
+Layers and groups of images, texts (straight or along a path), vector shapes, SVG paths and canvases to paint in, with clipping masks, blend modes and opacity. Solid colors, gradients and image patterns, and a stack of effects per layer, extended by plugins.
+
+Move, scale, rotate, distort and tilt in 3D on the canvas, with snapping to the template's holes, the page, the outline and guides. Variables and formulas link sizes, positions, colors and texts.
+
+A template editor lets you make your own templates, with checks, versions and a reference drawing to trace.
+
+Export to PNG, PDF and SVG (vectors kept), or print, with bleed, crop marks, mirroring and tiling over several sheets.
+
+Autosave and crash recovery, configurable shortcuts and movable panels. In English and French.
+
+Free for non-commercial use. Making artwork, panels or controllers for sale needs the author's permission (see the license)."
+WhatsNew,Text,,
+ProductFeatures1,Text,"Gabarits de manettes avec contour du panneau, trous des boutons et découpes","Controller templates with the panel outline, button holes and cutouts"
+ProductFeatures2,Text,"Calques et groupes d'images, textes, formes vectorielles, tracés SVG et canevas de peinture","Layers and groups of images, texts, vector shapes, SVG paths and paint canvases"
+ProductFeatures3,Text,"Masques d'écrêtage, modes de fusion et opacité","Clipping masks, blend modes and opacity"
+ProductFeatures4,Text,"Couleurs unies, dégradés linéaires et radiaux, motifs d'image","Solid colors, linear and radial gradients, image patterns"
+ProductFeatures5,Text,"Effets de calque, complétés par des plugins","Layer effects, extended by plugins"
+ProductFeatures6,Text,"Magnétisme sur les trous du gabarit, la page, le contour et les repères","Snapping to template holes, page, outline and guides"
+ProductFeatures7,Text,"Variables et formules pour lier tailles, positions, couleurs et textes","Variables and formulas to link sizes, positions, colors and texts"
+ProductFeatures8,Text,Éditeur de gabarits avec vérifications et dessin de référence à décalquer,Template editor with checks and a reference drawing to trace
+ProductFeatures9,Text,"Export PNG, PDF et SVG en taille réelle, vecteurs conservés","Export to PNG, PDF and SVG at true size, vectors kept"
+ProductFeatures10,Text,"Impression avec fond perdu, traits de coupe, miroir et découpage","Printing with bleed, crop marks, mirroring and tiling"
+ProductFeatures11,Text,Sauvegarde automatique et récupération après plantage,Autosave and crash recovery
+ProductFeatures12,Text,Raccourcis clavier configurables,Configurable keyboard shortcuts
+ProductFeatures13,Text,,
+ProductFeatures14,Text,,
+ProductFeatures15,Text,,
+ProductFeatures16,Text,,
+ProductFeatures17,Text,,
+ProductFeatures18,Text,,
+ProductFeatures19,Text,,
+ProductFeatures20,Text,,
+ShortDescription,Text,"Créez des illustrations à imprimer pour manettes arcade et fightsticks, prêtes à l'impression en taille réelle.","Design printed artwork for arcade controllers and fightsticks, and export it print-ready at true size."
+SearchTerms1,Text,arcade,arcade
+SearchTerms2,Text,fightstick,fightstick
+SearchTerms3,Text,manette arcade,arcade controller
+SearchTerms4,Text,illustration,artwork
+SearchTerms5,Text,impression,print design
+SearchTerms6,Text,panneau,panel
+SearchTerms7,Text,hitbox,hitbox
+Applicable license terms,Text,"Licence PolyForm Noncommercial 1.0.0 : gratuit pour un usage non commercial. Créer des illustrations, panneaux ou manettes destinés à la vente nécessite l'autorisation de l'auteur. https://github.com/bzhmaddog/artwork-creator/blob/main/LICENSE","PolyForm Noncommercial License 1.0.0: free for non-commercial use. Making artwork, panels or controllers for sale needs the author's permission. https://github.com/bzhmaddog/artwork-creator/blob/main/LICENSE"
+Copyright,Text,Copyright 2026 bzhmaddog,Copyright 2026 bzhmaddog
+DevelopedBy,Text,bzhmaddog,bzhmaddog
+RequirementsMinimum1,Text,,
+RequirementsMinimum2,Text,,
+RequirementsMinimum3,Text,,
+RequirementsMinimum4,Text,,
+RequirementsMinimum5,Text,,
+RequirementsMinimum6,Text,,
+RequirementsMinimum7,Text,,
+RequirementsMinimum8,Text,,
+RequirementsMinimum9,Text,,
+RequirementsMinimum10,Text,,
+RequirementsMinimum11,Text,,
+RequirementsRecommended1,Text,,
+RequirementsRecommended2,Text,,
+RequirementsRecommended3,Text,,
+RequirementsRecommended4,Text,,
+RequirementsRecommended5,Text,,
+RequirementsRecommended6,Text,,
+RequirementsRecommended7,Text,,
+RequirementsRecommended8,Text,,
+RequirementsRecommended9,Text,,
+RequirementsRecommended10,Text,,
+RequirementsRecommended11,Text,,
+StoreLogos1,Provide the file name only if it is in the same folder. Provide relative path to image starting with the subfolder name otherwise,store-logo.png,store-logo.png
+StoreLogos2,Provide the file name only if it is in the same folder. Provide relative path to image starting with the subfolder name otherwise,,
+Screenshots1,Provide the file name only if it is in the same folder. Provide relative path to image starting with the subfolder name otherwise,capture.png,capture.png
+Screenshots2,Provide the file name only if it is in the same folder. Provide relative path to image starting with the subfolder name otherwise,,
+Screenshots3,Provide the file name only if it is in the same folder. Provide relative path to image starting with the subfolder name otherwise,,
+Screenshots4,Provide the file name only if it is in the same folder. Provide relative path to image starting with the subfolder name otherwise,,
+Screenshots5,Provide the file name only if it is in the same folder. Provide relative path to image starting with the subfolder name otherwise,,
+Screenshots6,Provide the file name only if it is in the same folder. Provide relative path to image starting with the subfolder name otherwise,,
+Screenshots7,Provide the file name only if it is in the same folder. Provide relative path to image starting with the subfolder name otherwise,,
+Screenshots8,Provide the file name only if it is in the same folder. Provide relative path to image starting with the subfolder name otherwise,,
+Screenshots9,Provide the file name only if it is in the same folder. Provide relative path to image starting with the subfolder name otherwise,,
+Screenshots10,Provide the file name only if it is in the same folder. Provide relative path to image starting with the subfolder name otherwise,,
+HeroArts,Text,,
+Trailers,Text,,

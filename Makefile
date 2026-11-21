@@ -28,6 +28,9 @@
 #   make windows-setup
 #                     Windows installer into dist/, with Inno Setup in a Docker or
 #                     Podman container (see scripts/windows-setup.sh)
+#   make store-listing
+#                     Microsoft Store listing import file installer/store/store-listing.csv,
+#                     from the listing texts in installer/store/*.md (see scripts/store-listing.sh)
 #   make version-check
 #                     show the commits since the last release and suggest the next version
 #   make version-bump-patch, version-bump-minor, version-bump-major
@@ -70,7 +73,7 @@ TRIVY_CACHE   ?= $(HOME)/.cache/trivy
 VERSION_STEPS := $(foreach p,patch minor major,version-bump-$(p))
 
 .PHONY: all linux linux-portable windows debug debug-linux debug-windows run run-windows \
-        test check check-dependencies fmt clippy hooks pre-commit plugins dist version-check version-bump $(VERSION_STEPS) dist-linux dist-windows deb appimage windows-setup clean
+        test check check-dependencies fmt clippy hooks pre-commit plugins dist version-check version-bump $(VERSION_STEPS) dist-linux dist-windows deb appimage windows-setup store-listing clean
 
 all: linux windows
 
@@ -181,6 +184,9 @@ appimage: linux-portable
 
 windows-setup: windows
 	sh scripts/windows-setup.sh $(WINDOWS_BIN)
+
+store-listing:
+	sh scripts/store-listing.sh
 
 clean:
 	$(CARGO) clean

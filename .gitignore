@@ -2,7 +2,13 @@
 /dist
 /plugins
 /tmp
+
+# Files created by Windows when copying from windows fs to wsl fs
 *:Zone.Identifier
 
+# Environment variables
 .env
 .envrc
+
+# Local dev files that should not be versionned
+.local

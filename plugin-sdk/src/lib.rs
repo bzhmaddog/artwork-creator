@@ -1,7 +1,7 @@
-//! Write image effect plugins for Artwork Creator in Rust.
+//! Write image effect and generator plugins for Artwork Creator in Rust.
 //!
-//! A plugin is a `cdylib` crate. Implement [`Effect`] for each effect and list them with
-//! [`export_plugin!`]:
+//! A plugin is a `cdylib` crate. Implement [`Effect`] for each effect, [`Generator`] for
+//! each generator (a shape's generated fill), and list them with [`export_plugin!`]:
 //!
 //! ```ignore
 //! use artwork_plugin_sdk::{Effect, Image, Param, Values, export_plugin};
@@ -24,6 +24,9 @@
 //! export_plugin!(name: "My plugin", version: env!("CARGO_PKG_VERSION"), effects: [Fade]);
 //! ```
 //!
+//! A plugin with generators lists them after its effects:
+//! `export_plugin!(name: …, version: …, effects: [Fade], generators: [Waves])`.
+//!
 //! Build it with `cargo build --release` and copy the library (`.dll` on Windows, `.so`
 //! on Linux) into the `plugins` folder next to the app.
 //!
@@ -34,7 +37,7 @@ pub mod abi;
 mod export;
 mod params;
 
-pub use export::{Image, build_table};
+pub use export::{Contents, Image, build_table};
 pub use params::{ChoiceOption, Param, ParamKind, Values, color_from_hex, color_to_hex};
 
 /// An image effect.
@@ -66,13 +69,46 @@ pub trait Effect: Send + Sync + 'static {
     fn apply(&self, img: &mut Image, values: &Values, scale: f32) -> Result<(), String>;
 }
 
+/// Draws a shape's fill, such as a pattern or a texture.
+pub trait Generator: Send + Sync + 'static {
+    /// Unique, stable id saved in projects, as an effect's; no effect may have it.
+    fn id(&self) -> &str;
+    /// Shown in a fill's Generated menu.
+    fn name(&self) -> &str;
+    /// One line shown as a tooltip.
+    fn description(&self) -> &str {
+        ""
+    }
+    /// Parameters, in display order. Called once, when the plugin loads.
+    fn params(&self) -> Vec<Param>;
+    /// Draws into `img`, transparent at first. Pixels are straight (not premultiplied)
+    /// RGBA.
+    ///
+    /// `img` covers the shape's box at `px_per_mm` pixels per mm: multiply lengths in
+    /// mm by it. It is smaller on screen than at export, so the same values must give
+    /// the same picture at any resolution, only sharper.
+    ///
+    /// Can be called from several threads at once, for different images.
+    fn generate(&self, img: &mut Image, values: &Values, px_per_mm: f32) -> Result<(), String>;
+}
+
 /// Exports the plugin's entry point. Use it once, at the root of the plugin crate.
 ///
 /// `name` and `version` are shown to the user; `effects` are values implementing
-/// [`Effect`].
+/// [`Effect`], and the optional `generators` values implementing [`Generator`].
 #[macro_export]
 macro_rules! export_plugin {
     (name: $name:expr, version: $version:expr, effects: [$($effect:expr),* $(,)?] $(,)?) => {
+        $crate::export_plugin!(
+            name: $name, version: $version, effects: [$($effect),*], generators: []
+        );
+    };
+    (
+        name: $name:expr,
+        version: $version:expr,
+        effects: [$($effect:expr),* $(,)?],
+        generators: [$($generator:expr),* $(,)?] $(,)?
+    ) => {
         #[unsafe(no_mangle)]
         pub extern "C" fn artwork_plugin_entry() -> *const $crate::abi::PluginTable {
             static TABLE: ::std::sync::OnceLock<
@@ -80,8 +116,12 @@ macro_rules! export_plugin {
             > = ::std::sync::OnceLock::new();
             let table = TABLE.get_or_init(|| {
                 $crate::build_table($name, $version, || {
-                    ::std::vec![$(::std::boxed::Box::new($effect)
-                        as ::std::boxed::Box<dyn $crate::Effect>),*]
+                    (
+                        ::std::vec![$(::std::boxed::Box::new($effect)
+                            as ::std::boxed::Box<dyn $crate::Effect>),*],
+                        ::std::vec![$(::std::boxed::Box::new($generator)
+                            as ::std::boxed::Box<dyn $crate::Generator>),*],
+                    )
                 })
             });
             match table {

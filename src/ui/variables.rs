@@ -1016,7 +1016,7 @@ mod tests {
             };
             let mut out = ctx.run_ui(input, |ui| {
                 publish(ui.ctx(), &doc);
-                changed |= field(ui, bindings, Field::X, value, |d| d.suffix(" mm")).changed();
+                changed |= field(ui, bindings, Field::X, value, |d| d).changed();
             });
             out.textures_delta.clear();
         }
@@ -1034,7 +1034,7 @@ mod tests {
         let mut x = 12.0;
         let texts = texts_of(&ctx, |ui| {
             publish(ui.ctx(), &doc);
-            field(ui, &mut bindings, Field::X, &mut x, |d| d.suffix(" mm"));
+            field(ui, &mut bindings, Field::X, &mut x, |d| d);
         });
         assert!(
             !texts.iter().any(|t| t.contains("gone")),

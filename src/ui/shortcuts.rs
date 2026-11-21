@@ -52,6 +52,8 @@ pub enum Command {
     Group,
     Ungroup,
     Clip,
+    ZoomIn,
+    ZoomOut,
     FitPage,
     RealSize,
     ShowTemplate,
@@ -132,7 +134,7 @@ const NONE: Modifiers = Modifiers::NONE;
 
 impl Command {
     /// In the order of the window.
-    pub const ALL: [Command; 51] = [
+    pub const ALL: [Command; 53] = [
         Command::NewProject,
         Command::OpenProject,
         Command::Save,
@@ -156,6 +158,8 @@ impl Command {
         Command::Group,
         Command::Ungroup,
         Command::Clip,
+        Command::ZoomIn,
+        Command::ZoomOut,
         Command::FitPage,
         Command::RealSize,
         Command::ShowTemplate,
@@ -212,6 +216,8 @@ impl Command {
             Command::Group => tr_noop!("COMMAND_GROUP"),
             Command::Ungroup => tr_noop!("UNGROUP_LAYERS"),
             Command::Clip => tr_noop!("CLIP_TO_LAYER_BELOW"),
+            Command::ZoomIn => tr_noop!("ZOOM_IN"),
+            Command::ZoomOut => tr_noop!("ZOOM_OUT"),
             Command::FitPage => tr_noop!("FIT_PAGE_IN_VIEW"),
             Command::RealSize => tr_noop!("ZOOM_REAL_SIZE"),
             Command::ShowTemplate => tr_noop!("SHOW_TEMPLATE_LINES"),
@@ -268,7 +274,9 @@ impl Command {
             | Command::Group
             | Command::Ungroup
             | Command::Clip => Group::Layers,
-            Command::FitPage
+            Command::ZoomIn
+            | Command::ZoomOut
+            | Command::FitPage
             | Command::RealSize
             | Command::ShowTemplate
             | Command::PreviewCuts
@@ -319,6 +327,8 @@ impl Command {
             Command::Group => vec![sc(CMD, Key::G)],
             Command::Ungroup => vec![sc(CMD_SHIFT, Key::G)],
             Command::Clip => vec![sc(CMD_ALT, Key::G)],
+            Command::ZoomIn => vec![sc(CMD, Key::Plus), sc(CMD, Key::Equals)],
+            Command::ZoomOut => vec![sc(CMD, Key::Minus)],
             Command::FitPage => vec![sc(NONE, Key::F)],
             Command::SelectTool => vec![sc(NONE, Key::V)],
             Command::PencilTool => vec![sc(NONE, Key::P)],
@@ -369,6 +379,8 @@ impl Command {
             Command::Group => "group",
             Command::Ungroup => "ungroup",
             Command::Clip => "clip_to_layer_below",
+            Command::ZoomIn => "zoom_in",
+            Command::ZoomOut => "zoom_out",
             Command::FitPage => "fit_page",
             Command::RealSize => "real_size",
             Command::ShowTemplate => "show_template",
@@ -1094,6 +1106,9 @@ mod tests {
         assert_eq!(fire(&s, Key::Z, ctrl_shift, false), [Command::Redo]);
         assert_eq!(fire(&s, Key::Y, CTRL, false), [Command::Redo]);
         assert_eq!(fire(&s, Key::F, Modifiers::NONE, false), [Command::FitPage]);
+        assert_eq!(fire(&s, Key::Equals, CTRL, false), [Command::ZoomIn]);
+        assert_eq!(fire(&s, Key::Plus, CTRL, false), [Command::ZoomIn]);
+        assert_eq!(fire(&s, Key::Minus, CTRL, false), [Command::ZoomOut]);
         assert!(fire(&s, Key::F, Modifiers::SHIFT, false).is_empty());
         // Typing in a field: File commands still work, the others do not.
         assert_eq!(fire(&s, Key::S, CTRL, true), [Command::Save]);

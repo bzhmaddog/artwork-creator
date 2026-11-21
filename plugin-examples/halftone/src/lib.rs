@@ -1,9 +1,10 @@
 //! Example Artwork Creator plugin: a halftone effect, redrawing the image as a screen of
-//! dots whose size follows its darkness, like print seen under a magnifier.
+//! dots whose size follows its darkness, like print seen under a magnifier, and a dot
+//! grid generator filling a shape with even dots.
 //!
 //! Build it with `make plugins`, which copies the library into `plugins/`.
 
-use artwork_plugin_sdk::{Effect, Image, Param, Values, export_plugin};
+use artwork_plugin_sdk::{Effect, Generator, Image, Param, Values, export_plugin};
 
 struct Halftone;
 
@@ -161,10 +162,70 @@ impl Effect for Halftone {
     }
 }
 
+/// Even dots on a square grid, sizes in mm.
+struct DotGrid;
+
+impl Generator for DotGrid {
+    fn id(&self) -> &str {
+        "halftone.grid"
+    }
+
+    fn name(&self) -> &str {
+        "Dot grid"
+    }
+
+    fn description(&self) -> &str {
+        "Even dots on a square grid (example plugin)"
+    }
+
+    fn params(&self) -> Vec<Param> {
+        vec![
+            Param::float("spacing", "Spacing", 0.5, 50.0, 4.0).unit("mm"),
+            Param::float("dot_size", "Dot size", 1.0, 100.0, 50.0)
+                .unit(" %")
+                .decimals(0),
+            Param::float("angle", "Angle", 0.0, 90.0, 45.0)
+                .unit("°")
+                .decimals(0),
+            Param::color("ink", "Ink", [0, 0, 0, 255]),
+            Param::color("paper", "Paper", [255, 255, 255, 0]),
+        ]
+    }
+
+    fn generate(&self, img: &mut Image, v: &Values, px_per_mm: f32) -> Result<(), String> {
+        let cell = v.f32("spacing") * px_per_mm;
+        if cell < 1e-3 {
+            return Err("spacing too small".into());
+        }
+        // The dot's diameter is this share of the spacing.
+        let radius = cell * v.f32("dot_size") / 200.0;
+        let (sin, cos) = v.f32("angle").to_radians().sin_cos();
+        let ink = v.color("ink").map(|c| c as f32);
+        let paper = v.color("paper").map(|c| c as f32);
+        img.par_rows(|y, row| {
+            for (x, px) in row.as_chunks_mut::<4>().0.iter_mut().enumerate() {
+                let (x, y) = (x as f32 + 0.5, y as f32 + 0.5);
+                let (u, w) = (x * cos + y * sin, -x * sin + y * cos);
+                // Distance to the center of the nearest dot.
+                let du = u - ((u / cell).floor() + 0.5) * cell;
+                let dw = w - ((w / cell).floor() + 0.5) * cell;
+                let d = (du * du + dw * dw).sqrt();
+                // One pixel of antialiasing at the edge.
+                let k = (radius - d + 0.5).clamp(0.0, 1.0);
+                for c in 0..4 {
+                    px[c] = (paper[c] + (ink[c] - paper[c]) * k).round() as u8;
+                }
+            }
+        });
+        Ok(())
+    }
+}
+
 export_plugin!(
     name: "Halftone",
     version: env!("CARGO_PKG_VERSION"),
     effects: [Halftone],
+    generators: [DotGrid],
 );
 
 #[cfg(test)]
@@ -196,5 +257,21 @@ mod tests {
         assert_eq!(none, 0.0);
         // Saved before Dot size: full size.
         assert_eq!(ink(&format!("{{{base}}}")), full);
+    }
+
+    #[test]
+    fn dot_grid_covers_the_share_of_a_disc() {
+        let (w, h) = (100u32, 100u32);
+        let mut px = vec![0u8; (w * h * 4) as usize];
+        let mut img = Image::new(&mut px, w, h, w as usize * 4).unwrap();
+        let v = Values::from_json(
+            r##"{"spacing": 2, "dot_size": 50, "angle": 0, "ink": "#000000ff", "paper": "#ffffff00"}"##,
+        )
+        .unwrap();
+        // 10 px per mm: dots 10 px across, every 20 px.
+        DotGrid.generate(&mut img, &v, 10.0).unwrap();
+        let inked = px.chunks(4).map(|p| p[3] as f32 / 255.0).sum::<f32>() / (w * h) as f32;
+        let disc = std::f32::consts::PI * 25.0 / 400.0;
+        assert!((inked - disc).abs() < 0.02, "{inked} {disc}");
     }
 }

@@ -149,6 +149,7 @@ fn widget_gallery() {
                 link: &mut link,
                 gradient: &mut g,
                 pattern: None,
+                generator: None,
                 units_per_mm: 1.0,
                 alpha: true,
                 pick_pattern: false,

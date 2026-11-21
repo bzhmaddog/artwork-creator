@@ -210,7 +210,10 @@ fn delete_dialog(
         }
         ui.add_space(8.0);
         dialog_button_row(ui, |ui| {
-            if ui.button(tr!("DELETE_TEMPLATE_BUTTON")).clicked() {
+            if ui
+                .add(crate::app::danger_button(tr!("DELETE_TEMPLATE_BUTTON")))
+                .clicked()
+            {
                 outcome = Outcome::Delete {
                     replacement: replacement.clone(),
                 };

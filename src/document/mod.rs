@@ -537,6 +537,18 @@ pub struct Layer {
 }
 
 impl Layer {
+    /// Its effects' settings, then its fill generator's (a shape's), which hold parameters
+    /// and color links alike.
+    pub fn param_sets(&self) -> impl Iterator<Item = &EffectInstance> {
+        let generator = self.shape.as_ref().and_then(|s| s.fill_generator.as_ref());
+        self.effects.iter().chain(generator)
+    }
+
+    pub fn param_sets_mut(&mut self) -> impl Iterator<Item = &mut EffectInstance> {
+        let generator = self.shape.as_mut().and_then(|s| s.fill_generator.as_mut());
+        self.effects.iter_mut().chain(generator)
+    }
+
     /// A visible, unlocked layer; its image is loaded separately.
     pub fn new(id: u64, name: String, source: PathBuf) -> Self {
         Self {

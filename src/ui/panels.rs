@@ -1044,16 +1044,9 @@ fn icon_button(
     tip: &str,
     paint: impl FnOnce(&egui::Painter, Rect, Color32),
 ) -> Response {
-    let (rect, r) = ui.allocate_exact_size(vec2(ICON, ICON), Sense::click());
-    let r = r.on_hover_text(tip);
-    if ui.is_rect_visible(rect) {
-        let visuals = ui.style().interact(&r);
-        if r.hovered() || r.is_pointer_button_down_on() {
-            ui.painter().rect_filled(rect, 3.0, visuals.weak_bg_fill);
-        }
-        paint(ui.painter(), rect.shrink(5.0), visuals.fg_stroke.color);
-    }
-    r
+    crate::ui::layers::flat_button(ui, vec2(ICON, ICON), true, tip, |p, rect, c| {
+        paint(p, rect.shrink(5.0), c);
+    })
 }
 
 /// The panel's menu button: three lines.

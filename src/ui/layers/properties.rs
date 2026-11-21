@@ -163,6 +163,32 @@ pub fn unit(ui: &mut Ui, unit: &str) -> Response {
     ui.label(unit)
 }
 
+/// How far a fill's settings are indented from the labels (see [`wide_row`]).
+const WIDE_ROW_INDENT: f32 = 8.0;
+
+/// Shows `add` across a whole row of a [`prop_grid`], from its label column, slightly
+/// indented, leaving the grid's columns as wide as they were: a fill's settings under
+/// its label. Ends the row.
+pub(super) fn wide_row<R>(ui: &mut Ui, add: impl FnOnce(&mut Ui) -> R) -> R {
+    let min = ui.cursor().min + egui::vec2(WIDE_ROW_INDENT, 0.0);
+    // To the panel's right edge, not the label column's.
+    let right = ui.clip_rect().right() - ui.spacing().item_spacing.x;
+    let rect = egui::Rect::from_min_max(min, egui::pos2(right.max(min.x), f32::INFINITY));
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .max_rect(rect)
+            .layout(egui::Layout::top_down(egui::Align::Min)),
+    );
+    let r = add(&mut child);
+    // Only its height counts in the grid.
+    ui.allocate_exact_size(
+        egui::vec2(0.0, child.min_rect().height()),
+        egui::Sense::hover(),
+    );
+    ui.end_row();
+    r
+}
+
 pub(super) fn prop_grid(ui: &Ui, id: &str) -> egui::Grid {
     let label_width = PROP_LABELS
         .iter()

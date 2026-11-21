@@ -9,9 +9,14 @@
 //! A layer keeps its effect stack as [`EffectInstance`]s, saved with the project. The
 //! original image is never changed: the stack is applied to a copy for the screen (see
 //! [`cache`]) and again at full resolution when exporting.
+//!
+//! A [`Generator`] makes pixels instead of changing them: a shape's fill (see
+//! `shape`), such as noise or stripes. Generators share effects' parameters, their
+//! registry and their plugins; the built-in ones live in [`generators`].
 
 pub mod builtin;
 pub mod cache;
+pub mod generators;
 pub mod plugin;
 
 use std::collections::BTreeMap;
@@ -52,6 +57,28 @@ pub trait Effect: Send + Sync {
     /// less on screen where a smaller copy is used. Multiply distances given in source
     /// pixels (like a blur radius) by it, so every size looks the same.
     fn apply(&self, img: &mut RgbaImage, params: &Params, scale: f32) -> Result<(), String>;
+}
+
+/// Draws a shape's fill.
+pub trait Generator: Send + Sync {
+    /// Unique, stable id saved in projects, e.g. `"builtin.noise"`; no effect has it.
+    fn id(&self) -> &str;
+    /// Shown in a fill's Generated menu.
+    fn name(&self) -> &str;
+    /// One line shown as a tooltip.
+    fn description(&self) -> &str {
+        ""
+    }
+    /// Parameters, in display order.
+    fn params(&self) -> &[ParamSpec];
+    /// Name of the plugin providing it; `None` for a built-in one.
+    fn plugin(&self) -> Option<&str> {
+        None
+    }
+    /// Draws into `img`, transparent and straight (not premultiplied) RGBA, which covers
+    /// the shape's box at `px_per_mm` pixels per mm: lengths in mm times `px_per_mm`
+    /// are in pixels. Equal parameters must give the same picture at any resolution.
+    fn generate(&self, img: &mut RgbaImage, params: &Params, px_per_mm: f32) -> Result<(), String>;
 }
 
 /// What a parameter holds, with its range and default.
@@ -408,11 +435,20 @@ pub struct EffectInstance {
 impl EffectInstance {
     /// A new instance with every parameter at its default.
     pub fn new(effect: &dyn Effect) -> Self {
+        Self::with_defaults(effect.id(), effect.params())
+    }
+
+    /// A generator's settings, every parameter at its default; `effect` is then the
+    /// generator's id.
+    pub fn generator(generator: &dyn Generator) -> Self {
+        Self::with_defaults(generator.id(), generator.params())
+    }
+
+    fn with_defaults(id: &str, specs: &[ParamSpec]) -> Self {
         Self {
-            effect: effect.id().into(),
+            effect: id.into(),
             enabled: true,
-            params: effect
-                .params()
+            params: specs
                 .iter()
                 .map(|p| (p.id.clone(), p.default_value()))
                 .collect(),
@@ -421,9 +457,10 @@ impl EffectInstance {
     }
 }
 
-/// All available effects.
+/// All available effects and generators.
 pub struct Registry {
     effects: Vec<Box<dyn Effect>>,
+    generators: Vec<Box<dyn Generator>>,
     /// Plugins that loaded.
     pub plugins: Vec<plugin::PluginInfo>,
     /// Why some plugins, or some of their effects, are not available.
@@ -431,17 +468,18 @@ pub struct Registry {
 }
 
 impl Registry {
-    /// The built-in effects.
+    /// The built-in effects and generators.
     fn builtin() -> Self {
         Self {
             effects: builtin::all(),
+            generators: generators::all(),
             plugins: Vec::new(),
             errors: Vec::new(),
         }
     }
 
-    /// The built-in effects, then those of the plugins in `dir`. An effect whose id is
-    /// already taken is left out.
+    /// The built-in effects and generators, then those of the plugins in `dir`. One
+    /// whose id is already taken is left out.
     fn with_plugins(dir: Option<&Path>) -> Self {
         let mut reg = Self::builtin();
         let Some(dir) = dir else {
@@ -462,6 +500,19 @@ impl Registry {
                 reg.effects.push(e);
             }
         }
+        for g in loaded.generators {
+            if reg.params_of(g.id()).is_some() {
+                let msg = format!(
+                    "{}: generator \"{}\" left out, its id is already used",
+                    g.plugin().unwrap_or_default(),
+                    g.id()
+                );
+                log::warn!("{msg}");
+                reg.errors.push(msg);
+            } else {
+                reg.generators.push(g);
+            }
+        }
         reg.plugins = loaded.plugins;
         reg
     }
@@ -476,6 +527,25 @@ impl Registry {
     /// In menu order.
     pub fn all(&self) -> impl Iterator<Item = &dyn Effect> {
         self.effects.iter().map(|e| e.as_ref())
+    }
+
+    pub fn generator(&self, id: &str) -> Option<&dyn Generator> {
+        self.generators
+            .iter()
+            .find(|g| g.id() == id)
+            .map(|g| g.as_ref())
+    }
+
+    /// In menu order.
+    pub fn generators(&self) -> impl Iterator<Item = &dyn Generator> {
+        self.generators.iter().map(|g| g.as_ref())
+    }
+
+    /// The parameters of the effect or generator `id`.
+    pub fn params_of(&self, id: &str) -> Option<&[ParamSpec]> {
+        self.get(id)
+            .map(|e| e.params())
+            .or_else(|| self.generator(id).map(|g| g.params()))
     }
 }
 
@@ -492,6 +562,22 @@ pub fn init(plugins_dir: Option<&Path>) -> &'static Registry {
 /// wasn't called first.
 pub fn registry() -> &'static Registry {
     REGISTRY.get_or_init(Registry::builtin)
+}
+
+/// What the generator of `inst` makes over `w` x `h` pixels at `px_per_mm`, premultiplied;
+/// `None` when it is off, unknown or fails (the error is logged).
+pub fn generate(inst: &EffectInstance, w: u32, h: u32, px_per_mm: f32) -> Option<Pixmap> {
+    if !inst.enabled {
+        return None;
+    }
+    let generator = registry().generator(&inst.effect)?;
+    let mut img = RgbaImage::new(w, h);
+    let params = Params::new(generator.params(), &inst.params);
+    if let Err(e) = generator.generate(&mut img, &params, px_per_mm) {
+        log::warn!("generator {}: {e}", inst.effect);
+        return None;
+    }
+    crate::render::premultiplied_pixmap(&img)
 }
 
 /// The stack changes the image: some effect is enabled.

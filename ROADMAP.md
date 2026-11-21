@@ -25,8 +25,6 @@ work goes on.
 
 ### Plugins
 
-- **Layer plugins** that generate content (patterns, procedural textures), not only
-  effects.
 - **Import / export plugins** for other file formats.
 
 ### Interface

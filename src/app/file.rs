@@ -249,7 +249,7 @@ impl ArtworkApp {
                     .clicked();
                 at_left_edge(ui, |ui| {
                     discard |= ui
-                        .button(tr!("DISCARD_RECOVERY"))
+                        .add(danger_button(tr!("DISCARD_RECOVERY")))
                         .on_hover_text(tr!("DISCARD_RECOVERY_HINT"))
                         .clicked();
                 });
@@ -531,7 +531,7 @@ impl ArtworkApp {
                     save |= ui.button(save_label).clicked();
                     cancel |= ui.button(tr!("CANCEL")).clicked();
                     at_left_edge(ui, |ui| {
-                        discard |= ui.button(discard_label).clicked();
+                        discard |= ui.add(danger_button(discard_label)).clicked();
                     });
                 });
             });

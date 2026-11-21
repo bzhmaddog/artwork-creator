@@ -74,13 +74,13 @@ pub(super) fn text_section(
                     font_changed |= font_menu(ui, &mut t.family, state, fonts);
                     let missing = layer.broken;
                     if missing {
-                        ui.colored_label(ui.visuals().warn_fg_color, "⚠")
+                        crate::ui::callout::warning_icon(ui, ui.visuals().warn_fg_color)
                             .on_hover_text(tr!("TEXT_FONT_NOT_INSTALLED"));
                     }
                     let chars = &layer.text_state.missing;
                     if !chars.is_empty() {
                         let chars: Vec<String> = chars.iter().map(char::to_string).collect();
-                        ui.colored_label(ui.visuals().warn_fg_color, "⚠")
+                        crate::ui::callout::warning_icon(ui, ui.visuals().warn_fg_color)
                             .on_hover_text(tr!("TEXT_MISSING_CHARACTERS", chars = chars.join(" ")));
                     }
                 });
@@ -156,6 +156,7 @@ pub(super) fn text_section(
                     link: &mut link,
                     gradient: &mut t.gradient,
                     pattern: Some(&mut t.pattern),
+                    generator: None,
                     // The text's units are its scale's mm.
                     units_per_mm: 1.0 / text_scale.max(1e-6),
                     alpha: true,
@@ -166,9 +167,9 @@ pub(super) fn text_section(
                 });
                 ui.end_row();
                 if fill.has_rows() {
-                    ui.label("");
-                    changed |= crate::ui::gradient::rows(ui, ("text", layer.id), &mut fill);
-                    ui.end_row();
+                    wide_row(ui, |ui| {
+                        changed |= crate::ui::gradient::rows(ui, ("text", layer.id), &mut fill);
+                    });
                 }
                 if fill.pick_pattern {
                     state.pick_pattern = Some(layer.id);

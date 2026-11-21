@@ -7,7 +7,7 @@ use serde_json::Value;
 
 use crate::i18n::{tr, tr_n, translate};
 use crate::render::effects::{
-    Effect, EffectInstance, ParamKind, ParamSpec, Params, color_to_hex, registry,
+    Effect, EffectInstance, Generator, ParamKind, ParamSpec, Params, color_to_hex, registry,
 };
 use crate::ui::layers::{self, Tool};
 
@@ -130,11 +130,13 @@ fn add_menu(ui: &mut Ui) -> Option<EffectInstance> {
         if !reg.errors.is_empty() {
             ui.separator();
             let n = reg.errors.len();
-            ui.label(
-                RichText::new(format!("⚠ {}", tr_n!("PLUGIN_PROBLEM_COUNT", n)))
-                    .color(ui.visuals().warn_fg_color),
-            )
-            .on_hover_text(reg.errors.join("\n"));
+            let color = ui.visuals().warn_fg_color;
+            let tip = reg.errors.join("\n");
+            ui.horizontal(|ui| {
+                crate::ui::callout::warning_icon(ui, color).on_hover_text(&tip);
+                ui.colored_label(color, tr_n!("PLUGIN_PROBLEM_COUNT", n))
+                    .on_hover_text(&tip);
+            });
         }
     });
     added
@@ -284,18 +286,41 @@ fn params_ui(
     inst: &mut EffectInstance,
     px_mm: Option<(f32, &str)>,
 ) -> bool {
-    let specs = effect.params();
+    params_grid(
+        ui,
+        ui_key,
+        effect.params(),
+        effect.plugin().is_none(),
+        inst,
+        px_mm,
+        false,
+    )
+}
+
+/// Controls for the parameters `specs` of an effect or generator, `builtin` or from a
+/// plugin. Returns true if one changed.
+fn params_grid(
+    ui: &mut Ui,
+    ui_key: (u64, usize),
+    specs: &[ParamSpec],
+    builtin: bool,
+    inst: &mut EffectInstance,
+    px_mm: Option<(f32, &str)>,
+    hide_seed: bool,
+) -> bool {
     if specs.is_empty() {
         return false;
     }
     let mut changed = false;
     // Built-in labels are translated; plugins' are shown as they give them.
-    let builtin = effect.plugin().is_none();
     egui::Grid::new(("effect_params", ui_key))
         .num_columns(2)
         .spacing([8.0, 4.0])
         .show(ui, |ui| {
-            for spec in specs {
+            for spec in specs
+                .iter()
+                .filter(|s| !(hide_seed && seed_range(s).is_some()))
+            {
                 ui.label(label_text(builtin, &spec.label));
                 let params = Params::new(specs, &inst.params);
                 if let Some(v) =
@@ -308,6 +333,132 @@ fn params_ui(
             }
         });
     changed
+}
+
+/// The menu of generators, in a fill set to Generated, picking the one `inst` uses.
+/// Returns true if it changed. `key` tells this fill from others.
+pub fn generator_menu(ui: &mut Ui, key: u64, inst: &mut EffectInstance) -> bool {
+    let reg = registry();
+    let current = reg.generator(&inst.effect);
+    let text = match current {
+        Some(g) => RichText::new(g.name()),
+        None => RichText::new(tr!("MISSING_GENERATOR")).color(ui.visuals().warn_fg_color),
+    };
+    let mut picked = None;
+    let r = ComboBox::from_id_salt(("generator", key))
+        .selected_text(text)
+        .show_ui(ui, |ui| {
+            let mut item = |ui: &mut Ui, g: &'static dyn Generator| {
+                let mut r = ui.selectable_label(inst.effect == g.id(), g.name());
+                if !g.description().is_empty() {
+                    r = r.on_hover_text(g.description());
+                }
+                if r.clicked() && inst.effect != g.id() {
+                    picked = Some(g);
+                }
+            };
+            for g in reg.generators().filter(|g| g.plugin().is_none()) {
+                item(ui, g);
+            }
+            // Each plugin's generators under its name.
+            for plugin in &reg.plugins {
+                let gens: Vec<_> = plugin
+                    .generators
+                    .iter()
+                    .filter_map(|id| reg.generator(id))
+                    .collect();
+                if gens.is_empty() {
+                    continue;
+                }
+                ui.separator();
+                let title = format!("{} {}", plugin.name, plugin.version);
+                ui.weak(title.trim_end())
+                    .on_hover_text(tr!("PLUGIN_LOADED_FROM", path = plugin.path.display()));
+                for g in gens {
+                    item(ui, g);
+                }
+            }
+        });
+    if current.is_none() {
+        r.response
+            .on_hover_text(tr!("MISSING_GENERATOR_HINT", id = inst.effect));
+    }
+    match picked {
+        Some(g) => {
+            *inst = EffectInstance::generator(g);
+            true
+        }
+        None => false,
+    }
+}
+
+/// The range of a generator's "seed" setting, which [`regenerate_button`] sets in place
+/// of a slider.
+fn seed_range(spec: &ParamSpec) -> Option<(i32, i32)> {
+    match spec.kind {
+        ParamKind::Int { min, max, .. } if spec.id == "seed" => Some((min, max)),
+        _ => None,
+    }
+}
+
+/// A circular-arrow button giving `inst` a new random "seed" setting, for generators
+/// that have one. Returns true when clicked.
+pub fn regenerate_button(ui: &mut Ui, inst: &mut EffectInstance) -> bool {
+    let Some(g) = registry().generator(&inst.effect) else {
+        return false;
+    };
+    let Some((min, max)) = g.params().iter().find_map(seed_range) else {
+        return false;
+    };
+    let size = ui.spacing().interact_size.y;
+    let tip = tr!("REGENERATE_FILL_HINT");
+    let r = layers::flat_button(ui, vec2(size, size), true, tip, |p, rect, color| {
+        let (c, radius) = (rect.center(), size * 0.28);
+        let stroke = Stroke::new(1.5, color);
+        // Most of a circle, open at the top right, with an arrowhead at its end.
+        let at = |a: f32| c + radius * vec2(a.cos(), a.sin());
+        let (start, end) = (-0.25 * std::f32::consts::PI, 1.45 * std::f32::consts::PI);
+        let points: Vec<_> = (0..=24)
+            .map(|i| at(start + (end - start) * i as f32 / 24.0))
+            .collect();
+        p.add(egui::Shape::line(points, stroke));
+        let tip = at(end);
+        let head = radius * 0.7;
+        p.line_segment([tip, tip + vec2(-head, -head * 0.15)], stroke);
+        p.line_segment([tip, tip + vec2(head * 0.15, head)], stroke);
+    });
+    if !r.clicked() {
+        return false;
+    }
+    // A new value, different from the one it has.
+    let old = Params::new(g.params(), &inst.params).i32("seed");
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos() as u64 ^ d.as_secs());
+    let span = (max as i64 - min as i64).max(1) as u64;
+    let mut v = min as i64 + (nanos.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 33) as i64 % span as i64;
+    if v as i32 == old {
+        v = if v >= max as i64 { min as i64 } else { v + 1 };
+    }
+    inst.params.insert("seed".into(), Value::from(v as i32));
+    true
+}
+
+/// The settings of the generator `inst` uses, under its menu. Returns true if one
+/// changed.
+pub fn generator_params(ui: &mut Ui, key: u64, inst: &mut EffectInstance) -> bool {
+    let Some(g) = registry().generator(&inst.effect) else {
+        return false;
+    };
+    params_grid(
+        ui,
+        (key, usize::MAX),
+        g.params(),
+        g.plugin().is_none(),
+        inst,
+        None,
+        true,
+    )
 }
 
 /// A parameter or option label, translated for a built-in effect.

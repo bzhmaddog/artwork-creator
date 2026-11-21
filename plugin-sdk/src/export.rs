@@ -1,10 +1,10 @@
-//! Turns [`Effect`]s into the C tables of [`crate::abi`].
+//! Turns [`Effect`]s and [`Generator`]s into the C tables of [`crate::abi`].
 
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use crate::abi::{ABI_VERSION, EffectTable, PluginTable};
-use crate::{Effect, Values};
+use crate::abi::{ABI_VERSION, EffectTable, GeneratorTable, PluginTable};
+use crate::{Effect, Generator, Values};
 
 /// An image handed to [`Effect::apply`]: `height` rows of `width` straight RGBA pixels,
 /// rows `stride` bytes apart.
@@ -96,6 +96,9 @@ fn leak(s: &str) -> *const c_char {
         .into_raw()
 }
 
+/// The effects and generators of a plugin.
+pub type Contents = (Vec<Box<dyn Effect>>, Vec<Box<dyn Generator>>);
+
 /// Builds the plugin table returned by the entry point. It lives as long as the library.
 /// `None` if building it panicked (e.g. in `Effect::params`).
 ///
@@ -103,10 +106,11 @@ fn leak(s: &str) -> *const c_char {
 pub fn build_table(
     name: &str,
     version: &str,
-    effects: impl FnOnce() -> Vec<Box<dyn Effect>>,
+    contents: impl FnOnce() -> Contents,
 ) -> Option<&'static PluginTable> {
     catch_unwind(AssertUnwindSafe(|| {
-        let effects: Vec<EffectTable> = effects()
+        let (effects, generators) = contents();
+        let effects: Vec<EffectTable> = effects
             .into_iter()
             .map(|e| {
                 let params = serde_json::to_string(&e.params()).expect("params serialize");
@@ -123,13 +127,32 @@ pub fn build_table(
                 EffectTable { user_data, ..table }
             })
             .collect();
+        let generators: Vec<GeneratorTable> = generators
+            .into_iter()
+            .map(|g| {
+                let params = serde_json::to_string(&g.params()).expect("params serialize");
+                let table = GeneratorTable {
+                    id: leak(g.id()),
+                    name: leak(g.name()),
+                    description: leak(g.description()),
+                    params_json: leak(&params),
+                    user_data: std::ptr::null(),
+                    generate,
+                };
+                let user_data = Box::into_raw(Box::new(g)) as *const c_void;
+                GeneratorTable { user_data, ..table }
+            })
+            .collect();
         let effects = Box::leak(effects.into_boxed_slice());
+        let generators = Box::leak(generators.into_boxed_slice());
         &*Box::leak(Box::new(PluginTable {
             abi_version: ABI_VERSION,
             effect_count: effects.len() as u32,
             name: leak(name),
             version: leak(version),
             effects: effects.as_ptr(),
+            generator_count: generators.len() as u32,
+            generators: generators.as_ptr(),
         }))
     }))
     .ok()
@@ -141,6 +164,14 @@ pub fn build_table(
 /// `user_data` comes from `build_table`.
 unsafe fn effect<'a>(user_data: *const c_void) -> &'a dyn Effect {
     unsafe { &**(user_data as *const Box<dyn Effect>) }
+}
+
+/// The generator behind `user_data`.
+///
+/// # Safety
+/// `user_data` comes from `build_table`, for a generator.
+unsafe fn generator<'a>(user_data: *const c_void) -> &'a dyn Generator {
+    unsafe { &**(user_data as *const Box<dyn Generator>) }
 }
 
 /// # Safety
@@ -195,16 +226,60 @@ unsafe extern "C" fn apply(
     error_len: usize,
 ) -> i32 {
     let r = catch_unwind(AssertUnwindSafe(|| {
-        if pixels.is_null() {
-            return Err("no image".to_owned());
-        }
-        let len = stride as usize * height as usize;
-        let buf = unsafe { std::slice::from_raw_parts_mut(pixels, len) };
-        let mut img = Image::new(buf, width, height, stride as usize)
-            .ok_or_else(|| "invalid image size".to_owned())?;
+        let mut img = unsafe { image(pixels, width, height, stride) }?;
         let values = unsafe { values(params) }?;
         unsafe { effect(user_data) }.apply(&mut img, &values, scale)
     }));
+    unsafe { report(r, error, error_len) }
+}
+
+#[allow(clippy::too_many_arguments)]
+unsafe extern "C" fn generate(
+    user_data: *const c_void,
+    pixels: *mut u8,
+    width: u32,
+    height: u32,
+    stride: u32,
+    params: *const c_char,
+    px_per_mm: f32,
+    error: *mut c_char,
+    error_len: usize,
+) -> i32 {
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        let mut img = unsafe { image(pixels, width, height, stride) }?;
+        let values = unsafe { values(params) }?;
+        unsafe { generator(user_data) }.generate(&mut img, &values, px_per_mm)
+    }));
+    unsafe { report(r, error, error_len) }
+}
+
+/// The image the host passed.
+///
+/// # Safety
+/// `pixels` is null or holds `height` rows of `stride` bytes.
+unsafe fn image<'a>(
+    pixels: *mut u8,
+    width: u32,
+    height: u32,
+    stride: u32,
+) -> Result<Image<'a>, String> {
+    if pixels.is_null() {
+        return Err("no image".to_owned());
+    }
+    let len = stride as usize * height as usize;
+    let buf = unsafe { std::slice::from_raw_parts_mut(pixels, len) };
+    Image::new(buf, width, height, stride as usize).ok_or_else(|| "invalid image size".to_owned())
+}
+
+/// 0 for success, else 1 with the error or panic message written to `error`.
+///
+/// # Safety
+/// `error` is null or has room for `error_len` bytes.
+unsafe fn report(
+    r: std::thread::Result<Result<(), String>>,
+    error: *mut c_char,
+    error_len: usize,
+) -> i32 {
     let msg = match r {
         Ok(Ok(())) => return 0,
         Ok(Err(e)) => e,

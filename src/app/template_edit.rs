@@ -79,14 +79,7 @@ impl ArtworkApp {
             egui::Layout::right_to_left(egui::Align::Center),
             |ui| {
                 delete = ui
-                    .add_enabled(
-                        can_delete,
-                        egui::Button::new(
-                            egui::RichText::new(tr!("DELETE_TEMPLATE_ELLIPSIS"))
-                                .color(Color32::WHITE),
-                        )
-                        .fill(DANGER_COLOR),
-                    )
+                    .add_enabled(can_delete, danger_button(tr!("DELETE_TEMPLATE_ELLIPSIS")))
                     .on_hover_text(tip(tr!("DELETE_TEMPLATE_HINT"), Command::DeleteTemplate))
                     .on_disabled_hover_text(tr!("DELETE_TEMPLATE_UNSAVED_HINT"))
                     .clicked();
@@ -590,7 +583,7 @@ impl ArtworkApp {
                 save |= ui.button(tr!("SAVE")).clicked();
                 cancel |= ui.button(tr!("CANCEL")).clicked();
                 at_left_edge(ui, |ui| {
-                    discard |= ui.button(tr!("DONT_SAVE")).clicked();
+                    discard |= ui.add(danger_button(tr!("DONT_SAVE"))).clicked();
                 });
             });
         });

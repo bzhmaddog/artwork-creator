@@ -9,7 +9,7 @@ use icons::{
     TOOL, aspect_lock, clip_mark, error_mark, expander, eye_toggle, folder_icon, lock_toggle,
     thumbnail,
 };
-pub use icons::{Tool, icon_entry, tool_button, tool_icon};
+pub use icons::{Tool, flat_button, icon_entry, tool_button, tool_icon};
 use ops::name_mut;
 pub use ops::{
     align, can_clip, can_step, delete, drop_allowed, drop_node, duplicate, flip_group,
@@ -17,7 +17,7 @@ pub use ops::{
     movable_layers, move_step, move_to_end, name_copy, nudge, random_name, rotate_group,
     step_selection, toggle_clip, turned_about, ungroup,
 };
-use properties::{PROP_ROW_GAP, StyleIcon, choice, mm_value, prop_grid, style_toggle};
+use properties::{PROP_ROW_GAP, StyleIcon, choice, mm_value, prop_grid, style_toggle, wide_row};
 pub use properties::{field_frames, prefixed, properties_panel, section, unit};
 use shape_properties::{shape_section, shape_size};
 use text_properties::text_section;
@@ -502,7 +502,7 @@ pub fn show(
                         .and_then(Layer::print_dpi)
                         .filter(|&d| d < state.min_dpi);
                     if let Some(dpi) = low_dpi {
-                        ui.colored_label(ui.visuals().warn_fg_color, "⚠")
+                        crate::ui::callout::warning_icon(ui, ui.visuals().warn_fg_color)
                             .on_hover_text(tr!(
                                 "LAYER_LOW_RESOLUTION",
                                 dpi = format!("{dpi:.0}"),

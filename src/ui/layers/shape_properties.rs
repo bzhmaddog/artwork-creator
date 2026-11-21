@@ -164,6 +164,7 @@ pub(super) fn shape_section(
                         link: &mut link,
                         gradient: &mut s.fill_gradient,
                         pattern: Some(&mut s.fill_pattern),
+                        generator: Some(&mut s.fill_generator),
                         units_per_mm: 1.0,
                         alpha: true,
                         pick_pattern: false,
@@ -176,11 +177,11 @@ pub(super) fn shape_section(
                     });
                     ui.end_row();
                     if fill.has_rows() {
-                        ui.label("");
-                        ui.add_enabled_ui(s.fill, |ui| {
-                            changed |= crate::ui::gradient::rows(ui, ("fill", id), &mut fill);
+                        wide_row(ui, |ui| {
+                            ui.add_enabled_ui(s.fill, |ui| {
+                                changed |= crate::ui::gradient::rows(ui, ("fill", id), &mut fill);
+                            });
                         });
-                        ui.end_row();
                     }
                     if fill.pick_pattern {
                         *pick_pattern = Some(id);
@@ -225,6 +226,7 @@ pub(super) fn shape_section(
                     link: &mut link,
                     gradient: &mut s.stroke_gradient,
                     pattern: None,
+                    generator: None,
                     units_per_mm: 1.0,
                     alpha: true,
                     pick_pattern: false,
@@ -236,11 +238,11 @@ pub(super) fn shape_section(
                 });
                 ui.end_row();
                 if stroke.gradient.is_some() {
-                    ui.label("");
-                    ui.add_enabled_ui(s.stroke, |ui| {
-                        changed |= crate::ui::gradient::rows(ui, ("stroke", id), &mut stroke);
+                    wide_row(ui, |ui| {
+                        ui.add_enabled_ui(s.stroke, |ui| {
+                            changed |= crate::ui::gradient::rows(ui, ("stroke", id), &mut stroke);
+                        });
                     });
-                    ui.end_row();
                 }
                 if let Some(name) = link {
                     layer.color_links.insert(ColorField::Stroke, name);

@@ -156,13 +156,23 @@ suggested_version() {
     esac
 }
 
+# The plugin SDK version to release with the app when its interface (ABI_VERSION)
+# changed since the last release (minor while below 1.0.0, else major); empty otherwise.
+sdk_required() {
+    [ "$range" = HEAD ] && return
+    git diff "$range" -- "$ABI_FILE" | grep -Eq '^[+-]pub const ABI_VERSION' || return 0
+    sdk=$(toml_version "$SDK_TOML")
+    bump "$sdk" "$([ "${sdk%%.*}" = 0 ] && echo minor || echo major)"
+}
+
 sdk_status() {
     sdk=$(toml_version "$SDK_TOML")
     [ "$range" = HEAD ] && return
-    if git diff "$range" -- "$ABI_FILE" | grep -Eq '^[+-]pub const ABI_VERSION'; then
-        echo "Plugin SDK $sdk: the plugin interface changed, release it too, e.g. --sdk $(bump "$sdk" "$([ "${sdk%%.*}" = 0 ] && echo minor || echo major)")"
+    sdk_next=$(sdk_required)
+    if [ -n "$sdk_next" ]; then
+        echo "Plugin SDK $sdk: the plugin interface changed, release it too, e.g. SDK=$sdk_next"
     elif [ -n "$(git diff --name-only "$range" -- plugin-sdk)" ]; then
-        echo "Plugin SDK $sdk: changed since $tag, consider --sdk patch or --sdk minor"
+        echo "Plugin SDK $sdk: changed since $tag, consider SDK=patch or SDK=minor"
     fi
 }
 
@@ -200,7 +210,8 @@ cmd_check() {
         if [ "$next" = "$current" ]; then
             echo "Cargo.toml is at it: tag v$next to release it (see doc/releasing.md)"
         else
-            echo "Set it with: make version-bump APP=$next"
+            sdk_next=$(sdk_required)
+            echo "Set it with: make version-bump APP=$next${sdk_next:+ SDK=$sdk_next}"
         fi
     fi
 }

@@ -255,7 +255,7 @@ impl Settings {
         Self::read_from(crate::data_dir().map(|d| d.join("plugins.json")))
     }
 
-    pub(super) fn read_from(file: Option<PathBuf>) -> Self {
+    pub(crate) fn read_from(file: Option<PathBuf>) -> Self {
         let saved = file
             .as_ref()
             .and_then(|f| std::fs::read(f).ok())

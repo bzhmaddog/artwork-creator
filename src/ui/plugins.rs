@@ -178,6 +178,161 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    /// Runs one frame of the window; returns what it gave and where each text is.
+    fn frame(
+        ctx: &egui::Context,
+        m: &mut Manager,
+        events: Vec<egui::Event>,
+    ) -> (Outcome, Vec<(String, egui::Rect)>) {
+        let input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900.0, 700.0),
+            )),
+            events,
+            ..Default::default()
+        };
+        let mut outcome = Outcome::Open;
+        let mut out = ctx.run_ui(input, |ui| outcome = m.show(ui.ctx()));
+        out.textures_delta.clear();
+        let texts = out
+            .shapes
+            .iter()
+            .filter_map(|s| match &s.shape {
+                egui::Shape::Text(t) => Some((
+                    t.galley.text().to_owned(),
+                    egui::Rect::from_min_size(t.pos, t.galley.size()),
+                )),
+                _ => None,
+            })
+            .collect();
+        (outcome, texts)
+    }
+
+    /// A click at `pos`, over three frames; what the last gave.
+    fn click(ctx: &egui::Context, m: &mut Manager, pos: egui::Pos2) -> Outcome {
+        let press = |pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        frame(ctx, m, vec![egui::Event::PointerMoved(pos)]);
+        frame(ctx, m, vec![press(true)]);
+        frame(ctx, m, vec![press(false)]).0
+    }
+
+    fn find(texts: &[(String, egui::Rect)], text: &str) -> Option<egui::Rect> {
+        texts.iter().find(|(t, _)| t == text).map(|(_, r)| *r)
+    }
+
+    #[test]
+    fn the_window_lists_plugins_and_its_buttons_work() {
+        let dir = std::env::temp_dir().join(format!("artwork-manager-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let saved = dir.join("plugins.json");
+        let files = vec![
+            PluginFile {
+                path: dir.join("new.py"),
+                python: true,
+                status: Status::Waiting,
+            },
+            PluginFile {
+                path: dir.join("libfx.so"),
+                python: false,
+                status: Status::Loaded {
+                    name: "Effects".into(),
+                    version: "0.1.0".into(),
+                },
+            },
+            PluginFile {
+                path: dir.join("broken.py"),
+                python: true,
+                status: Status::Failed("no plugin".into()),
+            },
+        ];
+        let manager = || Manager {
+            files: files.clone(),
+            settings: Settings::read_from(Some(saved.clone())),
+            changed: false,
+        };
+        let ctx = egui::Context::default();
+        let mut m = manager();
+        // The window sizes itself on its first frame, and is drawn on the next.
+        frame(&ctx, &mut m, Vec::new());
+        let (outcome, texts) = frame(&ctx, &mut m, Vec::new());
+        assert!(matches!(outcome, Outcome::Open));
+        for text in [
+            "Plugins",
+            "new.py",
+            "?",
+            "Effects",
+            "0.1.0",
+            "Library",
+            "Loaded",
+            "Waiting to be allowed",
+            "Failed to load",
+        ] {
+            assert!(find(&texts, text).is_some(), "{text}");
+        }
+        assert!(find(&texts, "Restart Artwork Creator to apply the changes.").is_none());
+        // Unticking the first plugin's box disables it, saved at once.
+        let enabled = find(&texts, "Enabled").unwrap();
+        let row = find(&texts, "new.py").unwrap();
+        click(
+            &ctx,
+            &mut m,
+            egui::pos2(enabled.left() + 9.0, row.center().y),
+        );
+        assert!(Settings::read_from(Some(saved.clone())).is_disabled(&files[0].path));
+        let (_, texts) = frame(&ctx, &mut m, Vec::new());
+        assert!(find(&texts, "Restart Artwork Creator to apply the changes.").is_some());
+        // Allow: the plugin isn't pending in this run's registry, which has no plugins.
+        let allow = find(&texts, "Allow").unwrap();
+        click(&ctx, &mut m, allow.center());
+        // Restart, then Close, each from a new window. The window, now without plugins,
+        // sizes itself again first.
+        frame(&ctx, &mut m, Vec::new());
+        let (_, texts) = frame(&ctx, &mut m, Vec::new());
+        assert!(
+            texts
+                .iter()
+                .any(|(t, _)| t.starts_with("No plugins found."))
+        );
+        let restart = find(&texts, "Restart").unwrap();
+        assert!(matches!(
+            click(&ctx, &mut m, restart.center()),
+            Outcome::Restart
+        ));
+        let ctx = egui::Context::default();
+        let mut m = manager();
+        frame(&ctx, &mut m, Vec::new());
+        let (_, texts) = frame(&ctx, &mut m, Vec::new());
+        let close = find(&texts, "Close").unwrap();
+        assert!(matches!(
+            click(&ctx, &mut m, close.center()),
+            Outcome::Closed
+        ));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn without_plugins_it_says_where_to_put_them() {
+        let ctx = egui::Context::default();
+        let mut m = Manager {
+            files: Vec::new(),
+            settings: Settings::default(),
+            changed: false,
+        };
+        frame(&ctx, &mut m, Vec::new());
+        let (_, texts) = frame(&ctx, &mut m, Vec::new());
+        assert!(
+            texts
+                .iter()
+                .any(|(t, _)| t.starts_with("No plugins found."))
+        );
+    }
+
     /// `PLUGINS_PREVIEW=out.png cargo test plugin_manager_preview -- --ignored` draws
     /// the window in both themes.
     #[test]

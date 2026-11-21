@@ -8,6 +8,16 @@ The app is built with [egui](https://github.com/emilk/egui) and follows its look
 light and dark themes: every color comes from `ui.visuals()` (or is picked per theme), never
 a fixed color that only works in one.
 
+## Tokens
+
+The shared values (fixed colors, sizes, corner radii, spacing, strokes) are constants
+in [`src/ui/tokens.rs`](../src/ui/tokens.rs); colors that follow the theme come from egui's
+`Visuals`. [`docs/tokens.png`](tokens.png) shows them all in both themes, and
+[`docs/widgets.png`](widgets.png) the widgets made with them. Use a token, not a literal
+number or color; a new value that other widgets will share becomes a token, added to
+the image's test (`ui_tokens` in `src/ui/gallery.rs`). Values used by only one widget
+(a dial's notch, a handle's reach) stay next to it.
+
 ## Texts
 
 - Every text has a translation key (see CLAUDE.md and README.md). Plain ASCII punctuation:
@@ -87,6 +97,7 @@ a fixed color that only works in one.
 
 - `cargo test widget_gallery -- --ignored` draws one of each widget to
   `docs/widgets.png`; add a new kind of widget to it (`src/ui/gallery.rs`).
+  `cargo test ui_tokens -- --ignored` draws the tokens to `docs/tokens.png`.
 - `CALLOUT_PREVIEW=out.png cargo test callout_preview -- --ignored` draws the callouts in
   both themes. Any piece of the interface can be drawn from a test with
   `preview::render`, to look at it in both themes without starting the app.

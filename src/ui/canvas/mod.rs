@@ -57,9 +57,9 @@ const MIN_STRETCH_MM: f32 = 0.5;
 const WARP_GRID: usize = 16;
 /// Color of the selection and of the anchor an image snapped to: crimson, apart from
 /// the template elements' default colors (magenta, blue, orange, green).
-const ACCENT: Color32 = Color32::from_rgb(220, 20, 60);
+const ACCENT: Color32 = crate::ui::tokens::ACCENT;
 /// Color of the safe-area guide, apart from the template element colors.
-const SAFE_AREA_COLOR: Color32 = Color32::from_rgb(130, 80, 220);
+const SAFE_AREA_COLOR: Color32 = crate::ui::tokens::SAFE_AREA;
 /// Longest side of the offscreen render of a semi-transparent group.
 const MAX_GROUP_PREVIEW_SIDE: f32 = 2048.0;
 /// How close (screen points) an image's center or corner must come to an anchor to snap.
@@ -75,7 +75,7 @@ const RULER_LABEL_SPACING: f32 = 50.0;
 /// How close (screen points) the pointer must come to a guide to grab it.
 const GUIDE_GRAB: f32 = 4.0;
 /// Color of the guides: cyan, apart from the template element colors and the accent.
-const GUIDE_COLOR: Color32 = Color32::from_rgb(0, 180, 216);
+const GUIDE_COLOR: Color32 = crate::ui::tokens::GUIDE;
 
 /// Maps page mm to the screen: zoom and pan.
 #[derive(Clone, Copy, Debug)]

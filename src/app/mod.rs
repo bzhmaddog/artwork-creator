@@ -53,7 +53,7 @@ const MAX_PREVIEW_SIDE: u32 = 2048;
 /// Width of the preview in the Export window, in points.
 const EXPORT_PREVIEW_WIDTH: f32 = 360.0;
 /// Outline of the sheets over the export preview, apart from the template element colors.
-const TILE_COLOR: Color32 = Color32::from_rgb(220, 20, 60);
+const TILE_COLOR: Color32 = crate::ui::tokens::ACCENT;
 /// How much the zoom buttons and keys zoom in or out at a time.
 const ZOOM_STEP: f32 = 1.25;
 const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp", "gif"];

@@ -4,7 +4,7 @@
 use super::*;
 
 /// Gap between the rows of the property grids.
-pub(super) const PROP_ROW_GAP: f32 = 6.0;
+pub(super) const PROP_ROW_GAP: f32 = crate::ui::tokens::PROP_ROW_GAP;
 
 /// Labels on the left of the property grids: the label column is as wide as the longest,
 /// so the controls line up from one section to the next, in every language.
@@ -164,7 +164,7 @@ pub fn unit(ui: &mut Ui, unit: &str) -> Response {
 }
 
 /// How far a fill's settings are indented from the labels (see [`wide_row`]).
-const WIDE_ROW_INDENT: f32 = 8.0;
+const WIDE_ROW_INDENT: f32 = crate::ui::tokens::INDENT;
 
 /// Shows `add` across a whole row of a [`prop_grid`], from its label column, slightly
 /// indented, leaving the grid's columns as wide as they were: a fill's settings under
@@ -201,7 +201,7 @@ pub(super) fn prop_grid(ui: &Ui, id: &str) -> egui::Grid {
         .fold(0.0, f32::max);
     egui::Grid::new(id)
         .num_columns(2)
-        .spacing([8.0, PROP_ROW_GAP])
+        .spacing([crate::ui::tokens::COLUMN_GAP, PROP_ROW_GAP])
         .min_col_width(label_width.ceil())
 }
 
@@ -226,7 +226,7 @@ pub(super) fn style_toggle(ui: &mut Ui, on: bool, icon: StyleIcon, tip: &str) ->
     if on || r.hovered() || r.is_pointer_button_down_on() {
         p.rect(
             rect,
-            3.0,
+            crate::ui::tokens::RADIUS,
             visuals.weak_bg_fill,
             visuals.bg_stroke,
             StrokeKind::Inside,

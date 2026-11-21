@@ -16,7 +16,10 @@ pub(super) fn panel_grid(ui: &egui::Ui, id: &str) -> egui::Grid {
         .fold(0.0, f32::max);
     egui::Grid::new(id)
         .num_columns(2)
-        .spacing([8.0, 4.0])
+        .spacing([
+            crate::ui::tokens::COLUMN_GAP,
+            crate::ui::tokens::PANEL_ROW_GAP,
+        ])
         .min_col_width(width.ceil())
 }
 
@@ -35,7 +38,7 @@ pub fn set_interaction(ctx: &egui::Context) {
         s.interaction.selectable_labels = false;
         // Folding sections inside others (a fill's settings, an effect's) indent their
         // content less than egui's 18 px, so the narrow panels keep room for it.
-        s.spacing.indent = 8.0;
+        s.spacing.indent = crate::ui::tokens::INDENT;
     });
 }
 
@@ -66,16 +69,13 @@ pub(crate) fn notice(ctx: &egui::Context) -> Option<String> {
 }
 
 /// Room between a window's or dialog's border and what it holds, in points (egui's is 6).
-pub(super) const DIALOG_MARGIN: i8 = 14;
-
-/// Fill of a button that deletes or discards something, under white text, in both themes.
-const DANGER_COLOR: egui::Color32 = egui::Color32::from_rgb(200, 40, 40);
+pub(super) const DIALOG_MARGIN: i8 = crate::ui::tokens::DIALOG_MARGIN;
 
 /// A button that deletes or discards something: white text on red. Menu entries stay
 /// plain.
 pub(crate) fn danger_button(text: &str) -> egui::Button<'static> {
     egui::Button::new(egui::RichText::new(text.to_owned()).color(egui::Color32::WHITE))
-        .fill(DANGER_COLOR)
+        .fill(crate::ui::tokens::DANGER)
 }
 
 /// A menu entry with its command's shortcut, if it has one, at the right.

@@ -276,7 +276,7 @@ impl ArtworkApp {
                     painter.rect_stroke(
                         r,
                         0.0,
-                        egui::Stroke::new(1.5, TILE_COLOR),
+                        egui::Stroke::new(crate::ui::tokens::STROKE, TILE_COLOR),
                         egui::StrokeKind::Inside,
                     );
                 }

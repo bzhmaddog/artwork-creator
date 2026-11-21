@@ -182,7 +182,7 @@ pub(super) fn clip_mark(ui: &mut Ui) {
     let (rect, r) = ui.allocate_exact_size(vec2(ICON * 0.8, ICON), Sense::hover());
     r.on_hover_text(tr!("CLIPPED_TO_LAYER_BELOW"));
     let c = ui.visuals().widgets.inactive.fg_stroke.color;
-    let stroke = Stroke::new(1.5, c);
+    let stroke = Stroke::new(crate::ui::tokens::STROKE, c);
     let k = rect.center();
     let p = ui.painter();
     p.line_segment([k + vec2(-5.0, -5.0), k + vec2(1.0, -5.0)], stroke);
@@ -252,7 +252,7 @@ pub enum Tool {
     Align(Align),
 }
 
-pub(super) const TOOL: f32 = 24.0;
+pub(super) const TOOL: f32 = crate::ui::tokens::ICON_TOOL;
 
 /// A flat icon button of the layer toolbar; returns whether it was clicked.
 pub fn tool_button(ui: &mut Ui, tool: Tool, enabled: bool, tip: &str) -> bool {
@@ -291,7 +291,7 @@ pub fn flat_button(
     let visuals = ui.style().interact(&r);
     let p = ui.painter();
     if enabled && (r.hovered() || r.is_pointer_button_down_on()) {
-        p.rect_filled(rect, 3.0, visuals.weak_bg_fill);
+        p.rect_filled(rect, crate::ui::tokens::RADIUS, visuals.weak_bg_fill);
     }
     let c = if enabled {
         visuals.fg_stroke.color
@@ -335,11 +335,15 @@ pub fn icon_entry(
     let visuals = ui.visuals();
     let p = ui.painter();
     let fg = if selected {
-        p.rect_filled(rect, 3.0, visuals.selection.bg_fill);
+        p.rect_filled(rect, crate::ui::tokens::RADIUS, visuals.selection.bg_fill);
         visuals.selection.stroke.color
     } else {
         if r.hovered() {
-            p.rect_filled(rect, 3.0, visuals.widgets.hovered.weak_bg_fill);
+            p.rect_filled(
+                rect,
+                crate::ui::tokens::RADIUS,
+                visuals.widgets.hovered.weak_bg_fill,
+            );
         }
         visuals.text_color()
     };

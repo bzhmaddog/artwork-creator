@@ -143,12 +143,16 @@ fn formula_field<'a>(
                 } else {
                     fill
                 };
-                painter.rect_filled(fx_rect, 3.0, fill);
+                painter.rect_filled(fx_rect, crate::ui::tokens::RADIUS, fill);
                 ui.visuals().extreme_bg_color
             }
             None => {
                 if fx.hovered() {
-                    painter.rect_filled(fx_rect, 2.0, ui.visuals().widgets.hovered.weak_bg_fill);
+                    painter.rect_filled(
+                        fx_rect,
+                        crate::ui::tokens::RADIUS,
+                        ui.visuals().widgets.hovered.weak_bg_fill,
+                    );
                 }
                 ui.visuals().weak_text_color()
             }
@@ -430,8 +434,11 @@ pub fn link_button(
     let response = response.on_hover_text(hint);
     if ui.is_rect_visible(rect) {
         if response.hovered() {
-            ui.painter()
-                .rect_filled(rect, 3.0, ui.visuals().widgets.hovered.weak_bg_fill);
+            ui.painter().rect_filled(
+                rect,
+                crate::ui::tokens::RADIUS,
+                ui.visuals().widgets.hovered.weak_bg_fill,
+            );
         }
         let color = match link {
             Link::None => ui.visuals().weak_text_color(),
@@ -476,7 +483,12 @@ pub fn link_button(
 /// Paints a chain link in `rect`: two interlocked links, or, `broken`, two links apart
 /// with a crack between them.
 fn paint_link(painter: &egui::Painter, rect: egui::Rect, color: egui::Color32, broken: bool) {
-    paint_link_stroke(painter, rect, egui::Stroke::new(1.5, color), broken);
+    paint_link_stroke(
+        painter,
+        rect,
+        egui::Stroke::new(crate::ui::tokens::STROKE, color),
+        broken,
+    );
 }
 
 /// [`paint_link`] with `stroke`.
@@ -900,7 +912,7 @@ pub fn kind_icon(ui: &mut Ui, kind: Kind) -> Response {
     if ui.is_rect_visible(rect) {
         let painter = ui.painter();
         let color = ui.visuals().weak_text_color();
-        let stroke = egui::Stroke::new(1.5, color);
+        let stroke = egui::Stroke::new(crate::ui::tokens::STROKE, color);
         let r = rect.shrink(side * 0.2);
         match kind {
             Kind::Length => {

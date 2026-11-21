@@ -21,7 +21,7 @@ const LABEL_WIDTH: f32 = 220.0;
 /// Height of a command's row.
 const ROW: f32 = 28.0;
 /// Size of the icon buttons.
-const ICON: f32 = 24.0;
+const ICON: f32 = crate::ui::tokens::ICON_TOOL;
 /// Seconds the row of a command with a refused key stays highlighted, then fades out.
 const CONFLICT_HOLD: f64 = 2.0;
 const CONFLICT_FADE: f64 = 1.0;
@@ -935,7 +935,7 @@ impl Editor {
         // A key in conflict is outlined too.
         let outline = |b: egui::Button<'static>, hit: bool| {
             if hit {
-                b.stroke(egui::Stroke::new(1.5, warn))
+                b.stroke(egui::Stroke::new(crate::ui::tokens::STROKE, warn))
             } else {
                 b
             }

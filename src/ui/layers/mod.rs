@@ -42,11 +42,11 @@ use crate::ui::shortcuts::Command;
 use crate::ui::variables as variables_ui;
 
 /// Width of one nesting level in the layer list.
-const INDENT: f32 = 14.0;
+const INDENT: f32 = crate::ui::tokens::LAYER_INDENT;
 /// How near the line between two rows of the layer list Alt+click clips, in points.
 const CLIP_BAND: f32 = 4.0;
-const THUMB: f32 = 28.0;
-const ICON: f32 = 18.0;
+const THUMB: f32 = crate::ui::tokens::THUMB;
+const ICON: f32 = crate::ui::tokens::ICON_ROW;
 
 /// State of the layers panel that lasts across frames.
 #[derive(Default)]

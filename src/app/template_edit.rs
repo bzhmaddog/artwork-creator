@@ -205,7 +205,7 @@ impl ArtworkApp {
                 let accent = ui.visuals().selection.bg_fill;
                 egui::Frame::popup(ui.style())
                     .inner_margin(egui::Margin::same(10))
-                    .stroke(egui::Stroke::new(1.5, accent))
+                    .stroke(egui::Stroke::new(crate::ui::tokens::STROKE, accent))
                     .show(ui, |ui| {
                         ui.spacing_mut().button_padding = egui::vec2(16.0, 8.0);
                         end = ui

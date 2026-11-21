@@ -3,7 +3,7 @@
 use egui::{Sense, Ui, vec2};
 
 /// Its width and height, in points.
-const SIDE: f32 = 22.0;
+const SIDE: f32 = crate::ui::tokens::DIAL;
 
 /// Where a dial's 0° is, and which way its angle turns.
 #[derive(Clone, Copy, Debug, PartialEq)]

@@ -737,7 +737,7 @@ impl Layout {
                 painter.rect_stroke(
                     rect,
                     4.0,
-                    Stroke::new(1.5, accent),
+                    Stroke::new(crate::ui::tokens::STROKE, accent),
                     egui::StrokeKind::Inside,
                 );
             }
@@ -1036,7 +1036,7 @@ fn edge_zone(area: Rect, side: Side) -> Rect {
     }
 }
 
-const ICON: f32 = 20.0;
+const ICON: f32 = crate::ui::tokens::ICON_PANEL;
 
 /// A small flat button, its icon drawn by `paint` in the given color.
 fn icon_button(
@@ -1052,7 +1052,7 @@ fn icon_button(
 /// The panel's menu button: three lines.
 fn menu_button(ui: &mut Ui) -> Response {
     icon_button(ui, tr!("PANEL_MENU_HINT"), |p, r, c| {
-        let stroke = Stroke::new(1.5, c);
+        let stroke = Stroke::new(crate::ui::tokens::STROKE, c);
         for k in 0..3 {
             let y = r.top() + 1.0 + k as f32 * (r.height() - 2.0) / 2.0;
             p.hline(r.x_range(), y, stroke);
@@ -1063,7 +1063,7 @@ fn menu_button(ui: &mut Ui) -> Response {
 /// The button hiding a floating panel: a cross.
 fn close_button(ui: &mut Ui) -> Response {
     icon_button(ui, tr!("HIDE_PANEL"), |p, r, c| {
-        let stroke = Stroke::new(1.5, c);
+        let stroke = Stroke::new(crate::ui::tokens::STROKE, c);
         p.line_segment([r.left_top(), r.right_bottom()], stroke);
         p.line_segment([r.right_top(), r.left_bottom()], stroke);
     })

@@ -414,7 +414,7 @@ pub fn regenerate_button(ui: &mut Ui, inst: &mut EffectInstance) -> bool {
     let tip = tr!("REGENERATE_FILL_HINT");
     let r = layers::flat_button(ui, vec2(size, size), true, tip, |p, rect, color| {
         let (c, radius) = (rect.center(), size * 0.28);
-        let stroke = Stroke::new(1.5, color);
+        let stroke = Stroke::new(crate::ui::tokens::STROKE, color);
         // Most of a circle, open at the top right, with an arrowhead at its end.
         let at = |a: f32| c + radius * vec2(a.cos(), a.sin());
         let (start, end) = (-0.25 * std::f32::consts::PI, 1.45 * std::f32::consts::PI);
@@ -637,7 +637,13 @@ fn curve_ui(
                     )
                 };
                 let painter = ui.painter();
-                painter.rect(rect, 3.0, fill, stroke, egui::StrokeKind::Inside);
+                painter.rect(
+                    rect,
+                    crate::ui::tokens::RADIUS,
+                    fill,
+                    stroke,
+                    egui::StrokeKind::Inside,
+                );
                 let ink = if on {
                     visuals.selection.stroke.color
                 } else {
@@ -651,7 +657,10 @@ fn curve_ui(
                         b.left_top() + vec2(x * b.width(), y * b.height())
                     })
                     .collect();
-                painter.add(egui::Shape::line(points, Stroke::new(1.5, ink)));
+                painter.add(egui::Shape::line(
+                    points,
+                    Stroke::new(crate::ui::tokens::STROKE, ink),
+                ));
             }
         });
         let (rect, bg) = ui.allocate_exact_size(CURVE_SIZE, Sense::hover());
@@ -725,7 +734,7 @@ fn curve_ui(
             } else {
                 visuals.window_fill
             };
-            painter.circle(p, 5.0, fill, Stroke::new(1.5, accent));
+            painter.circle(p, 5.0, fill, Stroke::new(crate::ui::tokens::STROKE, accent));
         }
         bg.on_hover_text(tr!("FADE_CURVE_HINT"));
     });

@@ -55,6 +55,10 @@ hitbox
 
 (The v0.14.3 release notes from GitHub.)
 
+## License terms
+
+PolyForm Noncommercial License 1.0.0: free for non-commercial use. Making artwork, panels or controllers for sale needs the author's permission. https://github.com/bzhmaddog/artwork-creator/blob/main/LICENSE
+
 ## Common fields
 
 - Copyright and trademark info: Copyright 2026 bzhmaddog
@@ -63,4 +67,5 @@ hitbox
 - Website: https://bzhmaddog.github.io/artwork-creator/
 - Support contact: https://github.com/bzhmaddog/artwork-creator/issues
 - Developed by: bzhmaddog
+- Store logo: store-logo.png
 - Screenshot: docs/capture.png

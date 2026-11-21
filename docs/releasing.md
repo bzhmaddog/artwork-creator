@@ -64,7 +64,9 @@ version too. It asks before committing, and makes no tag and pushes nothing. See
 5. Publishing runs the **Pages** workflow, which puts the Windows installer at
    `https://bzhmaddog.github.io/artwork-creator/download/vX.Y.Z/artwork-creator-windows-setup.exe`:
    the link to give the Microsoft Store, which doesn't accept release asset links (they
-   redirect).
+   redirect). The Store listing texts are in `installer/store/` (one `.md` file per
+   language); after changing them, `make store-listing` writes the CSV to import in
+   Partner Center (Store listings > Import), with the images next to it.
 
 ## Building the packages without releasing
 

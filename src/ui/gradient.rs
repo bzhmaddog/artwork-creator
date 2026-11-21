@@ -713,6 +713,8 @@ mod tests {
         color: [u8; 4],
         link: Option<String>,
         gradient: Option<Gradient>,
+        /// A shape's fill, which can be generated: `Some`, holding its generator.
+        generator: Option<Option<EffectInstance>>,
     }
 
     impl Harness {
@@ -723,6 +725,7 @@ mod tests {
                 color: [255, 0, 0, 255],
                 link: None,
                 gradient,
+                generator: None,
             };
             h.frame(vec![]);
             h
@@ -738,13 +741,14 @@ mod tests {
             };
             let mut changed = false;
             let (color, link, gradient) = (&mut self.color, &mut self.link, &mut self.gradient);
+            let generator = &mut self.generator;
             let mut out = self.ctx.run_ui(input, |ui| {
                 let mut f = Fill {
                     color,
                     link,
                     gradient,
                     pattern: None,
-                    generator: None,
+                    generator: generator.as_mut(),
                     units_per_mm: 1.0,
                     alpha: true,
                     pick_pattern: false,
@@ -789,13 +793,14 @@ mod tests {
         fn bar(&mut self) -> (f32, f32, f32) {
             self.time += 0.1;
             let (color, link, gradient) = (&mut self.color, &mut self.link, &mut self.gradient);
+            let generator = &mut self.generator;
             let mut out = self.ctx.run_ui(egui::RawInput::default(), |ui| {
                 let mut f = Fill {
                     color,
                     link,
                     gradient,
                     pattern: None,
-                    generator: None,
+                    generator: generator.as_mut(),
                     units_per_mm: 1.0,
                     alpha: true,
                     pick_pattern: false,
@@ -816,6 +821,112 @@ mod tests {
             let (l, r) = (tips[0].x.min(tips[1].x), tips[0].x.max(tips[1].x));
             (l, r, tips[0].y + 3.0 - BAR / 2.0)
         }
+    }
+
+    /// Clicks the text `label` drawn last frame.
+    fn click_text(h: &mut Harness, label: &str) {
+        let (texts, _) = h.frame(vec![]);
+        let at = texts
+            .iter()
+            .find(|(t, _)| t == label)
+            .unwrap_or_else(|| panic!("no {label:?} in {texts:?}"))
+            .1
+            .center();
+        h.click(at, egui::PointerButton::Primary);
+    }
+
+    fn generator(h: &Harness) -> &EffectInstance {
+        h.generator.as_ref().unwrap().as_ref().unwrap()
+    }
+
+    #[test]
+    fn generated_fill_picks_a_generator_and_regenerates() {
+        let mut h = Harness::new(None);
+        h.generator = Some(None);
+        // Generated, in the kind menu: the first generator, with its settings below.
+        click_text(&mut h, "Solid");
+        click_text(&mut h, "Generated");
+        assert_eq!(generator(&h).effect, "builtin.noise");
+        let (texts, _) = h.frame(vec![]);
+        assert!(texts.iter().any(|(t, _)| t == "Grain"), "{texts:?}");
+
+        // Another one from the generator menu.
+        click_text(&mut h, "Noise");
+        click_text(&mut h, "Clouds");
+        assert_eq!(generator(&h).effect, "builtin.clouds");
+
+        // The circular arrow: a new variation each click, the slider gone.
+        let (texts, _) = h.frame(vec![]);
+        assert!(!texts.iter().any(|(t, _)| t == "Variation"), "{texts:?}");
+        let seed = |h: &Harness| generator(h).params.get("seed").cloned();
+        let arrow = {
+            h.time += 0.1;
+            let (color, link, gradient) = (&mut h.color, &mut h.link, &mut h.gradient);
+            let generator = &mut h.generator;
+            let mut out = h.ctx.run_ui(egui::RawInput::default(), |ui| {
+                let mut f = Fill {
+                    color,
+                    link,
+                    gradient,
+                    pattern: None,
+                    generator: generator.as_mut(),
+                    units_per_mm: 1.0,
+                    alpha: true,
+                    pick_pattern: false,
+                };
+                ui.horizontal(|ui| inline(ui, "t", &mut f));
+            });
+            out.textures_delta.clear();
+            out.shapes
+                .iter()
+                .find_map(|c| match &c.shape {
+                    egui::Shape::Path(p) if p.points.len() == 25 => {
+                        Some(Rect::from_points(&p.points).center())
+                    }
+                    _ => None,
+                })
+                .expect("the regenerate arrow")
+        };
+        let before = seed(&h);
+        assert!(h.click(arrow, egui::PointerButton::Primary));
+        let after = seed(&h);
+        assert_ne!(before, after);
+        assert!(h.click(arrow, egui::PointerButton::Primary));
+        assert_ne!(seed(&h), after);
+
+        // A generator without a variation has no arrow.
+        let checkerboard = registry().generator("builtin.checkerboard").unwrap();
+        h.generator = Some(Some(EffectInstance::generator(checkerboard)));
+        let mut inst = EffectInstance::generator(checkerboard);
+        let ctx = egui::Context::default();
+        let mut clicked = true;
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            clicked = crate::ui::effects::regenerate_button(ui, &mut inst);
+        });
+        out.textures_delta.clear();
+        assert!(!clicked && out.shapes.is_empty());
+    }
+
+    #[test]
+    fn a_missing_generator_is_named_so() {
+        let mut inst = EffectInstance::generator(registry().generators().next().unwrap());
+        inst.effect = "some.plugin.gone".into();
+        let ctx = egui::Context::default();
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            assert!(!crate::ui::effects::generator_menu(ui, 1, &mut inst));
+            assert!(!crate::ui::effects::generator_params(ui, 1, &mut inst));
+            assert!(!crate::ui::effects::regenerate_button(ui, &mut inst));
+        });
+        out.textures_delta.clear();
+        let texts: Vec<String> = out
+            .shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_owned()),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.iter().any(|t| t == "Missing generator"), "{texts:?}");
     }
 
     #[test]

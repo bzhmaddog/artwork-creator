@@ -28,6 +28,22 @@ fn section(ui: &mut Ui, title: &str) {
     ui.separator();
 }
 
+/// The theme's colors the widgets use, by name, as `docs/tokens.png` shows them.
+fn theme_colors(v: &egui::Visuals) -> [(&'static str, egui::Color32); 10] {
+    [
+        ("text", v.text_color()),
+        ("weak text", v.weak_text_color()),
+        ("panel", v.panel_fill),
+        ("field", v.extreme_bg_color),
+        ("widget", v.widgets.inactive.weak_bg_fill),
+        ("hover", v.widgets.hovered.weak_bg_fill),
+        ("selection", v.selection.bg_fill),
+        ("info / link", v.hyperlink_color),
+        ("warning", v.warn_fg_color),
+        ("error", v.error_fg_color),
+    ]
+}
+
 /// A filled square with a frame, `side` wide.
 fn sample(ui: &mut Ui, side: f32, fill: egui::Color32, radius: f32) {
     let (rect, _) = ui.allocate_exact_size(vec2(side, side), egui::Sense::hover());
@@ -80,7 +96,7 @@ fn ui_tokens() {
     crate::ui::preview::render(path, vec2(400.0, 1000.0), |ui| {
         section(ui, "Theme colors (egui Visuals)");
         block(ui, |ui| {
-            for (name, c) in tokens::theme_colors(ui.visuals()) {
+            for (name, c) in theme_colors(ui.visuals()) {
                 color_row(ui, name, c);
             }
         });

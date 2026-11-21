@@ -11,9 +11,14 @@
 #   make debug        debug builds for both
 #   make run          run the Linux debug build
 #   make run-windows  run the Windows debug build (from WSL)
+#   make dev-setup    install what the quality checks need (rustfmt, clippy, the Windows
+#                     target, llvm-tools and cargo-llvm-cov, rust-analyzer) and the hooks
 #   make test         run the test suite
-#   make hooks        run fmt, clippy and tests before each git commit
-#   make pre-commit   run those checks now: clippy for Linux and Windows, tests on Linux;
+#   make coverage     run the tests with coverage; fails when new code (since main) is
+#                     covered below MIN percent (80, the Sonar gate)
+#   make hooks        run fmt, clippy, tests and coverage before each git commit
+#   make pre-commit   run those checks now: clippy for Linux and Windows, tests and
+#                     coverage on Linux;
 #                     ARGS=--linux or ARGS=--windows checks one target only
 #   make plugins      build the example plugins for Linux and Windows into plugins/
 #   make linux-portable
@@ -73,7 +78,7 @@ TRIVY_CACHE   ?= $(HOME)/.cache/trivy
 VERSION_STEPS := $(foreach p,patch minor major,version-bump-$(p))
 
 .PHONY: all linux linux-portable windows debug debug-linux debug-windows run run-windows \
-        test check check-dependencies fmt clippy hooks pre-commit plugins dist version-check version-bump $(VERSION_STEPS) dist-linux dist-windows deb appimage windows-setup store-listing clean
+        test coverage dev-setup check check-dependencies fmt clippy hooks pre-commit plugins dist version-check version-bump $(VERSION_STEPS) dist-linux dist-windows deb appimage windows-setup store-listing clean
 
 all: linux windows
 
@@ -103,6 +108,20 @@ run-windows: debug-windows
 
 test:
 	$(CARGO) test --workspace
+
+# Coverage of new code, as the Sonar quality gate measures it (see scripts/coverage.sh).
+MIN ?= 80
+coverage:
+	sh scripts/coverage.sh $(MIN)
+
+# Everything the quality checks (make pre-commit) need. The Windows clippy check also
+# needs mingw-w64 (sudo apt install mingw-w64), which this only checks for.
+dev-setup: hooks
+	rustup component add rustfmt clippy llvm-tools-preview rust-analyzer
+	rustup target add $(WINDOWS)
+	$(CARGO) install cargo-llvm-cov --locked
+	@command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1 || \
+		echo "dev-setup: mingw-w64 is missing, needed for the Windows checks: sudo apt install mingw-w64"
 
 plugins:
 	$(CARGO) build --release --target $(LINUX) $(PLUGINS:%=-p %)

@@ -1,6 +1,6 @@
 //! The interface's design tokens: the colors, sizes, radii, spacing and strokes that
 //! widgets share, so they look alike. Colors that follow the theme come from egui's
-//! `Visuals` (see [`theme_colors`]); the fixed ones are here. `docs/tokens.png` shows
+//! `Visuals`; the fixed ones are here. `docs/tokens.png` shows
 //! them all (`cargo test ui_tokens -- --ignored` draws it again); `docs/widgets.png`,
 //! the widgets made with them.
 
@@ -27,23 +27,6 @@ pub fn tip(visuals: &Visuals) -> Color32 {
     } else {
         TIP_LIGHT
     }
-}
-
-/// The theme's colors the widgets use, by name, as `docs/tokens.png` shows them.
-#[cfg(test)]
-pub fn theme_colors(v: &Visuals) -> [(&'static str, Color32); 10] {
-    [
-        ("text", v.text_color()),
-        ("weak text", v.weak_text_color()),
-        ("panel", v.panel_fill),
-        ("field", v.extreme_bg_color),
-        ("widget", v.widgets.inactive.weak_bg_fill),
-        ("hover", v.widgets.hovered.weak_bg_fill),
-        ("selection", v.selection.bg_fill),
-        ("info / link", v.hyperlink_color),
-        ("warning", v.warn_fg_color),
-        ("error", v.error_fg_color),
-    ]
 }
 
 // Sizes, in points.

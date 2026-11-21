@@ -1151,3 +1151,21 @@ fn new_layers_go_into_a_group_only_when_the_group_is_selected() {
     // Nothing selected: at the top of the stack.
     assert_eq!(insertion_path(&mut d, None), [3]);
 }
+
+#[test]
+fn a_wide_row_spans_the_grid_from_its_label_column_indented() {
+    let ctx = egui::Context::default();
+    let (mut label_x, mut wide) = (0.0, egui::Rect::NOTHING);
+    let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+        super::properties::prop_grid(ui, "wide").show(ui, |ui| {
+            label_x = ui.label("Label").rect.left();
+            ui.label("value");
+            ui.end_row();
+            wide = super::properties::wide_row(ui, |ui| ui.label("settings").rect);
+            ui.label("Next");
+            ui.end_row();
+        });
+    });
+    out.textures_delta.clear();
+    assert_eq!(wide.left(), label_x + crate::ui::tokens::INDENT);
+}

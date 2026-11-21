@@ -91,25 +91,25 @@ its `Exec` line set to where the executable is.
 
 ## Development
 
-After cloning, install the git hooks once:
+After cloning, install the tools the quality checks need and the git hooks once:
 
 ```sh
 git clone https://github.com/bzhmaddog/artwork-creator.git
 cd artwork-creator
 
-# Install hooks
-make hooks
+# Install rustfmt, clippy, the Windows target, cargo-llvm-cov, rust-analyzer and the hooks
+make dev-setup
 ```
 
-For code completion and checks in an editor (VS Code's rust-analyzer extension and
-others), add the rust-analyzer component to the toolchain:
-
-```sh
-rustup component add rust-analyzer
-```
+rust-analyzer is there for code completion and checks in an editor (VS Code's
+rust-analyzer extension and others). The Windows checks also need mingw-w64
+(`sudo apt install mingw-w64`), which `make dev-setup` only checks for.
 
 Before each commit, the hook runs the CI checks: `cargo fmt --check`, clippy for Linux and
-Windows (some lints only fire on one of them), and the tests on Linux. The Windows check
+Windows (some lints only fire on one of them), and the tests on Linux under coverage. It
+fails when the lines changed since `main` are covered below 80%, as the SonarQube Cloud
+quality gate does, and lists the files with uncovered lines; `make coverage` runs that
+check alone (`MIN=...` sets another threshold). The Windows check
 is skipped if the `x86_64-pc-windows-gnu` target is not installed. Run them by hand with
 `make pre-commit`, or for one target with `make pre-commit ARGS=--linux` or
 `ARGS=--windows`.

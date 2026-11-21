@@ -56,8 +56,8 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh api --paginate --slurp "repos/${{ github.repository }}/releases" | jq 'add // []' > "$RUNNER_TEMP/releases.json"
-          python3 -I scripts/download-page.py "$RUNNER_TEMP/releases.json" pages/download.html _site/download.html
+          gh api --paginate --slurp "repos/${{ github.repository }}/releases" | jq 'add // []' \
+            | python3 -I scripts/download-page.py > _site/download.html
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site

@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
 """Fills in the download page (pages/download.html) from the project's GitHub releases.
 
-Usage: download-page.py RELEASES_JSON TEMPLATE OUTPUT
+Usage: download-page.py < RELEASES_JSON > download.html
 
-RELEASES_JSON is the GitHub API's list of releases (gh api --paginate
-repos/OWNER/REPO/releases, or curl .../releases?per_page=100). The newest published
+Reads the GitHub API's list of releases on stdin (gh api --paginate --slurp
+repos/OWNER/REPO/releases | jq 'add', or curl .../releases?per_page=100) and writes the
+page to stdout. The template is the repository's pages/download.html. The newest published
 release goes in the template's <!-- LATEST --> marker, one card per platform; the others
 in <!-- OLDER -->, one row each. Drafts are left out, as are files the page doesn't know.
 Run by .github/workflows/pages.yml.
@@ -13,6 +14,9 @@ Run by .github/workflows/pages.yml.
 import json
 import sys
 from html import escape
+from pathlib import Path
+
+TEMPLATE = Path(__file__).resolve().parent.parent / "pages" / "download.html"
 
 # Each known file: (platform, label, how to use it), by the end of its name. The first
 # of a platform is its main download.
@@ -99,19 +103,15 @@ def older_html(releases):
 
 
 def main():
-    releases_json, template, output = sys.argv[1:4]
-    with open(releases_json, encoding="utf-8") as f:
-        releases = [r for r in json.load(f) if not r.get("draft") and files(r)]
+    releases = [r for r in json.load(sys.stdin) if not r.get("draft") and files(r)]
     releases.sort(key=lambda r: r.get("published_at") or "", reverse=True)
-    with open(template, encoding="utf-8") as f:
-        page = f.read()
+    page = TEMPLATE.read_text(encoding="utf-8")
     if releases:
         latest = latest_html(releases[0])
     else:
         latest = '<p class="muted">No release yet.</p>'
     page = page.replace("<!-- LATEST -->", latest).replace("<!-- OLDER -->", older_html(releases[1:]))
-    with open(output, "w", encoding="utf-8") as f:
-        f.write(page)
+    sys.stdout.write(page)
 
 
 if __name__ == "__main__":

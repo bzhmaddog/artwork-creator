@@ -182,7 +182,7 @@ pub(super) fn clip_mark(ui: &mut Ui) {
     let (rect, r) = ui.allocate_exact_size(vec2(ICON * 0.8, ICON), Sense::hover());
     r.on_hover_text(tr!("CLIPPED_TO_LAYER_BELOW"));
     let c = ui.visuals().widgets.inactive.fg_stroke.color;
-    let stroke = Stroke::new(1.5, c);
+    let stroke = Stroke::new(crate::ui::tokens::STROKE, c);
     let k = rect.center();
     let p = ui.painter();
     p.line_segment([k + vec2(-5.0, -5.0), k + vec2(1.0, -5.0)], stroke);
@@ -252,7 +252,7 @@ pub enum Tool {
     Align(Align),
 }
 
-pub(super) const TOOL: f32 = 24.0;
+pub(super) const TOOL: f32 = crate::ui::tokens::ICON_TOOL;
 
 /// A flat icon button of the layer toolbar; returns whether it was clicked.
 pub fn tool_button(ui: &mut Ui, tool: Tool, enabled: bool, tip: &str) -> bool {
@@ -262,12 +262,28 @@ pub fn tool_button(ui: &mut Ui, tool: Tool, enabled: bool, tip: &str) -> bool {
 
 /// A flat icon button of the layer toolbar, e.g. to open a menu from it.
 pub fn tool_icon(ui: &mut Ui, tool: Tool, enabled: bool, tip: &str) -> Response {
+    let back = ui.visuals().panel_fill;
+    flat_button(ui, vec2(TOOL, TOOL), enabled, tip, |p, rect, c| {
+        draw_tool(p, rect, tool, c, back);
+    })
+}
+
+/// A flat button of `size`, its icon drawn by `paint` in the color to use: nothing
+/// behind it until hovered or pressed, faded when not `enabled` (then it can't be
+/// clicked), `tip` as its tooltip. The app's icon buttons are all made with it.
+pub fn flat_button(
+    ui: &mut Ui,
+    size: egui::Vec2,
+    enabled: bool,
+    tip: &str,
+    paint: impl FnOnce(&egui::Painter, Rect, Color32),
+) -> Response {
     let sense = if enabled {
         Sense::click()
     } else {
         Sense::hover()
     };
-    let (rect, r) = ui.allocate_exact_size(vec2(TOOL, TOOL), sense);
+    let (rect, r) = ui.allocate_exact_size(size, sense);
     let r = r.on_hover_text(tip);
     if !ui.is_rect_visible(rect) {
         return r;
@@ -275,7 +291,7 @@ pub fn tool_icon(ui: &mut Ui, tool: Tool, enabled: bool, tip: &str) -> Response 
     let visuals = ui.style().interact(&r);
     let p = ui.painter();
     if enabled && (r.hovered() || r.is_pointer_button_down_on()) {
-        p.rect_filled(rect, 3.0, visuals.weak_bg_fill);
+        p.rect_filled(rect, crate::ui::tokens::RADIUS, visuals.weak_bg_fill);
     }
     let c = if enabled {
         visuals.fg_stroke.color
@@ -287,7 +303,7 @@ pub fn tool_icon(ui: &mut Ui, tool: Tool, enabled: bool, tip: &str) -> Response 
             .color
             .gamma_multiply(0.4)
     };
-    draw_tool(p, rect, tool, c, ui.visuals().panel_fill);
+    paint(p, rect, c);
     r
 }
 
@@ -319,11 +335,15 @@ pub fn icon_entry(
     let visuals = ui.visuals();
     let p = ui.painter();
     let fg = if selected {
-        p.rect_filled(rect, 3.0, visuals.selection.bg_fill);
+        p.rect_filled(rect, crate::ui::tokens::RADIUS, visuals.selection.bg_fill);
         visuals.selection.stroke.color
     } else {
         if r.hovered() {
-            p.rect_filled(rect, 3.0, visuals.widgets.hovered.weak_bg_fill);
+            p.rect_filled(
+                rect,
+                crate::ui::tokens::RADIUS,
+                visuals.widgets.hovered.weak_bg_fill,
+            );
         }
         visuals.text_color()
     };

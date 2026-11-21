@@ -25,8 +25,8 @@ layers panel on the right](docs/capture.png)
 
 - Layers and groups of images, texts (straight or along a path), vector shapes, imported
   SVG paths and canvases to paint in, with clipping masks, blend modes and opacity.
-- Fills of one color, linear or radial gradients, or image patterns; a stack of effects
-  per layer, extended by plugins.
+- Fills of one color, linear or radial gradients, image patterns, or generated (noise,
+  clouds, checkerboard, stripes); a stack of effects per layer; both extended by plugins.
 - Move, scale, rotate, distort and tilt in 3D on the canvas, with snapping to the
   template's holes, the page, the outline and guides.
 - Variables and formulas to link sizes, positions, colors and texts.
@@ -35,7 +35,7 @@ layers panel on the right](docs/capture.png)
   and tiling over several sheets.
 - Autosave and crash recovery, configurable shortcuts, movable panels, English and French.
 
-Every feature is described in detail in [docs/SPECS.md](docs/SPECS.md).
+Every feature is described in detail in [docs/specs.md](docs/specs.md).
 
 ## Building
 
@@ -91,18 +91,25 @@ its `Exec` line set to where the executable is.
 
 ## Development
 
-After cloning, install the git hooks once:
+After cloning, install the tools the quality checks need and the git hooks once:
 
 ```sh
 git clone https://github.com/bzhmaddog/artwork-creator.git
 cd artwork-creator
 
-# Install hooks
-make hooks
+# Install rustfmt, clippy, the Windows target, cargo-llvm-cov, rust-analyzer and the hooks
+make dev-setup
 ```
 
+rust-analyzer is there for code completion and checks in an editor (VS Code's
+rust-analyzer extension and others). The Windows checks also need mingw-w64
+(`sudo apt install mingw-w64`), which `make dev-setup` only checks for.
+
 Before each commit, the hook runs the CI checks: `cargo fmt --check`, clippy for Linux and
-Windows (some lints only fire on one of them), and the tests on Linux. The Windows check
+Windows (some lints only fire on one of them), and the tests on Linux under coverage. It
+fails when the lines changed since `main` are covered below 80%, as the SonarQube Cloud
+quality gate does, and lists the files with uncovered lines; `make coverage` runs that
+check alone (`MIN=...` sets another threshold). The Windows check
 is skipped if the `x86_64-pc-windows-gnu` target is not installed. Run them by hand with
 `make pre-commit`, or for one target with `make pre-commit ARGS=--linux` or
 `ARGS=--windows`.
@@ -118,10 +125,10 @@ purpose rather than following `latest`. Its vulnerability database is cached in
 
 When adding a tool or feature, give it the same treatment as its siblings. For example,
 every way of adding a layer has a keyboard shortcut, shown in its menu entry or tooltip
-and listed in the Shortcuts table of [docs/SPECS.md](docs/SPECS.md#keyboard-shortcuts); every text
+and listed in the Shortcuts table of [docs/specs.md](docs/specs.md#keyboard-shortcuts); every text
 has a translation key, with its text in `locales/en-US.json` and `locales/fr-FR.json` (and
 `locales/en-GB.json` when the British spelling differs); every feature is described in
-[docs/SPECS.md](docs/SPECS.md), in the section it belongs to. Before finishing, compare the new feature with the closest
+[docs/specs.md](docs/specs.md), in the section it belongs to. Before finishing, compare the new feature with the closest
 existing one and fill in what it lacks. A number field's unit goes after the field, not inside it
 (`ui::layers::unit`); a pair of fields on one row (x and y, width and height) shares one. A
 dialog's buttons sit at the right of its bottom row, the main one rightmost and Cancel on
@@ -131,7 +138,9 @@ a tip, a warning) is a callout (`callout::callout`, or `callout_small` in tight 
 of the tone that fits: Info, Tip or Warning; data shown for information (sizes, counts,
 paths) stays plain weak text. `CALLOUT_PREVIEW=out.png cargo test callout_preview --
 --ignored` draws them in both themes, to look at without starting the app. Any piece of the
-interface can be drawn that way from a test, with `preview::render`.
+interface can be drawn that way from a test, with `preview::render`. These and the other
+look-and-layout rules are gathered in [docs/ui-style.md](docs/ui-style.md); a change that
+adds or changes one updates it.
 
 Write code, comments, docs and texts in U.S. English (color, center, gray, canceled);
 British spellings belong in `locales/en-GB.json` only. Name translation keys after what
@@ -140,33 +149,36 @@ the text is for, in upper snake case: `ADD_TEXT_LAYER`, `EXPORT_CANCELED`.
 ### Releasing
 
 `make version-check` suggests the next version, `make version-bump-patch` (or -minor,
--major, `V=X.Y.Z`) sets it, to merge through a pull request, and pushing a `vX.Y.Z` tag of
+-major, `APP=X.Y.Z`) sets it, to merge through a pull request, and pushing a `vX.Y.Z` tag of
 the merged `main`, made by hand, makes GitHub Actions build the packages into a draft
 release to publish by hand. Don't create the release on GitHub: see
 [Versioning and releasing](doc/releasing.md) for the steps and why.
 
 ## Plugins
 
-Effect plugins are shared libraries (`.dll` on Windows, `.so` on Linux) loaded at startup
-from a `plugins` folder; see "Plugins" in [docs/SPECS.md](docs/SPECS.md#plugins) for how the app finds
+Plugins are shared libraries (`.dll` on Windows, `.so` on Linux) adding effects and
+generators (a shape's generated fill), loaded at startup from a `plugins` folder; see "Plugins" in [docs/specs.md](docs/specs.md#plugins) for how the app finds
 and uses them.
 
 ### Writing a plugin
 
 In Rust, use the [`artwork-plugin-sdk`](plugin-sdk) crate: implement its `Effect` trait,
-which works on straight RGBA pixels and describes its parameters so the app builds their
-controls, and export it with `export_plugin!`. The crate must be a `cdylib`. See
+which works on straight RGBA pixels, or its `Generator` trait, which draws a shape's
+fill given its pixels per mm; both describe their parameters so the app builds their
+controls. Export them with `export_plugin!`. The crate must be a `cdylib`. See
 [`plugin-examples/halftone`](plugin-examples/halftone) for a complete example, built by
 `make plugins`.
 
 Other languages can implement the C interface described in
 [`plugin-sdk/include/artwork_plugin.h`](plugin-sdk/include/artwork_plugin.h): one
-exported function, `artwork_plugin_entry`, returning a table of effects whose parameters
-and values are passed as JSON.
+exported function, `artwork_plugin_entry`, returning a table of effects and generators
+whose parameters and values are passed as JSON. The app still loads plugins made for
+version 1 of this interface, which had effects only.
 
-Effect ids are saved in projects, so keep them stable and prefix them with something
-unique to your plugin (`builtin.` is reserved). Effects may run on several threads at
-once.
+Effect and generator ids are saved in projects, so keep them stable and prefix them with
+something unique to your plugin (`builtin.` is reserved). Both may run on several threads
+at once. A generator must draw the same picture at any resolution: it is drawn smaller on
+screen than in the export.
 
 ## Translations
 
@@ -185,8 +197,8 @@ English of every key and is used for keys missing from another table. `locales/f
 must have every key. `locales/en-GB.json` only holds the texts spelled differently in
 British English (colour, centre, grey, cancelled...). The tests check that every key of
 the code is in en-US and fr-FR, that no table has leftovers, that `{placeholders}` match,
-and that texts with a U.S. spelling have their en-GB entry. Effects from plugins show
-their own names.
+and that texts with a U.S. spelling have their en-GB entry. Effects and generators from
+plugins show their own names.
 
 To add a language: add a `Language` variant and its table in `src/i18n.rs`, and a
 `locales/<code>.json` file.

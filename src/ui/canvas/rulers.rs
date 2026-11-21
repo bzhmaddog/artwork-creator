@@ -257,7 +257,10 @@ pub(super) fn guide_dialog(
         dialog_button_row(ui, |ui| {
             let ok = ui.button(tr!("OK")).clicked();
             let cancel = ui.button(tr!("CANCEL")).clicked();
-            let delete = at_left_edge(ui, |ui| ui.button(tr!("DELETE_GUIDE")).clicked());
+            let delete = at_left_edge(ui, |ui| {
+                ui.add(crate::app::danger_button(tr!("DELETE_GUIDE")))
+                    .clicked()
+            });
             (ok, cancel, delete)
         })
     });

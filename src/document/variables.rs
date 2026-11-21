@@ -733,7 +733,7 @@ pub fn broken_links(layer: &Layer, vars: &[Variable]) -> Vec<String> {
             .any(|v| v.name == name && v.value.kind() == kind)
     };
     let colors = layer.color_links.values();
-    let effects = layer.effects.iter().flat_map(|fx| fx.links.values());
+    let effects = layer.param_sets().flat_map(|fx| fx.links.values());
     let gradients = layer.gradients();
     let stops = gradients
         .iter()

@@ -27,6 +27,7 @@ use crate::document::text;
 use crate::document::{Affine, Document, Layer, P2};
 use crate::i18n::{tr_noop, translate};
 use crate::render::Outlines;
+use crate::render::effects::EffectInstance;
 
 /// Shape units per mm: a shape layer's `size_px` and its effects are measured in these.
 /// Coarse enough that the effects' pixel sizes, made for images, span useful lengths
@@ -291,6 +292,11 @@ pub struct Shape {
     /// Resizing the shape stretches the strokes painted in it; otherwise they stay where
     /// they are on the page, as when its points are moved.
     pub stretch_paint: bool,
+    /// Fills it instead of `fill_color` and `fill_gradient`, when set and there is no
+    /// `fill_pattern`: a generator's id (in `effect`) and settings (see
+    /// `render::effects::Generator`), drawn over the layer's box.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill_generator: Option<EffectInstance>,
 }
 
 impl Default for Shape {
@@ -347,6 +353,7 @@ impl Shape {
             canvas: false,
             strokes: Vec::new(),
             stretch_paint: true,
+            fill_generator: None,
         }
     }
 
@@ -838,6 +845,9 @@ pub struct ShapeState {
     /// The resize going on does the other way than `Shape::stretch_paint` says (Ctrl+Alt
     /// on a handle); cleared once it settles.
     flip_paint: bool,
+    /// What the fill's generator made, premultiplied, over the layer's box, and what it
+    /// was made from (see `update_generated`).
+    generated: Option<(u64, Option<std::sync::Arc<Pixmap>>)>,
 }
 
 /// A new shape layer of `kind` at its default size, centered on `center`.
@@ -1575,13 +1585,74 @@ fn lay_out_box(layer: &mut Layer, settle: bool) {
     }
 }
 
+/// The pixel size of the layer drawn at `px_per_unit` pixels per layer unit.
+fn pixel_size(layer: &Layer, px_per_unit: f32) -> [f32; 2] {
+    layer
+        .size_px
+        .map(|v| (v.max(1) as f32 * px_per_unit).round().max(1.0))
+}
+
+/// The generator filling the layer's shape, if it shows.
+fn generating(layer: &Layer) -> Option<&EffectInstance> {
+    let shape = layer
+        .shape
+        .as_ref()
+        .filter(|s| s.filled() && s.fill_pattern.is_none())?;
+    shape.fill_generator.as_ref().filter(|g| g.enabled)
+}
+
+/// Makes what the fill's generator draws over the layer's box at `px_per_unit` pixels
+/// per layer unit, unless it was already made from the same settings at that size.
+fn update_generated(layer: &mut Layer, px_per_unit: f32) {
+    let Some(inst) = generating(layer) else {
+        layer.shape_state.generated = None;
+        return;
+    };
+    let [w, h] = pixel_size(layer, px_per_unit);
+    let key = hash_of(&(inst, w.to_bits(), h.to_bits()));
+    if layer
+        .shape_state
+        .generated
+        .as_ref()
+        .is_some_and(|g| g.0 == key)
+    {
+        return;
+    }
+    let px_per_mm = UNITS_PER_MM * w / layer.size_px[0].max(1) as f32;
+    let made = crate::render::effects::generate(inst, w as u32, h as u32, px_per_mm);
+    layer.shape_state.generated = Some((key, made.map(std::sync::Arc::new)));
+}
+
+/// The layer's shape as filled shapes (see `Shape::coats`), its fill drawn with what its
+/// generator made, if it has one.
+fn layer_coats(layer: &Layer) -> Vec<(Path, Ink, bool, FillRule)> {
+    let Some(shape) = layer.shape.as_ref() else {
+        return Vec::new();
+    };
+    let mut coats = shape.coats();
+    if generating(layer).is_some()
+        && let Some((_, Some(tile))) = &layer.shape_state.generated
+        && let Some(o) = layer.shape_state.origin
+        && let Some(fill) = coats.first_mut()
+    {
+        // The tile covers the layer's box, in the shape's mm.
+        let [sw, sh] = layer.size_px.map(|v| v.max(1) as f32 / UNITS_PER_MM);
+        let transform = Transform::from_scale(sw / tile.width() as f32, sh / tile.height() as f32)
+            .post_translate(o[0], o[1]);
+        fill.1 = Ink::Pattern {
+            tile: tile.clone(),
+            transform,
+        };
+    }
+    coats
+}
+
 /// Draws the layer's shape at `px_per_unit` pixels per layer unit.
 fn draw(layer: &Layer, px_per_unit: f32) -> Option<Pixmap> {
     let shape = layer.shape.as_ref()?;
     let o = layer.shape_state.origin?;
     let [sw, sh] = layer.size_px.map(|v| v.max(1) as f32);
-    let w = (sw * px_per_unit).round().max(1.0);
-    let h = (sh * px_per_unit).round().max(1.0);
+    let [w, h] = pixel_size(layer, px_per_unit);
     let mut pixmap = Pixmap::new(w as u32, h as u32)?;
     // Exactly the layer's box, even where the pixel size was rounded.
     let ts = Transform::from_translate(-o[0], -o[1])
@@ -1593,7 +1664,7 @@ fn draw(layer: &Layer, px_per_unit: f32) -> Option<Pixmap> {
         None => ts,
     };
     let mut clip = None;
-    for (path, ink, clipped, rule) in shape.coats() {
+    for (path, ink, clipped, rule) in layer_coats(layer) {
         if clipped && clip.is_none() {
             let mut mask = Mask::new(pixmap.width(), pixmap.height())?;
             if let Some(outline) = shape.path() {
@@ -1614,8 +1685,7 @@ pub fn outlines(layer: &Layer) -> Option<Outlines> {
     let o = layer.shape_state.origin?;
     let ts = Transform::from_translate(-o[0], -o[1]).post_scale(UNITS_PER_MM, UNITS_PER_MM);
     // The paths, and the box a gradient spans, from the shape's mm to layer units.
-    let coats: Vec<_> = shape
-        .coats()
+    let coats: Vec<_> = layer_coats(layer)
         .into_iter()
         .filter_map(|(path, ink, clipped, rule)| {
             Some((path.transform(ts)?, ink.transformed(ts)?, clipped, rule))
@@ -1664,6 +1734,7 @@ pub fn sync(ctx: &egui::Context, doc: &mut Document, settle: bool) -> bool {
         }
         layout(layer, settle);
         let ppu = text::screen_ppu(layer, layer.size_px, max_side);
+        update_generated(layer, ppu);
         let key = key(layer, ppu);
         if layer.shape_state.key == key && layer.pixmap.is_some() {
             return;
@@ -1687,6 +1758,7 @@ pub fn prepare_export(doc: &mut Document, dpi: f32) {
         }
         layout(layer, true);
         let ppu = text::px_per_unit(layer, layer.size_px, px_per_mm, text::EXPORT_SIDE);
+        update_generated(layer, ppu);
         if let Some(pixmap) = draw(layer, ppu) {
             layer.pixmap = Some(std::sync::Arc::new(pixmap));
         }
@@ -2051,6 +2123,36 @@ mod tests {
         assert!(!json.contains("points"), "only for lines and polygons");
         let back: Layer = serde_json::from_str(&json).unwrap();
         assert_eq!(back.shape, l.shape);
+    }
+
+    #[test]
+    fn a_generated_fill_fills_the_outline() {
+        let mut l = layer(ShapeKind::Ellipse);
+        let g = crate::render::effects::registry()
+            .generator("builtin.stripes")
+            .unwrap();
+        let s = l.shape.as_mut().unwrap();
+        s.stroke = false;
+        s.fill_generator = Some(EffectInstance::generator(g));
+        let alpha_at = |l: &mut Layer, fx: f32, fy: f32| {
+            layout(l, true);
+            update_generated(l, 1.0);
+            let pm = draw(l, 1.0).unwrap();
+            let (x, y) = (
+                (pm.width() as f32 * fx) as u32,
+                (pm.height() as f32 * fy) as u32,
+            );
+            pm.pixel(x, y).unwrap().alpha()
+        };
+        // Inside the ellipse, not in the box's corner.
+        assert_eq!(alpha_at(&mut l, 0.5, 0.5), 255);
+        assert_eq!(alpha_at(&mut l, 0.02, 0.02), 0);
+        // In vector output too, as an image over the outline.
+        let o = outlines(&l).unwrap();
+        assert!(o.fills.iter().any(|f| matches!(f.1, Ink::Pattern { .. })));
+        // Fill off: nothing.
+        l.shape.as_mut().unwrap().fill = false;
+        assert_eq!(alpha_at(&mut l, 0.5, 0.5), 0);
     }
 
     #[test]

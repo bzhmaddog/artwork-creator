@@ -1,5 +1,5 @@
 #!/bin/sh
-# Runs the same checks as the Quality workflow before each commit.
+# Runs the same checks as the Quality and Sonar workflows before each commit.
 # Install with `make hooks`; skip once with `git commit --no-verify`.
 # Run by hand with `make pre-commit`.
 #
@@ -52,6 +52,8 @@ if [ $windows = 1 ]; then
 fi
 
 if [ $linux = 1 ]; then
-    echo "pre-commit: cargo test"
-    cargo test --workspace --locked -q
+    # The tests, run under coverage: fails if new code is covered below the
+    # SonarQube Cloud gate (80%).
+    echo "pre-commit: cargo test with coverage"
+    sh scripts/coverage.sh
 fi

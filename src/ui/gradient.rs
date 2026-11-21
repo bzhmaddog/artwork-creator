@@ -1,9 +1,11 @@
-//! Editing a fill that can be one color, a gradient or a pattern: a shape's fill and
-//! stroke, a text's color, the page background (no pattern for a stroke).
+//! Editing a fill that can be one color, a gradient, a pattern or generated: a shape's
+//! fill and stroke, a text's color, the page background (no pattern for a stroke, and
+//! only a shape's fill is generated).
 //!
 //! [`inline`] goes where the color button was: a Solid / Linear / Radial / Pattern
 //! switch, then the color button, or a swatch of the gradient. [`rows`] goes under it
-//! for a pattern: its image, tile width, turn and offset; for a gradient: its angle, or
+//! for a pattern: its image, tile width, turn and offset; for a generated fill: the
+//! generator's settings; for a gradient: its angle, or
 //! its center and radius, then the bar of its color stops. A click on the
 //! bar adds a stop there, a stop is dragged along it, and right-clicked to remove it; the
 //! stop picked last shows its color button (linked to color variables like any color),
@@ -16,6 +18,7 @@ use egui::{
 use crate::document::gradient::{Gradient, GradientKind, MAX_STOPS, Stop};
 use crate::document::pattern::Pattern;
 use crate::i18n::tr;
+use crate::render::effects::{EffectInstance, registry};
 
 /// A color, or a gradient or a pattern in its place, with the color's variable link.
 pub struct Fill<'a> {
@@ -25,6 +28,9 @@ pub struct Fill<'a> {
     pub gradient: &'a mut Option<Gradient>,
     /// The pattern in place of both, for fills that can have one.
     pub pattern: Option<&'a mut Option<Pattern>>,
+    /// The generator in place of the color and gradient, for fills that can have one;
+    /// the pattern comes first.
+    pub generator: Option<&'a mut Option<EffectInstance>>,
     /// Pattern sizes are in the fill's units: mm times this.
     pub units_per_mm: f32,
     /// Colors may be see-through; the page background may not.
@@ -35,9 +41,18 @@ pub struct Fill<'a> {
 }
 
 impl Fill<'_> {
-    /// It has settings for [`rows`]: a gradient or a pattern.
+    /// It has settings for [`rows`]: a gradient, a pattern or a generator.
     pub fn has_rows(&self) -> bool {
-        self.gradient.is_some() || self.pattern.as_ref().is_some_and(|p| p.is_some())
+        self.gradient.is_some() || self.patterned() || self.generated()
+    }
+
+    fn patterned(&self) -> bool {
+        self.pattern.as_ref().is_some_and(|p| p.is_some())
+    }
+
+    /// Generated, with no pattern over it.
+    fn generated(&self) -> bool {
+        !self.patterned() && self.generator.as_ref().is_some_and(|g| g.is_some())
     }
 }
 
@@ -47,6 +62,7 @@ enum Kind {
     Solid,
     Gradient(GradientKind),
     Pattern,
+    Generated,
 }
 
 /// A pattern's settings: its image (a click chooses another), the tile's width, turn
@@ -143,17 +159,20 @@ const NOTCH: f32 = 5.0;
 pub fn inline(ui: &mut Ui, ui_key: impl std::hash::Hash + std::fmt::Debug, f: &mut Fill) -> bool {
     let id = ui.make_persistent_id(("fill", ui_key));
     let mut changed = false;
-    let patterned = f.pattern.as_ref().is_some_and(|p| p.is_some());
-    let kind = match (patterned, &f.gradient) {
-        (true, _) => Kind::Pattern,
-        (false, Some(g)) => Kind::Gradient(g.kind),
-        (false, None) => Kind::Solid,
+    let patterned = f.patterned();
+    let generated = f.generated();
+    let kind = match (patterned, generated, &f.gradient) {
+        (true, _, _) => Kind::Pattern,
+        (_, true, _) => Kind::Generated,
+        (_, _, Some(g)) => Kind::Gradient(g.kind),
+        (_, _, None) => Kind::Solid,
     };
     let name = |k: Kind| match k {
         Kind::Solid => tr!("FILL_SOLID"),
         Kind::Gradient(GradientKind::Linear) => tr!("FILL_LINEAR_GRADIENT"),
         Kind::Gradient(GradientKind::Radial) => tr!("FILL_RADIAL_GRADIENT"),
         Kind::Pattern => tr!("FILL_PATTERN"),
+        Kind::Generated => tr!("FILL_GENERATED"),
     };
     let mut kinds = vec![
         Kind::Solid,
@@ -162,6 +181,9 @@ pub fn inline(ui: &mut Ui, ui_key: impl std::hash::Hash + std::fmt::Debug, f: &m
     ];
     if f.pattern.is_some() {
         kinds.push(Kind::Pattern);
+    }
+    if f.generator.is_some() {
+        kinds.push(Kind::Generated);
     }
     let mut picked = kind;
     ComboBox::from_id_salt(id.with("kind"))
@@ -178,6 +200,18 @@ pub fn inline(ui: &mut Ui, ui_key: impl std::hash::Hash + std::fmt::Debug, f: &m
         match picked {
             // Once its image is chosen.
             Kind::Pattern => f.pick_pattern = true,
+            Kind::Generated => {
+                // The generator it had under a pattern, or the first one.
+                if let Some(g) = f.generator.as_deref_mut()
+                    && g.is_none()
+                {
+                    *g = registry()
+                        .generators()
+                        .next()
+                        .map(EffectInstance::generator);
+                }
+                changed = true;
+            }
             Kind::Solid => {
                 changed = true;
                 *f.gradient = None;
@@ -198,8 +232,20 @@ pub fn inline(ui: &mut Ui, ui_key: impl std::hash::Hash + std::fmt::Debug, f: &m
         {
             *p = None;
         }
+        if !matches!(picked, Kind::Pattern | Kind::Generated)
+            && let Some(g) = f.generator.as_deref_mut()
+        {
+            *g = None;
+        }
     }
     if patterned && picked == Kind::Pattern {
+        return changed;
+    }
+    if picked == Kind::Generated {
+        if let Some(Some(g)) = f.generator.as_deref_mut() {
+            changed |= crate::ui::effects::generator_menu(ui, id.value(), g);
+            changed |= crate::ui::effects::regenerate_button(ui, g);
+        }
         return changed;
     }
     match f.gradient {
@@ -227,11 +273,35 @@ pub fn inline(ui: &mut Ui, ui_key: impl std::hash::Hash + std::fmt::Debug, f: &m
 /// A gradient's settings, under [`inline`]; nothing for one color. Returns whether
 /// anything changed.
 pub fn rows(ui: &mut Ui, ui_key: impl std::hash::Hash + std::fmt::Debug, f: &mut Fill) -> bool {
+    // Under a header that folds them away, open at first.
+    let id = ui.make_persistent_id(("fill_rows", &ui_key));
+    let mut changed = false;
+    ui.vertical(|ui| {
+        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, true)
+            .show_header(ui, |ui| ui.weak(tr!("FILL_SETTINGS")))
+            .body(|ui| changed = settings_rows(ui, &ui_key, f));
+    });
+    changed
+}
+
+/// The settings [`rows`] shows, when unfolded.
+fn settings_rows(
+    ui: &mut Ui,
+    ui_key: impl std::hash::Hash + std::fmt::Debug,
+    f: &mut Fill,
+) -> bool {
     let units_per_mm = f.units_per_mm;
     if let Some(Some(p)) = f.pattern.as_deref_mut() {
         let (changed, pick) = pattern_rows(ui, p, units_per_mm);
         f.pick_pattern |= pick;
         return changed;
+    }
+    if let Some(Some(g)) = f.generator.as_deref_mut() {
+        let key = ui.make_persistent_id(("fill", &ui_key)).value();
+        // In a column of its own, as a gradient's settings, so the rows below make room.
+        return ui
+            .vertical(|ui| crate::ui::effects::generator_params(ui, key, g))
+            .inner;
     }
     let Some(g) = f.gradient.as_mut() else {
         return false;
@@ -643,6 +713,8 @@ mod tests {
         color: [u8; 4],
         link: Option<String>,
         gradient: Option<Gradient>,
+        /// A shape's fill, which can be generated: `Some`, holding its generator.
+        generator: Option<Option<EffectInstance>>,
     }
 
     impl Harness {
@@ -653,6 +725,7 @@ mod tests {
                 color: [255, 0, 0, 255],
                 link: None,
                 gradient,
+                generator: None,
             };
             h.frame(vec![]);
             h
@@ -668,12 +741,14 @@ mod tests {
             };
             let mut changed = false;
             let (color, link, gradient) = (&mut self.color, &mut self.link, &mut self.gradient);
+            let generator = &mut self.generator;
             let mut out = self.ctx.run_ui(input, |ui| {
                 let mut f = Fill {
                     color,
                     link,
                     gradient,
                     pattern: None,
+                    generator: generator.as_mut(),
                     units_per_mm: 1.0,
                     alpha: true,
                     pick_pattern: false,
@@ -718,12 +793,14 @@ mod tests {
         fn bar(&mut self) -> (f32, f32, f32) {
             self.time += 0.1;
             let (color, link, gradient) = (&mut self.color, &mut self.link, &mut self.gradient);
+            let generator = &mut self.generator;
             let mut out = self.ctx.run_ui(egui::RawInput::default(), |ui| {
                 let mut f = Fill {
                     color,
                     link,
                     gradient,
                     pattern: None,
+                    generator: generator.as_mut(),
                     units_per_mm: 1.0,
                     alpha: true,
                     pick_pattern: false,
@@ -744,6 +821,112 @@ mod tests {
             let (l, r) = (tips[0].x.min(tips[1].x), tips[0].x.max(tips[1].x));
             (l, r, tips[0].y + 3.0 - BAR / 2.0)
         }
+    }
+
+    /// Clicks the text `label` drawn last frame.
+    fn click_text(h: &mut Harness, label: &str) {
+        let (texts, _) = h.frame(vec![]);
+        let at = texts
+            .iter()
+            .find(|(t, _)| t == label)
+            .unwrap_or_else(|| panic!("no {label:?} in {texts:?}"))
+            .1
+            .center();
+        h.click(at, egui::PointerButton::Primary);
+    }
+
+    fn generator(h: &Harness) -> &EffectInstance {
+        h.generator.as_ref().unwrap().as_ref().unwrap()
+    }
+
+    #[test]
+    fn generated_fill_picks_a_generator_and_regenerates() {
+        let mut h = Harness::new(None);
+        h.generator = Some(None);
+        // Generated, in the kind menu: the first generator, with its settings below.
+        click_text(&mut h, "Solid");
+        click_text(&mut h, "Generated");
+        assert_eq!(generator(&h).effect, "builtin.noise");
+        let (texts, _) = h.frame(vec![]);
+        assert!(texts.iter().any(|(t, _)| t == "Grain"), "{texts:?}");
+
+        // Another one from the generator menu.
+        click_text(&mut h, "Noise");
+        click_text(&mut h, "Clouds");
+        assert_eq!(generator(&h).effect, "builtin.clouds");
+
+        // The circular arrow: a new variation each click, the slider gone.
+        let (texts, _) = h.frame(vec![]);
+        assert!(!texts.iter().any(|(t, _)| t == "Variation"), "{texts:?}");
+        let seed = |h: &Harness| generator(h).params.get("seed").cloned();
+        let arrow = {
+            h.time += 0.1;
+            let (color, link, gradient) = (&mut h.color, &mut h.link, &mut h.gradient);
+            let generator = &mut h.generator;
+            let mut out = h.ctx.run_ui(egui::RawInput::default(), |ui| {
+                let mut f = Fill {
+                    color,
+                    link,
+                    gradient,
+                    pattern: None,
+                    generator: generator.as_mut(),
+                    units_per_mm: 1.0,
+                    alpha: true,
+                    pick_pattern: false,
+                };
+                ui.horizontal(|ui| inline(ui, "t", &mut f));
+            });
+            out.textures_delta.clear();
+            out.shapes
+                .iter()
+                .find_map(|c| match &c.shape {
+                    egui::Shape::Path(p) if p.points.len() == 25 => {
+                        Some(Rect::from_points(&p.points).center())
+                    }
+                    _ => None,
+                })
+                .expect("the regenerate arrow")
+        };
+        let before = seed(&h);
+        assert!(h.click(arrow, egui::PointerButton::Primary));
+        let after = seed(&h);
+        assert_ne!(before, after);
+        assert!(h.click(arrow, egui::PointerButton::Primary));
+        assert_ne!(seed(&h), after);
+
+        // A generator without a variation has no arrow.
+        let checkerboard = registry().generator("builtin.checkerboard").unwrap();
+        h.generator = Some(Some(EffectInstance::generator(checkerboard)));
+        let mut inst = EffectInstance::generator(checkerboard);
+        let ctx = egui::Context::default();
+        let mut clicked = true;
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            clicked = crate::ui::effects::regenerate_button(ui, &mut inst);
+        });
+        out.textures_delta.clear();
+        assert!(!clicked && out.shapes.is_empty());
+    }
+
+    #[test]
+    fn a_missing_generator_is_named_so() {
+        let mut inst = EffectInstance::generator(registry().generators().next().unwrap());
+        inst.effect = "some.plugin.gone".into();
+        let ctx = egui::Context::default();
+        let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {
+            assert!(!crate::ui::effects::generator_menu(ui, 1, &mut inst));
+            assert!(!crate::ui::effects::generator_params(ui, 1, &mut inst));
+            assert!(!crate::ui::effects::regenerate_button(ui, &mut inst));
+        });
+        out.textures_delta.clear();
+        let texts: Vec<String> = out
+            .shapes
+            .iter()
+            .filter_map(|c| match &c.shape {
+                egui::Shape::Text(t) => Some(t.galley.text().to_owned()),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.iter().any(|t| t == "Missing generator"), "{texts:?}");
     }
 
     #[test]
@@ -851,6 +1034,7 @@ mod tests {
                         link,
                         gradient,
                         pattern: None,
+                        generator: None,
                         units_per_mm: 1.0,
                         alpha: true,
                         pick_pattern: false,
@@ -870,6 +1054,7 @@ mod tests {
                     link: &mut link,
                     gradient: &mut gradient,
                     pattern: Some(&mut pattern),
+                    generator: None,
                     units_per_mm: 1.0,
                     alpha: true,
                     pick_pattern: false,

@@ -22,7 +22,7 @@ make version-bump-patch       # increase patch version, commit "Bump version to 
 make version-bump-minor       # increas minor version, commit "Bump version to X.Y+1.Z"
 make version-bump-major       # increas major version, commit "Bump version to X+1.Y.Z"
 
-make version-bump V=2.0.0     # an exact version
+make version-bump APP=2.0.0   # an exact version
 ```
 
 Patch, minor and major count from the current version. `SDK=...` sets the plugin SDK's

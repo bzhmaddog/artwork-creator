@@ -7,7 +7,9 @@ mod panels;
 mod project_template;
 mod template_edit;
 pub use dialogs::set_interaction;
-pub(crate) use dialogs::{at_left_edge, dialog, dialog_button_row, dialog_buttons, notice, notify};
+pub(crate) use dialogs::{
+    at_left_edge, danger_button, dialog, dialog_button_row, dialog_buttons, notice, notify,
+};
 use dialogs::{menu_entry, padded, panel_grid};
 use file::modified_time;
 use project_template::problem_list;
@@ -51,9 +53,9 @@ const MAX_PREVIEW_SIDE: u32 = 2048;
 /// Width of the preview in the Export window, in points.
 const EXPORT_PREVIEW_WIDTH: f32 = 360.0;
 /// Outline of the sheets over the export preview, apart from the template element colors.
-const TILE_COLOR: Color32 = Color32::from_rgb(220, 20, 60);
-/// Fill of a button that deletes something, under white text, in both themes.
-const DANGER_COLOR: Color32 = Color32::from_rgb(200, 40, 40);
+const TILE_COLOR: Color32 = crate::ui::tokens::ACCENT;
+/// How much the zoom buttons and keys zoom in or out at a time.
+const ZOOM_STEP: f32 = 1.25;
 const IMAGE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "webp", "bmp", "gif"];
 const IMAGE_FILTERS: &[Filter] = &[Filter::new(tr_noop!("FILTER_IMAGES"), IMAGE_EXTENSIONS)];
 /// SVG files, whose shapes are imported as path layers (see `svg`).

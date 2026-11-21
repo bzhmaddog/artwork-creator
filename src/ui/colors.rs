@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 /// Side of a swatch in the pickers and the Colors section, in points.
-const SWATCH: f32 = 18.0;
+const SWATCH: f32 = crate::ui::tokens::ICON_ROW;
 
 /// Swatches per row in a picker.
 const PER_ROW: usize = 12;
@@ -479,7 +479,11 @@ pub fn in_use_ui(ui: &mut Ui, doc: &mut Document, picked: &[[u8; 4]]) -> bool {
         if ui.is_rect_visible(rect) {
             let painter = ui.painter();
             if response.hovered() {
-                painter.rect_filled(rect, 3.0, ui.visuals().widgets.hovered.weak_bg_fill);
+                painter.rect_filled(
+                    rect,
+                    crate::ui::tokens::RADIUS,
+                    ui.visuals().widgets.hovered.weak_bg_fill,
+                );
             }
             let sw = egui::Rect::from_min_size(
                 rect.left_center() - vec2(-2.0, SWATCH / 2.0),

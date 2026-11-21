@@ -1,4 +1,4 @@
-//! Effects from plugin libraries (`.dll` on Windows, `.so` on Linux) found in the
+//! Effects and generators from plugin libraries (`.dll` on Windows, `.so` on Linux) found in the
 //! `plugins` folder, through the C ABI of `artwork_plugin_sdk::abi`.
 //!
 //! Plugins run in the app's process with its full rights: a crash in one takes the app
@@ -12,7 +12,7 @@ use artwork_plugin_sdk::{self as sdk, abi};
 use image::RgbaImage;
 use libloading::Library;
 
-use super::{Effect, ParamKind, ParamSpec, Params, color_from_hex};
+use super::{Effect, Generator, ParamKind, ParamSpec, Params, color_from_hex};
 
 /// A plugin that loaded.
 #[derive(Clone, Debug)]
@@ -22,6 +22,8 @@ pub struct PluginInfo {
     pub path: PathBuf,
     /// Ids of its effects.
     pub effects: Vec<String>,
+    /// Ids of its generators.
+    pub generators: Vec<String>,
 }
 
 /// An effect of a plugin.
@@ -101,18 +103,88 @@ impl Effect for NativeEffect {
                 error.len(),
             )
         };
-        if r == 0 {
-            return Ok(());
-        }
-        // Make sure the message ends within the buffer, whatever the plugin wrote.
-        *error.last_mut().unwrap() = 0;
-        // SAFETY: NUL-terminated within the buffer.
-        let msg = unsafe { CStr::from_ptr(error.as_ptr()) }.to_string_lossy();
-        Err(if msg.is_empty() {
-            format!("failed (error {r})")
-        } else {
-            msg.into_owned()
-        })
+        outcome(r, &mut error)
+    }
+}
+
+/// What a plugin call returning `r` gave, with the message it wrote to `error`.
+fn outcome(r: i32, error: &mut [c_char]) -> Result<(), String> {
+    if r == 0 {
+        return Ok(());
+    }
+    // Make sure the message ends within the buffer, whatever the plugin wrote.
+    if let Some(last) = error.last_mut() {
+        *last = 0;
+    }
+    // SAFETY: NUL-terminated within the buffer.
+    let msg = unsafe { CStr::from_ptr(error.as_ptr()) }.to_string_lossy();
+    Err(if msg.is_empty() {
+        format!("failed (error {r})")
+    } else {
+        msg.into_owned()
+    })
+}
+
+/// A generator of a plugin.
+pub struct NativeGenerator {
+    id: String,
+    name: String,
+    description: String,
+    params: Vec<ParamSpec>,
+    plugin: String,
+    table: abi::GeneratorTable,
+    /// Keeps the code behind `table` loaded; `None` for a table built in this process.
+    _library: Option<Arc<Library>>,
+}
+
+// SAFETY: as for `NativeEffect`.
+unsafe impl Send for NativeGenerator {}
+unsafe impl Sync for NativeGenerator {}
+
+impl Generator for NativeGenerator {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn name(&self) -> &str {
+        &self.name
+    }
+
+    fn description(&self) -> &str {
+        &self.description
+    }
+
+    fn params(&self) -> &[ParamSpec] {
+        &self.params
+    }
+
+    fn plugin(&self) -> Option<&str> {
+        Some(&self.plugin)
+    }
+
+    fn generate(&self, img: &mut RgbaImage, params: &Params, px_per_mm: f32) -> Result<(), String> {
+        let (w, h) = img.dimensions();
+        let stride = w
+            .checked_mul(4)
+            .ok_or_else(|| "image too wide".to_owned())?;
+        let values = values_json(params);
+        let mut error = vec![0 as c_char; ERROR_LEN];
+        // SAFETY: the buffer holds `h` rows of `stride` bytes; the error buffer is
+        // `ERROR_LEN` long.
+        let r = unsafe {
+            (self.table.generate)(
+                self.table.user_data,
+                img.as_mut_ptr(),
+                w,
+                h,
+                stride,
+                values.as_ptr(),
+                px_per_mm,
+                error.as_mut_ptr(),
+                error.len(),
+            )
+        };
+        outcome(r, &mut error)
     }
 }
 
@@ -131,6 +203,7 @@ pub fn plugins_dir() -> Option<PathBuf> {
 #[derive(Default)]
 pub struct Loaded {
     pub effects: Vec<Box<dyn Effect>>,
+    pub generators: Vec<Box<dyn Generator>>,
     pub plugins: Vec<PluginInfo>,
     /// One message per library that failed to load.
     pub errors: Vec<String>,
@@ -155,18 +228,24 @@ pub fn load_dir(dir: &Path) -> Loaded {
     for path in paths {
         let file = path.file_name().unwrap_or_default().to_string_lossy();
         match load_library(&path) {
-            Ok((info, effects)) => {
+            Ok((info, effects, generators)) => {
                 log::info!(
-                    "loaded plugin {} {} from {} ({} effects)",
+                    "loaded plugin {} {} from {} ({} effects, {} generators)",
                     info.name,
                     info.version,
                     path.display(),
-                    effects.len()
+                    effects.len(),
+                    generators.len()
                 );
                 loaded.plugins.push(info);
                 loaded
                     .effects
                     .extend(effects.into_iter().map(|e| Box::new(e) as Box<dyn Effect>));
+                loaded.generators.extend(
+                    generators
+                        .into_iter()
+                        .map(|g| Box::new(g) as Box<dyn Generator>),
+                );
             }
             Err(e) => {
                 log::warn!("plugin {} not loaded: {e}", path.display());
@@ -178,9 +257,9 @@ pub fn load_dir(dir: &Path) -> Loaded {
 }
 
 /// Loads one plugin library.
-pub fn load_library(path: &Path) -> Result<(PluginInfo, Vec<NativeEffect>), String> {
+pub fn load_library(path: &Path) -> Result<Contents, String> {
     // SAFETY: none can be given: loading runs the library's initializers, and its code
-    // is trusted from here on. docs/SPECS.md warns to install only trusted plugins.
+    // is trusted from here on. docs/specs.md warns to install only trusted plugins.
     let library = unsafe { Library::new(path) }.map_err(|e| e.to_string())?;
     let entry = {
         // SAFETY: the symbol has the ABI's entry type.
@@ -198,31 +277,46 @@ pub fn load_library(path: &Path) -> Result<(PluginInfo, Vec<NativeEffect>), Stri
     unsafe { from_table(entry(), path, Some(library)) }
 }
 
+/// What a plugin library holds.
+pub type Contents = (PluginInfo, Vec<NativeEffect>, Vec<NativeGenerator>);
+
 /// Reads a plugin table.
 ///
 /// # Safety
-/// `table` is null or follows the ABI, and stays valid while `library` is loaded (or
-/// forever when `library` is `None`).
+/// `table` is null or follows the ABI of its version, and stays valid while `library` is
+/// loaded (or forever when `library` is `None`).
 pub unsafe fn from_table(
     table: *const abi::PluginTable,
     path: &Path,
     library: Option<Arc<Library>>,
-) -> Result<(PluginInfo, Vec<NativeEffect>), String> {
+) -> Result<Contents, String> {
     if table.is_null() {
         return Err("the plugin failed to start".into());
     }
     // The version is read first, on its own: the rest of the layout depends on it.
     // SAFETY: every ABI version starts with this field.
     let version = unsafe { std::ptr::addr_of!((*table).abi_version).read() };
-    if version != abi::ABI_VERSION {
-        return Err(format!(
-            "made for plugin interface version {version}, this app uses version {}",
-            abi::ABI_VERSION
-        ));
-    }
-    // SAFETY: the version matches, so the layout is this one.
-    let t = unsafe { &*table };
-    let (name, plugin_version) = unsafe { (string(t.name), string(t.version)) };
+    // SAFETY: the version says which layout it is.
+    let (name, plugin_version, effect_tables, generator_tables) = match version {
+        1 => {
+            let t = unsafe { &*(table as *const abi::PluginTableV1) };
+            let effects = unsafe { slice(t.effects, t.effect_count) };
+            unsafe { (string(t.name), string(t.version), effects, &[][..]) }
+        }
+        abi::ABI_VERSION => {
+            let t = unsafe { &*table };
+            let effects = unsafe { slice(t.effects, t.effect_count) };
+            let generators = unsafe { slice(t.generators, t.generator_count) };
+            unsafe { (string(t.name), string(t.version), effects, generators) }
+        }
+        _ => {
+            return Err(format!(
+                "made for plugin interface version {version}, this app uses versions {} to {}",
+                abi::OLDEST_ABI_VERSION,
+                abi::ABI_VERSION
+            ));
+        }
+    };
     let name = if name.is_empty() {
         path.file_stem()
             .unwrap_or_default()
@@ -231,45 +325,43 @@ pub unsafe fn from_table(
     } else {
         name
     };
-    let tables: &[abi::EffectTable] = if t.effect_count == 0 || t.effects.is_null() {
-        &[]
-    } else {
-        // SAFETY: `effects` points to `effect_count` tables.
-        unsafe { std::slice::from_raw_parts(t.effects, t.effect_count as usize) }
-    };
-    let mut effects = Vec::with_capacity(tables.len());
-    for e in tables {
+    let mut ids: Vec<String> = Vec::new();
+    let mut effects = Vec::with_capacity(effect_tables.len());
+    for e in effect_tables {
         // SAFETY: the strings are NUL-terminated or null.
-        let (id, effect_name, description, params) = unsafe {
-            (
-                string(e.id),
-                string(e.name),
-                string(e.description),
-                string(e.params_json),
-            )
-        };
-        let err = |m: String| format!("effect \"{id}\": {m}");
-        if id.is_empty() {
-            return Err("an effect has no id".into());
-        }
-        if id.starts_with("builtin.") {
-            return Err(err("ids starting with \"builtin.\" are reserved".into()));
-        }
-        if effects.iter().any(|x: &NativeEffect| x.id == id) {
-            return Err(err("id used twice".into()));
-        }
-        let params = param_specs(&params).map_err(err)?;
+        let d = unsafe { describe("effect", e.id, e.name, e.description, e.params_json, &ids) }?;
+        ids.push(d.id.clone());
         effects.push(NativeEffect {
-            name: if effect_name.is_empty() {
-                id.clone()
-            } else {
-                effect_name
-            },
-            id,
-            description,
-            params,
+            id: d.id,
+            name: d.name,
+            description: d.description,
+            params: d.params,
             plugin: name.clone(),
             table: *e,
+            _library: library.clone(),
+        });
+    }
+    let mut generators = Vec::with_capacity(generator_tables.len());
+    for g in generator_tables {
+        // SAFETY: the strings are NUL-terminated or null.
+        let d = unsafe {
+            describe(
+                "generator",
+                g.id,
+                g.name,
+                g.description,
+                g.params_json,
+                &ids,
+            )
+        }?;
+        ids.push(d.id.clone());
+        generators.push(NativeGenerator {
+            id: d.id,
+            name: d.name,
+            description: d.description,
+            params: d.params,
+            plugin: name.clone(),
+            table: *g,
             _library: library.clone(),
         });
     }
@@ -278,8 +370,69 @@ pub unsafe fn from_table(
         version: plugin_version,
         path: path.to_owned(),
         effects: effects.iter().map(|e| e.id.clone()).collect(),
+        generators: generators.iter().map(|g| g.id.clone()).collect(),
     };
-    Ok((info, effects))
+    Ok((info, effects, generators))
+}
+
+/// `count` tables at `ptr`, none if it is null.
+///
+/// # Safety
+/// `ptr` is null or points to `count` tables that outlive the slice.
+unsafe fn slice<'a, T>(ptr: *const T, count: u32) -> &'a [T] {
+    if count == 0 || ptr.is_null() {
+        &[]
+    } else {
+        unsafe { std::slice::from_raw_parts(ptr, count as usize) }
+    }
+}
+
+/// What an effect or a generator of a plugin says about itself, checked.
+struct Described {
+    id: String,
+    name: String,
+    description: String,
+    params: Vec<ParamSpec>,
+}
+
+/// Reads and checks the description of an effect or generator (`what`), whose id must
+/// not be one of `taken`.
+///
+/// # Safety
+/// The strings are NUL-terminated or null.
+unsafe fn describe(
+    what: &str,
+    id: *const c_char,
+    name: *const c_char,
+    description: *const c_char,
+    params: *const c_char,
+    taken: &[String],
+) -> Result<Described, String> {
+    let (id, name, description, params) = unsafe {
+        (
+            string(id),
+            string(name),
+            string(description),
+            string(params),
+        )
+    };
+    let err = |m: String| format!("{what} \"{id}\": {m}");
+    if id.is_empty() {
+        return Err(format!("{what} without an id"));
+    }
+    if id.starts_with("builtin.") {
+        return Err(err("ids starting with \"builtin.\" are reserved".into()));
+    }
+    if taken.contains(&id) {
+        return Err(err("id used twice".into()));
+    }
+    let params = param_specs(&params).map_err(err)?;
+    Ok(Described {
+        name: if name.is_empty() { id.clone() } else { name },
+        id,
+        description,
+        params,
+    })
 }
 
 /// # Safety
@@ -413,12 +566,84 @@ mod tests {
         }
     }
 
+    /// Draws the left half of the image in a color.
+    struct Half;
+
+    impl sdk::Generator for Half {
+        fn id(&self) -> &str {
+            "test.half"
+        }
+        fn name(&self) -> &str {
+            "Half"
+        }
+        fn params(&self) -> Vec<Param> {
+            vec![Param::color("color", "Color", [10, 20, 30, 255])]
+        }
+        fn generate(&self, img: &mut Image, v: &Values, px_per_mm: f32) -> Result<(), String> {
+            if px_per_mm <= 0.0 {
+                return Err("no size".into());
+            }
+            let (c, w) = (v.color("color"), img.width() / 2);
+            img.par_rows(|_, row| {
+                for px in &mut row.as_chunks_mut::<4>().0[..w as usize] {
+                    *px = c;
+                }
+            });
+            Ok(())
+        }
+    }
+
+    fn table() -> &'static abi::PluginTable {
+        sdk::build_table("Test", "1.0", || {
+            (vec![Box::new(Fill)], vec![Box::new(Half)])
+        })
+        .unwrap()
+    }
+
     fn fill() -> NativeEffect {
-        let table = sdk::build_table("Test", "1.0", || vec![Box::new(Fill)]).unwrap();
-        let (info, mut effects) = unsafe { from_table(table, Path::new("test.so"), None) }.unwrap();
+        let (info, mut effects, _) =
+            unsafe { from_table(table(), Path::new("test.so"), None) }.unwrap();
         assert_eq!((info.name.as_str(), info.version.as_str()), ("Test", "1.0"));
         assert_eq!(info.effects, ["test.fill"]);
+        assert_eq!(info.generators, ["test.half"]);
         effects.pop().unwrap()
+    }
+
+    #[test]
+    fn plugin_generators_work_through_the_abi() {
+        let (_, _, mut gens) = unsafe { from_table(table(), Path::new("test.so"), None) }.unwrap();
+        let g = gens.pop().unwrap();
+        assert_eq!((g.name(), g.plugin()), ("Half", Some("Test")));
+        let mut inst = EffectInstance::generator(&g);
+        inst.params.insert("color".into(), Value::from("#ff000080"));
+        let p = Params::new(g.params(), &inst.params);
+        let mut img = RgbaImage::new(4, 2);
+        g.generate(&mut img, &p, 1.0).unwrap();
+        assert_eq!(img.get_pixel(1, 1).0, [255, 0, 0, 128]);
+        assert_eq!(img.get_pixel(2, 1).0, [0; 4]);
+        assert!(
+            g.generate(&mut img, &p, 0.0)
+                .unwrap_err()
+                .contains("no size")
+        );
+    }
+
+    #[test]
+    fn version_1_plugins_still_load() {
+        let t = table();
+        let v1 = abi::PluginTableV1 {
+            abi_version: 1,
+            effect_count: t.effect_count,
+            name: t.name,
+            version: t.version,
+            effects: t.effects,
+        };
+        let table = &v1 as *const abi::PluginTableV1 as *const abi::PluginTable;
+        let (info, effects, gens) =
+            unsafe { from_table(table, Path::new("old.so"), None) }.unwrap();
+        assert_eq!(info.effects, ["test.fill"]);
+        assert_eq!(effects.len(), 1);
+        assert!(gens.is_empty() && info.generators.is_empty());
     }
 
     #[test]
@@ -458,6 +683,8 @@ mod tests {
             name: std::ptr::null(),
             version: std::ptr::null(),
             effects: std::ptr::null(),
+            generator_count: 0,
+            generators: std::ptr::null(),
         };
         let Err(e) = (unsafe { from_table(&table, path, None) }) else {
             panic!("accepted");
@@ -493,8 +720,14 @@ mod tests {
         let Some(path) = std::env::var_os("ARTWORK_TEST_PLUGIN") else {
             return;
         };
-        let (info, effects) = load_library(Path::new(&path)).unwrap();
+        let (info, effects, generators) = load_library(Path::new(&path)).unwrap();
         assert!(!effects.is_empty(), "{info:?}");
+        for g in &generators {
+            let inst = EffectInstance::generator(g);
+            let mut img = RgbaImage::new(64, 48);
+            g.generate(&mut img, &Params::new(g.params(), &inst.params), 4.0)
+                .unwrap();
+        }
         for e in &effects {
             let inst = EffectInstance::new(e);
             let mut img = RgbaImage::from_fn(64, 48, |x, y| {

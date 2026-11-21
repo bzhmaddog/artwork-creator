@@ -15,4 +15,5 @@ pub mod shortcuts;
 pub mod template;
 pub mod text_links;
 pub mod theme;
+pub mod tokens;
 pub mod variables;

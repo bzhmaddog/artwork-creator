@@ -315,7 +315,7 @@ pub(super) fn compare_bar_body(ui: &mut egui::Ui) -> (bool, bool) {
     let accent = ui.visuals().selection.bg_fill;
     let frame = egui::Frame::popup(ui.style())
         .inner_margin(egui::Margin::same(10))
-        .stroke(egui::Stroke::new(1.5, accent))
+        .stroke(egui::Stroke::new(crate::ui::tokens::STROKE, accent))
         .shadow(egui::Shadow {
             offset: [0, 4],
             blur: 16,

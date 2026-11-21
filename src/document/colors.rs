@@ -93,12 +93,12 @@ pub fn used(doc: &Document) -> Vec<[u8; 4]> {
                             either(add, s.stroke_color, s.stroke_gradient.as_ref());
                         }
                     }
-                    for fx in &l.effects {
-                        let Some(effect) = registry().get(&fx.effect) else {
+                    for fx in l.param_sets() {
+                        let Some(specs) = registry().params_of(&fx.effect) else {
                             continue;
                         };
-                        let params = Params::new(effect.params(), &fx.params);
-                        for spec in effect.params() {
+                        let params = Params::new(specs, &fx.params);
+                        for spec in specs {
                             if let ParamKind::Color { .. } = spec.kind {
                                 add(params.color(&spec.id));
                             }
@@ -238,7 +238,7 @@ pub fn apply(doc: &mut Document) -> bool {
             true
         });
         layer.color_links = links;
-        for fx in &mut layer.effects {
+        for fx in layer.param_sets_mut() {
             let params = &mut fx.params;
             fx.links.retain(|param, name| {
                 let Some(c) = find(name) else {
@@ -303,7 +303,7 @@ pub fn adopt_links(vars: &mut Vec<Variable>, node: &mut Node) {
             None => false,
         });
         l.color_links = links;
-        for fx in &mut l.effects {
+        for fx in l.param_sets_mut() {
             let params = &fx.params;
             fx.links.retain(|param, name| {
                 match params
@@ -356,7 +356,7 @@ fn for_each_link(doc: &mut Document, mut f: impl FnMut(&mut String) -> bool) {
             stops(g, &mut f);
         }
         l.color_links.retain(|_, name| f(name));
-        for fx in &mut l.effects {
+        for fx in l.param_sets_mut() {
             fx.links.retain(|_, name| f(name));
         }
     });

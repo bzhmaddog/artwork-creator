@@ -346,6 +346,8 @@ impl ArtworkApp {
                 self.dirty |= layers::ungroup(&mut self.doc, &mut self.selected);
             }
             Command::Clip => self.dirty |= layers::toggle_clip(&mut self.doc, self.selected),
+            Command::ZoomIn => self.canvas.zoom_centered(ZOOM_STEP),
+            Command::ZoomOut => self.canvas.zoom_centered(1.0 / ZOOM_STEP),
             Command::FitPage => self.canvas.fit_pending = true,
             Command::RealSize => self.canvas.set_zoom(REAL_SIZE_ZOOM),
             Command::ShowTemplate => self.canvas.show_template ^= true,

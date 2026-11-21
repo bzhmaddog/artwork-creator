@@ -1,5 +1,5 @@
 /*
- * Artwork Creator effect plugins: the C ABI.
+ * Artwork Creator effect and generator plugins: the C ABI.
  *
  * A plugin is a shared library (.dll on Windows, .so on Linux) placed in the `plugins`
  * folder next to the app. It exports one function:
@@ -8,7 +8,8 @@
  *
  * returning a table that stays valid while the library is loaded (the app never unloads
  * it), or NULL if the plugin cannot start. The app reads `abi_version` first and skips
- * the plugin unless it equals ARTWORK_PLUGIN_ABI_VERSION.
+ * the plugin unless it is from 1 to ARTWORK_PLUGIN_ABI_VERSION. Version 2 added
+ * generators (the last two fields of ArtworkPlugin); a version 1 table ends before them.
  *
  * All strings are UTF-8 and NUL-terminated.
  *
@@ -20,12 +21,12 @@
  *   "color":  "default" as "#rrggbbaa" (straight RGBA)
  *   "choice": "options" as [{"id": ..., "label": ...}], "default" (an option id)
  *
- * Values (the `params_json` argument of padding/apply) are a JSON object with every
+ * Values (the `params_json` argument of padding/apply/generate) are a JSON object with every
  * parameter id, already checked by the app: numbers within range, colors as
  * "#rrggbbaa", choices one of their option ids.
  *
  * Plugins run inside the app with its full rights; a crash takes the app down.
- * `padding` and `apply` may be called from several threads at once.
+ * `padding`, `apply` and `generate` may be called from several threads at once.
  *
  * Rust plugins should use the `artwork-plugin-sdk` crate instead of this header.
  */
@@ -39,7 +40,7 @@
 extern "C" {
 #endif
 
-#define ARTWORK_PLUGIN_ABI_VERSION 1
+#define ARTWORK_PLUGIN_ABI_VERSION 2
 
 #if defined(_WIN32)
 #define ARTWORK_EXPORT __declspec(dllexport)
@@ -78,6 +79,28 @@ typedef struct ArtworkEffect {
     ArtworkApplyFn apply;
 } ArtworkEffect;
 
+/* Draws into the image, `height` rows of `width` straight RGBA pixels, 8 bits per
+ * channel, rows `stride` bytes apart, top to bottom, all transparent at first. It covers
+ * the shape's box at `px_per_mm` pixels per mm: multiply lengths in mm by it. The same
+ * values must give the same picture at any resolution. Returns as ArtworkApplyFn. */
+typedef int32_t (*ArtworkGenerateFn)(const void *user_data, uint8_t *pixels,
+                                     uint32_t width, uint32_t height, uint32_t stride,
+                                     const char *params_json, float px_per_mm,
+                                     char *error, size_t error_len);
+
+/* Draws a shape's fill, such as a pattern or a texture. */
+typedef struct ArtworkGenerator {
+    /* Unique, stable id saved in projects, as an effect's; no effect may have it. */
+    const char *id;
+    const char *name;
+    /* One line shown as a tooltip; may be empty. */
+    const char *description;
+    const char *params_json;
+    /* Passed back to generate. */
+    const void *user_data;
+    ArtworkGenerateFn generate;
+} ArtworkGenerator;
+
 typedef struct ArtworkPlugin {
     /* ARTWORK_PLUGIN_ABI_VERSION. Must stay the first field. */
     uint32_t abi_version;
@@ -85,6 +108,9 @@ typedef struct ArtworkPlugin {
     const char *name;
     const char *version;
     const ArtworkEffect *effects;
+    /* Since version 2. */
+    uint32_t generator_count;
+    const ArtworkGenerator *generators;
 } ArtworkPlugin;
 
 typedef const ArtworkPlugin *(*ArtworkEntryFn)(void);

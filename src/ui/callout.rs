@@ -24,15 +24,14 @@ impl Tone {
     pub fn color(self, visuals: &Visuals) -> Color32 {
         match self {
             Tone::Info => visuals.hyperlink_color,
-            Tone::Tip if visuals.dark_mode => Color32::from_rgb(110, 200, 140),
-            Tone::Tip => Color32::from_rgb(30, 140, 80),
+            Tone::Tip => crate::ui::tokens::tip(visuals),
             Tone::Warning => visuals.warn_fg_color,
         }
     }
 }
 
 /// Corner radius of a callout, in points.
-const RADIUS: u8 = 6;
+const RADIUS: u8 = crate::ui::tokens::RADIUS_CALLOUT;
 /// Width of the accent bar along the left edge, in points.
 const BAR: f32 = 3.0;
 

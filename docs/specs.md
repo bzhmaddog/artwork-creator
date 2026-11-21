@@ -86,7 +86,7 @@ panel (the template editor adds Template properties and Template check).
 - **Pan**: Space+drag, middle or right drag, or drag on empty canvas (or outside the
   page). Panning never changes the selection. A plain click on empty canvas, without
   dragging, selects nothing.
-- **Zoom**: mouse wheel, or Ctrl+scroll. The zoom bar has **-** / **+**, the zoom in
+- **Zoom**: mouse wheel, Ctrl+scroll, or Ctrl++ / Ctrl+-. The zoom bar has **-** / **+**, the zoom in
   percent (100% is real size on a 96 DPI screen), **Fit** (fit the page in the view, F)
   and **Real size**.
 
@@ -617,7 +617,9 @@ in **Tools > Eyedropper** (I).
 
 A shape's fill and stroke, a text's letters and the page background can each be **Solid**
 (one color), a **Linear gradient**, a **Radial gradient**, or (fills, texts and page) a
-**Pattern**, chosen with the switch next to its color.
+**Pattern**, or (a shape's fill) **Generated**, chosen with the switch next to its color.
+A gradient's, pattern's or generator's settings show below it, under a **Settings** header
+that folds them away.
 
 ### Color pickers
 
@@ -656,6 +658,29 @@ A shape's fill and stroke, a text's letters and the page background can each be 
 - In PDF and SVG exports the shape's or text's outline stays vector: SVG gets an SVG
   pattern, PDF the image repeated under the outline; a layer that is distorted, or would
   need over 4000 copies of the image, is exported as pixels.
+
+### Generated fills
+
+- A shape's fill drawn by a generator: pick **Generated** in the fill's switch, then the
+  generator in the menu next to it; its settings show below. Its sizes are in mm.
+- It is made again at the export resolution, so it stays sharp at any size; resizing the
+  shape shows more or less of it. PDF and SVG exports get it as an image under the
+  outline.
+
+| Generator | Settings |
+|---|---|
+| Noise | grain, color 1, color 2 |
+| Clouds | size, detail (1 to 8), color 1, color 2 |
+| Checkerboard | square size, color 1, color 2, angle |
+| Stripes | width, color 1, color 2, angle |
+
+- The circular-arrow button next to the generator menu (Noise, Clouds, and a plugin's
+  generator with an integer setting `seed`) draws another random picture with the same
+  settings. The picture is saved with the project.
+- More generators come from [plugins](#plugins), listed under the plugin's name. A project
+  using one whose plugin is not installed still opens: it shows as "Missing generator",
+  is not drawn, and is saved unchanged.
+- Its colors can be linked to color variables, as effects' are.
 
 ## Transforming layers
 
@@ -783,18 +808,21 @@ page (a text's follow the font size).
 
 ## Plugins
 
-Effect plugins are shared libraries (`.dll` on Windows, `.so` on Linux) placed in a
-`plugins` folder next to the executable or, failing that, in the current directory.
+Plugins are shared libraries (`.dll` on Windows, `.so` on Linux) placed in a `plugins`
+folder next to the executable or, failing that, in the current directory. They add
+effects and generators (see [Generated fills](#generated-fills)).
 
-- The app loads them at startup and lists their effects in **Add effect**, under the
-  plugin's name. A library that fails to load, or was made for another plugin interface
-  version, is skipped and reported at the bottom of that menu.
+- The app loads them at startup and lists their effects in **Add effect**, and their
+  generators in a fill's **Generated** menu, under the plugin's name. A library that
+  fails to load, or was made for a plugin interface version this app doesn't know, is
+  skipped and reported at the bottom of the Add effect menu. Plugins made for version 1
+  of the interface, which had effects only, still load.
 - **Install only plugins you trust.** A plugin is native code running inside the app with
   all its rights: it can read and write your files, and a crash in it closes the app (the
   autosave copy is then offered back).
 - A project that uses an effect whose plugin is not installed still opens: the effect is
   shown as "Missing effect", is not applied, and is saved unchanged.
-- Effects from plugins show their own names, untranslated.
+- Effects and generators from plugins show their own names, untranslated.
 
 Writing a plugin: see "Plugins" in [README.md](../README.md#plugins).
 
@@ -1058,6 +1086,7 @@ The default keys:
 | Tilt the selected layer in 3D (Shift: 15° steps) | Ctrl+drag on it |
 | Distort the selected layer (move one corner) | Ctrl+drag a corner handle |
 | Select the layer above / below (the layer list clicked last) | Up / Down |
+| Zoom in / out | Ctrl++ (or Ctrl+=) / Ctrl+- |
 | Fit page in view | F |
 | Select / Pencil / Brush / Eraser tool (with a canvas selected) | V / P / B / E (Esc: back to Select) |
 | Eyedropper | I (Esc: back to Select) |

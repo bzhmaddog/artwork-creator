@@ -78,6 +78,7 @@ impl ArtworkApp {
             link: &mut doc.background_link,
             gradient: &mut doc.background_gradient,
             pattern: Some(&mut doc.background_pattern),
+            generator: None,
             units_per_mm: 1.0,
             alpha: false,
             pick_pattern: false,
@@ -194,7 +195,7 @@ impl ArtworkApp {
                     if ui
                         .add_enabled(
                             !doc.guides.is_empty(),
-                            egui::Button::new(tr!("CLEAR_GUIDES")),
+                            crate::app::danger_button(tr!("CLEAR_GUIDES")),
                         )
                         .on_hover_text(tip(tr!("CLEAR_GUIDES_HINT"), Command::ClearGuides))
                         .clicked()
@@ -296,17 +297,27 @@ impl ArtworkApp {
         ui.horizontal(|ui| {
             if ui
                 .small_button("−")
-                .on_hover_text(tr!("ZOOM_OUT"))
+                .on_hover_text(crate::ui::shortcuts::with_key(
+                    tr!("ZOOM_OUT"),
+                    self.shortcuts.text(ui.ctx(), Command::ZoomOut).as_ref(),
+                ))
                 .clicked()
             {
-                self.canvas.zoom_centered(1.0 / 1.25);
+                self.canvas.zoom_centered(1.0 / ZOOM_STEP);
             }
             ui.label(format!(
                 "{:.0}%",
                 self.canvas.camera.zoom / REAL_SIZE_ZOOM * 100.0
             ));
-            if ui.small_button("+").on_hover_text(tr!("ZOOM_IN")).clicked() {
-                self.canvas.zoom_centered(1.25);
+            if ui
+                .small_button("+")
+                .on_hover_text(crate::ui::shortcuts::with_key(
+                    tr!("ZOOM_IN"),
+                    self.shortcuts.text(ui.ctx(), Command::ZoomIn).as_ref(),
+                ))
+                .clicked()
+            {
+                self.canvas.zoom_centered(ZOOM_STEP);
             }
             if ui
                 .small_button(tr!("FIT_PAGE_IN_VIEW_SHORT"))

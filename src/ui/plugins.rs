@@ -178,6 +178,27 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    /// One plugin in each state, as found in the user's folder.
+    fn sample() -> Vec<PluginFile> {
+        let file = |name: &str, python: bool, status: Status| PluginFile {
+            path: PathBuf::from("/home/me/.local/share/artwork-creator/plugins").join(name),
+            python,
+            status,
+        };
+        let loaded = |name: &str, version: &str| Status::Loaded {
+            name: name.into(),
+            version: version.into(),
+        };
+        vec![
+            file("libhalftone.so", false, loaded("Halftone", "0.1.0")),
+            file("posterize.py", true, loaded("Python example", "1.0")),
+            file("new.py", true, Status::Waiting),
+            file("old.py", true, Status::Disabled),
+            file("broken.py", true, Status::Failed("no plugin".into())),
+            file("noversion.py", true, loaded("No version", "")),
+        ]
+    }
+
     /// Runs one frame of the window; returns what it gave and where each text is.
     fn frame(
         ctx: &egui::Context,
@@ -231,26 +252,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("artwork-manager-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let saved = dir.join("plugins.json");
-        let files = vec![
-            PluginFile {
-                path: dir.join("new.py"),
-                python: true,
-                status: Status::Waiting,
-            },
-            PluginFile {
-                path: dir.join("libfx.so"),
-                python: false,
-                status: Status::Loaded {
-                    name: "Effects".into(),
-                    version: "0.1.0".into(),
-                },
-            },
-            PluginFile {
-                path: dir.join("broken.py"),
-                python: true,
-                status: Status::Failed("no plugin".into()),
-            },
-        ];
+        let files = sample();
         let manager = || Manager {
             files: files.clone(),
             settings: Settings::read_from(Some(saved.clone())),
@@ -266,7 +268,8 @@ mod tests {
             "Plugins",
             "new.py",
             "?",
-            "Effects",
+            "Halftone",
+            "Disabled",
             "0.1.0",
             "Library",
             "Loaded",
@@ -276,7 +279,7 @@ mod tests {
             assert!(find(&texts, text).is_some(), "{text}");
         }
         assert!(find(&texts, "Restart Artwork Creator to apply the changes.").is_none());
-        // Unticking the first plugin's box disables it, saved at once.
+        // Unticking a plugin's box disables it, saved at once.
         let enabled = find(&texts, "Enabled").unwrap();
         let row = find(&texts, "new.py").unwrap();
         click(
@@ -284,7 +287,7 @@ mod tests {
             &mut m,
             egui::pos2(enabled.left() + 9.0, row.center().y),
         );
-        assert!(Settings::read_from(Some(saved.clone())).is_disabled(&files[0].path));
+        assert!(Settings::read_from(Some(saved.clone())).is_disabled(&files[2].path));
         let (_, texts) = frame(&ctx, &mut m, Vec::new());
         assert!(find(&texts, "Restart Artwork Creator to apply the changes.").is_some());
         // Allow: the plugin isn't pending in this run's registry, which has no plugins.
@@ -317,6 +320,12 @@ mod tests {
     }
 
     #[test]
+    fn a_new_window_shows_this_run_s_plugins() {
+        // This run's registry has only the built-in effects: no plugin files.
+        assert!(Manager::new().files.is_empty());
+    }
+
+    #[test]
     fn without_plugins_it_says_where_to_put_them() {
         let ctx = egui::Context::default();
         let mut m = Manager {
@@ -341,32 +350,7 @@ mod tests {
         let Ok(path) = std::env::var("PLUGINS_PREVIEW") else {
             return;
         };
-        let file = |name: &str, python: bool, status: Status| PluginFile {
-            path: PathBuf::from("/home/me/.local/share/artwork-creator/plugins").join(name),
-            python,
-            status,
-        };
-        let files = vec![
-            file(
-                "libhalftone.so",
-                false,
-                Status::Loaded {
-                    name: "Halftone".into(),
-                    version: "0.1.0".into(),
-                },
-            ),
-            file(
-                "posterize.py",
-                true,
-                Status::Loaded {
-                    name: "Python example".into(),
-                    version: "1.0".into(),
-                },
-            ),
-            file("new.py", true, Status::Waiting),
-            file("old.py", true, Status::Disabled),
-            file("broken.py", true, Status::Failed("no plugin".into())),
-        ];
+        let files = sample();
         crate::ui::preview::render(&path, egui::vec2(720.0, 420.0), |ui| {
             let mut m = Manager {
                 files: files.clone(),

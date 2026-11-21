@@ -848,6 +848,37 @@ mod tests {
     use super::*;
 
     #[test]
+    fn plugins_whose_ids_are_taken_are_left_out() {
+        let reg = Registry::builtin();
+        let loaded = plugin::Loaded {
+            effects: builtin::all(),
+            generators: generators::all(),
+            ..Default::default()
+        };
+        let n = loaded.effects.len() + loaded.generators.len();
+        let part = Part::checked(loaded, |id| reg.params_of(id).is_some());
+        assert!(part.effects.is_empty() && part.generators.is_empty());
+        assert_eq!(part.errors.len(), n);
+        assert!(part.errors[0].contains("left out"));
+    }
+
+    #[test]
+    fn a_plugin_allowed_that_fails_is_shown_failed() {
+        let dir = std::env::temp_dir().join(format!("artwork-fails-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("junk.{}", std::env::consts::DLL_EXTENSION));
+        std::fs::write(&path, "").unwrap();
+        let reg = Registry::with_plugins(std::slice::from_ref(&dir), &plugin::Settings::default());
+        assert_eq!(reg.pending().len(), 1);
+        reg.allow(&path, &mut plugin::Settings::default());
+        assert!(matches!(reg.files()[0].status, plugin::Status::Failed(_)));
+        assert_eq!(reg.errors().len(), 1);
+        // The user's settings, read as at startup.
+        let _ = plugin::Settings::read();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
     fn plugins_load_from_every_folder() {
         let base = std::env::temp_dir().join(format!("artwork-dirs-{}", std::process::id()));
         let junk = format!("junk.{}", std::env::consts::DLL_EXTENSION);

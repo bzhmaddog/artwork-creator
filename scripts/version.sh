@@ -5,8 +5,8 @@
 #
 # Usage:
 #   version.sh [check]
-#       Show the current version, the last release (its vX.Y.Z tag), the commits since
-#       and the suggested next version, with the reason.
+#       Show the current version, the plugin SDK's, the last release (its vX.Y.Z
+#       tag), the commits since and the suggested next version, with the reason.
 #   version.sh bump VERSION|major|minor|patch [--sdk VERSION|major|minor|patch]
 #       Set the app version (major, minor and patch count from the current one), and the
 #       plugin SDK version with --sdk, and commit it as "Bump version to X.Y.Z". Asks
@@ -24,7 +24,8 @@
 #     "support" -> minor;
 #   - anything else -> patch.
 # A version Cargo.toml was already bumped to is suggested when it is that far. With no
-# release yet, the current version is suggested as the first release.
+# release yet, the current version is suggested as the first release. The plugin SDK's
+# next version is suggested the same way from the commits that changed plugin-sdk.
 set -e
 
 cd "$(git rev-parse --show-toplevel)"
@@ -112,7 +113,15 @@ analyze() {
         return
     fi
     # shellcheck disable=SC2086
-    messages=$(git log --format='%s%n%b' "$range" -- $APP_PATHS)
+    classify "$current" $APP_PATHS
+}
+
+# classify VERSION PATH...: sets $level (major, minor or patch) and $reason from the
+# messages of the commits in $range that touch PATH...; VERSION is the version raised.
+classify() {
+    version=$1
+    shift
+    messages=$(git log --format='%s%n%b' "$range" -- "$@")
     if git diff "$range" -- "$ABI_FILE" | grep -Eq '^[+-]pub const ABI_VERSION'; then
         level=major
         reason="the plugin interface (ABI_VERSION) changed"
@@ -121,13 +130,13 @@ analyze() {
         reason="a commit is marked as breaking"
     elif echo "$messages" | grep -Eiwq "$FEATURE_WORDS"; then
         level=minor
-        reason="new features: $(git log --format='%s' "$range" -- $APP_PATHS | grep -Eiw "$FEATURE_WORDS" | head -n 3 | sed 's/^/"/; s/$/"/' | paste -sd, - | sed 's/,/, /g')"
+        reason="new features: $(git log --format='%s' "$range" -- "$@" | grep -Eiw "$FEATURE_WORDS" | head -n 3 | sed 's/^/"/; s/$/"/' | paste -sd, - | sed 's/,/, /g')"
     else
         level=patch
         reason="fixes and changes only"
     fi
     # Below 1.0.0, breaking changes only raise the minor version.
-    if [ "$level" = major ] && [ "${current%%.*}" = 0 ]; then
+    if [ "$level" = major ] && [ "${version%%.*}" = 0 ]; then
         level=minor
         reason="$reason (minor while below 1.0.0)"
     fi
@@ -156,29 +165,37 @@ suggested_version() {
     esac
 }
 
-# The plugin SDK version to release with the app when its interface (ABI_VERSION)
-# changed since the last release (minor while below 1.0.0, else major); empty otherwise.
-sdk_required() {
+# The plugin SDK version to release with the app, suggested like the app's from the
+# commits that changed plugin-sdk since the last release; empty when it did not change
+# or Cargo.toml was already bumped that far. Sets $sdk_next and $sdk_reason; keeps the
+# app's $level and $reason.
+sdk_suggested() {
+    sdk_next=
+    sdk_reason=
     [ "$range" = HEAD ] && return
-    git diff "$range" -- "$ABI_FILE" | grep -Eq '^[+-]pub const ABI_VERSION' || return 0
+    [ -n "$(git rev-list "$range" -- plugin-sdk)" ] || return 0
     sdk=$(toml_version "$SDK_TOML")
-    bump "$sdk" "$([ "${sdk%%.*}" = 0 ] && echo minor || echo major)"
+    sdk_released=$(git show "$tag:$SDK_TOML" 2>/dev/null | sed -n 's/^version = "\(.*\)"/\1/p' | head -n 1)
+    sdk_released=${sdk_released:-$sdk}
+    app_level=$level
+    app_reason=$reason
+    classify "$sdk_released" plugin-sdk
+    sdk_reason=$reason
+    version_gt "$(bump "$sdk_released" "$level")" "$sdk" && sdk_next=$(bump "$sdk_released" "$level")
+    level=$app_level
+    reason=$app_reason
 }
 
 sdk_status() {
-    sdk=$(toml_version "$SDK_TOML")
-    [ "$range" = HEAD ] && return
-    sdk_next=$(sdk_required)
-    if [ -n "$sdk_next" ]; then
-        echo "Plugin SDK $sdk: the plugin interface changed, release it too, e.g. SDK=$sdk_next"
-    elif [ -n "$(git diff --name-only "$range" -- plugin-sdk)" ]; then
-        echo "Plugin SDK $sdk: changed since $tag, consider SDK=patch or SDK=minor"
-    fi
+    sdk_suggested
+    [ -n "$sdk_next" ] && echo "Suggested SDK:     $sdk_next ($sdk_reason)"
+    return 0
 }
 
 cmd_check() {
     analyze_bumped
     echo "Current version: $current"
+    echo "Plugin SDK:      $(toml_version "$SDK_TOML")"
     echo "Last release:    ${tag:-none}"
     if [ -n "$released" ] && version_gt "$current" "$released"; then
         echo "                 (Cargo.toml was bumped since)"
@@ -210,7 +227,7 @@ cmd_check() {
         if [ "$next" = "$current" ]; then
             echo "Cargo.toml is at it: tag v$next to release it (see doc/releasing.md)"
         else
-            sdk_next=$(sdk_required)
+            sdk_suggested
             echo "Set it with: make version-bump APP=$next${sdk_next:+ SDK=$sdk_next}"
         fi
     fi

@@ -13,7 +13,8 @@ suggests the next version. Only commits that change the app count (`src`, `local
 never call for a release. It suggests minor when a commit message adds something
 ("Added...", "New...") or the plugin interface changed (major from 1.0.0 on), patch
 otherwise, counting from the last release; a version `Cargo.toml` was already bumped to is
-suggested when it is that far.
+suggested when it is that far. It suggests the plugin SDK's next version the same way, from
+the commits that changed `plugin-sdk`, and adds it to the `make version-bump` line.
 
 ```sh
 make version-check            # what changed since the last release, and the next version

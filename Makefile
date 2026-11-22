@@ -25,7 +25,8 @@
 #   make pre-commit   run those checks now: clippy for Linux and Windows, tests and
 #                     coverage on Linux;
 #                     ARGS=--linux or ARGS=--windows checks one target only
-#   make plugins      build the example plugins for Linux and Windows into plugins/
+#   make plugins      build the example plugins for Linux and Windows into plugins/, and
+#                     copy the Python example there
 #   make linux-portable
 #                     release build for Linux that runs on glibc GLIBC and later (older
 #                     distributions too), with cargo-zigbuild: install zig
@@ -66,7 +67,7 @@ LINUX_BIN   := target/$(LINUX)/release/$(APP)
 WINDOWS_BIN := target/$(WINDOWS)/release/$(APP).exe
 
 # Example plugins (crates in plugin-examples/), built as .so and .dll into plugins/,
-# where the app finds them when run from the repository.
+# where a debug build run from the repository (make run) finds them, with the Python example.
 PLUGINS     := halftone
 PLUGINS_DIR := plugins
 
@@ -114,6 +115,7 @@ run-windows: debug-windows
 test:
 	$(CARGO) test --workspace
 	python3 -m unittest discover -s scripts
+	python3 -m unittest discover -s plugin-sdk/python
 
 # Coverage of new code, as the Sonar quality gate measures it (see scripts/coverage.sh).
 MIN ?= 80
@@ -146,6 +148,7 @@ plugins:
 	for p in $(PLUGINS); do \
 		cp target/$(LINUX)/release/lib$$p.so target/$(WINDOWS)/release/$$p.dll $(PLUGINS_DIR)/; \
 	done
+	cp plugin-examples/python/*.py $(PLUGINS_DIR)/
 
 # Git hooks are versioned in .githooks/; this points the local clone at them.
 hooks:

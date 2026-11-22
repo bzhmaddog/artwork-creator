@@ -48,4 +48,6 @@ jobs:
         run: cargo test --workspace --locked
       - name: Script tests
         if: runner.os == 'Linux'
-        run: python3 -m unittest discover -s scripts
+        run: |
+          python3 -m unittest discover -s scripts
+          python3 -m unittest discover -s plugin-sdk/python

@@ -546,6 +546,48 @@ pub fn open_folder(folder: &Path) -> Result<(), String> {
     Ok(())
 }
 
+/// Opens the text file `path` in the system's text editor, never running it (a `.py`
+/// file's default program on Windows is Python): its "edit" action on Windows, Notepad
+/// when it has none; `open -t` on macOS; elsewhere the program for its type.
+pub fn edit_file(path: &Path) -> Result<(), String> {
+    let error = |e: &dyn std::fmt::Display| tr!("CANNOT_OPEN_FILE", path = path.display(), e = e);
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::UI::Shell::ShellExecuteW;
+        use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+        let wide = |s: &std::ffi::OsStr| s.encode_wide().chain([0]).collect::<Vec<u16>>();
+        let (verb, file) = (wide("edit".as_ref()), wide(path.as_os_str()));
+        // SAFETY: NUL-terminated wide strings, no window, no parameters.
+        let r = unsafe {
+            ShellExecuteW(
+                std::ptr::null_mut(),
+                verb.as_ptr(),
+                file.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                SW_SHOWNORMAL,
+            )
+        };
+        // Above 32: started.
+        if r as isize > 32 {
+            return Ok(());
+        }
+    }
+    let mut cmd = if cfg!(target_os = "windows") {
+        std::process::Command::new("notepad")
+    } else if cfg!(target_os = "macos") {
+        let mut c = std::process::Command::new("open");
+        c.arg("-t");
+        c
+    } else {
+        std::process::Command::new("xdg-open")
+    };
+    let mut child = cmd.arg(path).spawn().map_err(|e| error(&e))?;
+    std::thread::spawn(move || child.wait());
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

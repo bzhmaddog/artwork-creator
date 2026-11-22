@@ -62,8 +62,12 @@ fn main() -> eframe::Result {
     .init();
     // A project file can be passed on the command line (or by double-clicking an associated file).
     let project = std::env::args_os().nth(1).map(std::path::PathBuf::from);
-    // Plugins are loaded once, before any effect is used.
-    render::effects::init(render::effects::plugin::plugins_dir().as_deref());
+    // Plugins are loaded once, before any effect is used; Python ones not allowed yet
+    // wait for the user's answer (asked in the window).
+    render::effects::init(
+        &render::effects::plugin::plugins_dirs(),
+        &render::effects::plugin::Settings::read(),
+    );
 
     let options = eframe::NativeOptions {
         renderer: eframe::Renderer::Glow,
@@ -78,9 +82,24 @@ fn main() -> eframe::Result {
         ..Default::default()
     };
 
-    eframe::run_native(
+    let result = eframe::run_native(
         "Artwork Creator",
         options,
         Box::new(|cc| Ok(Box::new(app::ArtworkApp::new(cc, project)))),
-    )
+    );
+    // Restarted: started again once this one is closed and its settings written, with
+    // the project it had open.
+    if let Some(project) = RESTART.get()
+        && let Ok(exe) = std::env::current_exe()
+    {
+        let mut cmd = std::process::Command::new(exe);
+        cmd.args(project);
+        if let Err(e) = cmd.spawn() {
+            log::error!("cannot restart: {e}");
+        }
+    }
+    result
 }
+
+/// Set when the app closes to start again (see `main`): the project to open, if any.
+pub static RESTART: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();

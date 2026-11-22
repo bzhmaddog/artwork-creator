@@ -114,7 +114,7 @@ fn add_menu(ui: &mut Ui) -> Option<EffectInstance> {
             add(ui, effect);
         }
         // Each plugin's effects under its name.
-        for plugin in &reg.plugins {
+        for plugin in reg.plugins() {
             let effects: Vec<_> = plugin.effects.iter().filter_map(|id| reg.get(id)).collect();
             if effects.is_empty() {
                 continue;
@@ -127,11 +127,12 @@ fn add_menu(ui: &mut Ui) -> Option<EffectInstance> {
                 add(ui, effect);
             }
         }
-        if !reg.errors.is_empty() {
+        let errors = reg.errors();
+        if !errors.is_empty() {
             ui.separator();
-            let n = reg.errors.len();
+            let n = errors.len();
             let color = ui.visuals().warn_fg_color;
-            let tip = reg.errors.join("\n");
+            let tip = errors.join("\n");
             ui.horizontal(|ui| {
                 crate::ui::callout::warning_icon(ui, color).on_hover_text(&tip);
                 ui.colored_label(color, tr_n!("PLUGIN_PROBLEM_COUNT", n))
@@ -361,7 +362,7 @@ pub fn generator_menu(ui: &mut Ui, key: u64, inst: &mut EffectInstance) -> bool 
                 item(ui, g);
             }
             // Each plugin's generators under its name.
-            for plugin in &reg.plugins {
+            for plugin in reg.plugins() {
                 let gens: Vec<_> = plugin
                     .generators
                     .iter()

@@ -18,10 +18,11 @@ pub mod builtin;
 pub mod cache;
 pub mod generators;
 pub mod plugin;
+pub mod python;
 
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
-use std::path::Path;
+use std::path::PathBuf;
 use std::sync::OnceLock;
 
 use image::RgbaImage;
@@ -459,86 +460,224 @@ impl EffectInstance {
 
 /// All available effects and generators.
 pub struct Registry {
+    first: Part,
+    /// Python plugins new or changed since they were allowed to run, held back at
+    /// startup until the user allows them (see [`Registry::allow`]).
+    pending: Vec<plugin::Pending>,
+    /// For each pending plugin, once allowed: what it added, or why it failed.
+    late: Vec<OnceLock<Part>>,
+}
+
+/// Effects, generators and plugins loaded together, checked against those before them.
+#[derive(Default)]
+struct Part {
     effects: Vec<Box<dyn Effect>>,
     generators: Vec<Box<dyn Generator>>,
     /// Plugins that loaded.
-    pub plugins: Vec<plugin::PluginInfo>,
+    plugins: Vec<plugin::PluginInfo>,
     /// Why some plugins, or some of their effects, are not available.
-    pub errors: Vec<String>,
+    errors: Vec<String>,
+    /// The plugin files, with what became of them.
+    files: Vec<plugin::PluginFile>,
+}
+
+impl Part {
+    /// What was `loaded`, but an effect or a generator whose id is already used, by one
+    /// for which `taken` is true or by one before it in `loaded`.
+    fn checked(loaded: plugin::Loaded, taken: impl Fn(&str) -> bool) -> Self {
+        let mut part = Part {
+            plugins: loaded.plugins,
+            errors: loaded.errors,
+            files: loaded.files,
+            ..Default::default()
+        };
+        let left_out = |what: &str, plugin: Option<&str>, id: &str| {
+            let msg = format!(
+                "{}: {what} \"{id}\" left out, its id is already used",
+                plugin.unwrap_or_default()
+            );
+            log::warn!("{msg}");
+            msg
+        };
+        for e in loaded.effects {
+            if taken(e.id()) || part.params_of(e.id()).is_some() {
+                let msg = left_out("effect", e.plugin(), e.id());
+                part.errors.push(msg);
+            } else {
+                part.effects.push(e);
+            }
+        }
+        for g in loaded.generators {
+            if taken(g.id()) || part.params_of(g.id()).is_some() {
+                let msg = left_out("generator", g.plugin(), g.id());
+                part.errors.push(msg);
+            } else {
+                part.generators.push(g);
+            }
+        }
+        part
+    }
+
+    fn params_of(&self, id: &str) -> Option<&[ParamSpec]> {
+        let effect = self.effects.iter().find(|e| e.id() == id);
+        effect.map(|e| e.params()).or_else(|| {
+            let g = self.generators.iter().find(|g| g.id() == id);
+            g.map(|g| g.params())
+        })
+    }
 }
 
 impl Registry {
     /// The built-in effects and generators.
     fn builtin() -> Self {
         Self {
-            effects: builtin::all(),
-            generators: generators::all(),
-            plugins: Vec::new(),
-            errors: Vec::new(),
+            first: Part {
+                effects: builtin::all(),
+                generators: generators::all(),
+                ..Default::default()
+            },
+            pending: Vec::new(),
+            late: Vec::new(),
         }
     }
 
-    /// The built-in effects and generators, then those of the plugins in `dir`. One
-    /// whose id is already taken is left out.
-    fn with_plugins(dir: Option<&Path>) -> Self {
+    /// The built-in effects and generators, then those of the plugins in `dirs`, in
+    /// order, but those `settings` doesn't allow (see [`Registry::pending`]). One whose
+    /// id is already taken is left out.
+    fn with_plugins(dirs: &[PathBuf], settings: &plugin::Settings) -> Self {
         let mut reg = Self::builtin();
-        let Some(dir) = dir else {
-            return reg;
-        };
-        let loaded = plugin::load_dir(dir);
-        reg.errors = loaded.errors;
-        for e in loaded.effects {
-            if reg.get(e.id()).is_some() {
-                let msg = format!(
-                    "{}: effect \"{}\" left out, its id is already used",
-                    e.plugin().unwrap_or_default(),
-                    e.id()
-                );
-                log::warn!("{msg}");
-                reg.errors.push(msg);
-            } else {
-                reg.effects.push(e);
+        let mut loaded = plugin::Loaded::default();
+        for dir in dirs {
+            let more = plugin::load_dir(dir, settings);
+            for e in more.errors {
+                // "No Python" comes once, whatever the number of folders.
+                if e != python::PYTHON_MISSING || !loaded.errors.contains(&e) {
+                    loaded.errors.push(e);
+                }
             }
+            loaded.effects.extend(more.effects);
+            loaded.generators.extend(more.generators);
+            loaded.plugins.extend(more.plugins);
+            loaded.files.extend(more.files);
+            reg.pending.extend(more.pending);
         }
-        for g in loaded.generators {
-            if reg.params_of(g.id()).is_some() {
-                let msg = format!(
-                    "{}: generator \"{}\" left out, its id is already used",
-                    g.plugin().unwrap_or_default(),
-                    g.id()
-                );
-                log::warn!("{msg}");
-                reg.errors.push(msg);
-            } else {
-                reg.generators.push(g);
-            }
-        }
-        reg.plugins = loaded.plugins;
+        let mut part = Part::checked(loaded, |id| reg.params_of(id).is_some());
+        reg.first.effects.append(&mut part.effects);
+        reg.first.generators.append(&mut part.generators);
+        reg.first.plugins = part.plugins;
+        reg.first.errors = part.errors;
+        reg.first.files = part.files;
+        reg.late = reg.pending.iter().map(|_| OnceLock::new()).collect();
         reg
     }
 
-    pub fn get(&self, id: &str) -> Option<&dyn Effect> {
-        self.effects
+    /// The parts: the first, then those of the plugins allowed since.
+    fn parts(&self) -> impl Iterator<Item = &Part> {
+        std::iter::once(&self.first).chain(self.late.iter().filter_map(OnceLock::get))
+    }
+
+    /// The Python plugins waiting to be allowed.
+    pub fn pending(&self) -> Vec<&plugin::Pending> {
+        let waiting = self.pending.iter().zip(&self.late);
+        waiting
+            .filter(|(_, l)| l.get().is_none())
+            .map(|(p, _)| p)
+            .collect()
+    }
+
+    /// Allows the pending plugin `path` to run: remembered in `settings`, saved, and
+    /// loaded at once. Does nothing for a plugin not pending.
+    pub fn allow(&self, path: &std::path::Path, settings: &mut plugin::Settings) {
+        let Some((p, late)) = self
+            .pending
             .iter()
-            .find(|e| e.id() == id)
-            .map(|e| e.as_ref())
+            .zip(&self.late)
+            .find(|(p, l)| p.path == path && l.get().is_none())
+        else {
+            return;
+        };
+        settings.allow(p);
+        settings.save();
+        let file = p.path.file_name().unwrap_or_default().to_string_lossy();
+        let mut loaded = plugin::Loaded::default();
+        let result = plugin::load_file(&p.path, python::python());
+        let status = match result {
+            Ok((info, effects, generators)) => {
+                let status = plugin::Status::Loaded {
+                    name: info.name.clone(),
+                    version: info.version.clone(),
+                };
+                loaded.plugins.push(info);
+                loaded.effects.extend(effects);
+                loaded.generators.extend(generators);
+                status
+            }
+            Err(e) => {
+                loaded.errors.push(format!("{file}: {e}"));
+                plugin::Status::Failed(e)
+            }
+        };
+        loaded.files.push(plugin::PluginFile {
+            path: p.path.clone(),
+            python: plugin::is_python(&p.path),
+            status,
+        });
+        let _ = late.set(Part::checked(loaded, |id| self.params_of(id).is_some()));
+    }
+
+    /// How many plugins were allowed since startup: cached pictures made with effects or
+    /// generators that were missing are made again when it changes.
+    pub fn generation(&self) -> usize {
+        self.late.iter().filter(|l| l.get().is_some()).count()
+    }
+
+    /// Every plugin file found, in loading order, with what became of it (since it was
+    /// allowed, for a pending one).
+    pub fn files(&self) -> Vec<plugin::PluginFile> {
+        let mut files = self.first.files.clone();
+        for late in self
+            .late
+            .iter()
+            .filter_map(OnceLock::get)
+            .flat_map(|p| &p.files)
+        {
+            if let Some(f) = files.iter_mut().find(|f| f.path == late.path) {
+                *f = late.clone();
+            }
+        }
+        files
+    }
+
+    /// Plugins that loaded.
+    pub fn plugins(&self) -> impl Iterator<Item = &plugin::PluginInfo> {
+        self.parts().flat_map(|p| &p.plugins)
+    }
+
+    /// Why some plugins, or some of their effects, are not available.
+    pub fn errors(&self) -> Vec<&str> {
+        self.parts()
+            .flat_map(|p| p.errors.iter().map(String::as_str))
+            .collect()
+    }
+
+    pub fn get(&self, id: &str) -> Option<&dyn Effect> {
+        self.all().find(|e| e.id() == id)
     }
 
     /// In menu order.
     pub fn all(&self) -> impl Iterator<Item = &dyn Effect> {
-        self.effects.iter().map(|e| e.as_ref())
+        self.parts()
+            .flat_map(|p| p.effects.iter().map(|e| e.as_ref()))
     }
 
     pub fn generator(&self, id: &str) -> Option<&dyn Generator> {
-        self.generators
-            .iter()
-            .find(|g| g.id() == id)
-            .map(|g| g.as_ref())
+        self.generators().find(|g| g.id() == id)
     }
 
     /// In menu order.
     pub fn generators(&self) -> impl Iterator<Item = &dyn Generator> {
-        self.generators.iter().map(|g| g.as_ref())
+        self.parts()
+            .flat_map(|p| p.generators.iter().map(|g| g.as_ref()))
     }
 
     /// The parameters of the effect or generator `id`.
@@ -551,11 +690,11 @@ impl Registry {
 
 static REGISTRY: OnceLock<Registry> = OnceLock::new();
 
-/// Builds the registry with the plugins of `plugins_dir` (see
-/// [`plugin::plugins_dir`]). Call it once at startup, before [`registry`]; later calls
-/// return the registry already built.
-pub fn init(plugins_dir: Option<&Path>) -> &'static Registry {
-    REGISTRY.get_or_init(|| Registry::with_plugins(plugins_dir))
+/// Builds the registry with the plugins of `plugins_dirs` (see
+/// [`plugin::plugins_dirs`]), the Python ones only if `allowed` lists them. Call it once
+/// at startup, before [`registry`]; later calls return the registry already built.
+pub fn init(plugins_dirs: &[PathBuf], allowed: &plugin::Settings) -> &'static Registry {
+    REGISTRY.get_or_init(|| Registry::with_plugins(plugins_dirs, allowed))
 }
 
 /// The effects available in this run of the app: only the built-in ones if [`init`]
@@ -588,6 +727,7 @@ pub fn is_active(stack: &[EffectInstance]) -> bool {
 /// Identifies what the stack does to an image: equal keys give equal pixels.
 pub fn key(stack: &[EffectInstance]) -> u64 {
     let mut h = std::collections::hash_map::DefaultHasher::new();
+    registry().generation().hash(&mut h);
     for e in stack.iter().filter(|e| e.enabled) {
         e.effect.hash(&mut h);
         serde_json::to_string(&e.params)
@@ -706,6 +846,69 @@ pub fn par_pixels(img: &mut RgbaImage, f: impl Fn(&mut [u8; 4]) + Sync) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plugins_whose_ids_are_taken_are_left_out() {
+        let reg = Registry::builtin();
+        let loaded = plugin::Loaded {
+            effects: builtin::all(),
+            generators: generators::all(),
+            ..Default::default()
+        };
+        let n = loaded.effects.len() + loaded.generators.len();
+        let part = Part::checked(loaded, |id| reg.params_of(id).is_some());
+        assert!(part.effects.is_empty() && part.generators.is_empty());
+        assert_eq!(part.errors.len(), n);
+        assert!(part.errors[0].contains("left out"));
+    }
+
+    #[test]
+    fn a_plugin_allowed_that_fails_is_shown_failed() {
+        let dir = std::env::temp_dir().join(format!("artwork-fails-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join(format!("junk.{}", std::env::consts::DLL_EXTENSION));
+        std::fs::write(&path, "").unwrap();
+        let reg = Registry::with_plugins(std::slice::from_ref(&dir), &plugin::Settings::default());
+        assert_eq!(reg.pending().len(), 1);
+        reg.allow(&path, &mut plugin::Settings::default());
+        assert!(matches!(reg.files()[0].status, plugin::Status::Failed(_)));
+        assert_eq!(reg.errors().len(), 1);
+        // The user's settings, read as at startup.
+        let _ = plugin::Settings::read();
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn plugins_load_from_every_folder() {
+        let base = std::env::temp_dir().join(format!("artwork-dirs-{}", std::process::id()));
+        let junk = format!("junk.{}", std::env::consts::DLL_EXTENSION);
+        let dirs = [base.join("a"), base.join("b")];
+        for dir in &dirs {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join(&junk), "").unwrap();
+        }
+        // Not allowed: they wait.
+        let reg = Registry::with_plugins(&dirs, &plugin::Settings::default());
+        assert_eq!(reg.pending().len(), 2);
+        assert!(reg.errors().is_empty());
+        // The same file name in both: one error each, not merged.
+        let mut settings = plugin::Settings::default();
+        dirs.iter().for_each(|d| settings.allow_all(d));
+        let reg = Registry::with_plugins(&dirs, &settings);
+        assert_eq!(reg.errors().len(), 2, "{:?}", reg.errors());
+        assert!(reg.get("builtin.blur").is_some());
+        let _ = std::fs::remove_dir_all(base);
+        // Only folders that exist, once each; the working directory in debug builds only.
+        let found = plugin::plugins_dirs();
+        assert!(found.iter().all(|d| d.is_dir()));
+        let cwd = std::env::current_dir().unwrap().join("plugins");
+        assert_eq!(
+            found
+                .iter()
+                .any(|d| Some(d) == cwd.canonicalize().ok().as_ref()),
+            cwd.is_dir() && cfg!(debug_assertions)
+        );
+    }
 
     #[test]
     fn ease_follows_css_cubic_bezier() {

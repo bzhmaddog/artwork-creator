@@ -56,7 +56,8 @@ artwork is clipped to the panel outline and left blank in the holes.
   Dark), Language, Keyboard shortcuts….
 - **Tools**: Eyedropper; **Templates** submenu: New template…, Edit template…, Delete
   template…, Open template folder, Check template, Reference…, Compare with source, and
-  **Rescan templates** (looks again for templates added, changed or removed on disk).
+  **Rescan templates** (looks again for templates added, changed or removed on disk);
+  **Plugins** submenu: Manage plugins… (see [Plugins](#plugins)).
 - **Help**: About Artwork Creator (version and build date).
 
 Menu entries show their current keyboard shortcut.
@@ -175,7 +176,7 @@ does not fit on the page is flagged.
   current directory; installed, `../share/artwork-creator/templates` from the executable.
   The app never changes them, so an update can replace them.
 - **Your** templates: the `templates` folder of the app's data folder
-  (`~/.local/share/artworkcreator/templates` on Linux,
+  (`~/.local/share/artwork-creator/templates` on Linux,
   `%APPDATA%\Artwork Creator\data\templates` on Windows). One of yours named like a
   provided one (the same folder name) is used instead of it.
 - Editing a provided template edits a copy, saved into your templates under a new name;
@@ -808,18 +809,56 @@ page (a text's follow the font size).
 
 ## Plugins
 
-Plugins are shared libraries (`.dll` on Windows, `.so` on Linux) placed in a `plugins`
-folder next to the executable or, failing that, in the current directory. They add
-effects and generators (see [Generated fills](#generated-fills)).
+Plugins are shared libraries (`.dll` on Windows, `.so` on Linux) or Python scripts
+(`.py`). They add effects and generators (see [Generated fills](#generated-fills)). The
+app loads those of every `plugins` folder it finds, in this order:
+
+- next to the executable (or in `../share/artwork-creator/` from it, where the Linux
+  packages install their files);
+- **your** plugins: the `plugins` folder of the app's data folder
+  (`~/.local/share/artwork-creator/plugins` on Linux,
+  `%APPDATA%\Artwork Creator\data\plugins` on Windows), to create.
+
+Never from the current directory, which may be any folder, such as the one a project was
+opened from: plugins found there would run without being asked for. Debug builds also
+look there, so `make run` finds the `plugins` folder of the repository.
 
 - The app loads them at startup and lists their effects in **Add effect**, and their
   generators in a fill's **Generated** menu, under the plugin's name. A library that
   fails to load, or was made for a plugin interface version this app doesn't know, is
   skipped and reported at the bottom of the Add effect menu. Plugins made for version 1
   of the interface, which had effects only, still load.
+- Python plugins need Python 3.8 or later, found as `py -3` or `python` on Windows,
+  `python3` or `python` elsewhere. Without it they are skipped, and the Add effect menu
+  reports "Python plugins need Python 3, which was not found". The Windows installer
+  offers to install Python when none is installed; the `.deb` package recommends it
+  (apt installs it unless told not to); the AppImage uses the system's.
+- **A plugin runs only once you allow it**, a library or a Python plugin, wherever it
+  is. At startup, a plugin file that is new, or has changed since you allowed it, is not
+  loaded: once the window is open (after the question about recovering unsaved work),
+  the app opens the plugin manager, where it is "Waiting to be allowed" with an **Allow**
+  button. Allowing loads it at once (its effects and generators appear, and a project
+  using them is drawn again); the file is remembered with a SHA-256 of its content, in
+  `plugins.json` in the app's data folder, so a plugin that changes waits again. One not
+  allowed stays off, and waits again at the next start. A waiting plugin shows its file
+  name and "?" for its version: it has not run yet.
+- **Tools > Plugins > Manage plugins…** lists every plugin file found, with its name,
+  version, type (Python or Library) and what became of it: Loaded, Disabled, Waiting to
+  be allowed, or Failed to load (why in its tooltip). Its check box
+  enables or disables it; a disabled plugin is not loaded at all, nor asked about.
+  **Edit**, on a Python plugin's row, opens its file in your text editor (never runs it:
+  on Windows, its "edit" action, or Notepad). Enabling and disabling apply at the next
+  start (the window says so; its **Restart** button closes the app and starts it again
+  with the same project, asking first to save unsaved changes): until then, the effects
+  of a plugin disabled stay available. The choices are kept in `plugins.json`. To remove a plugin, delete its file.
+- Each Python plugin runs in a Python process of its own, started with the app and kept
+  running: its calls wait their turn. If it crashes, only that call fails, like an effect
+  error of a native plugin (the layer is drawn without it, the error goes to the log), and
+  the next call starts it again.
 - **Install only plugins you trust.** A plugin is native code running inside the app with
   all its rights: it can read and write your files, and a crash in it closes the app (the
-  autosave copy is then offered back).
+  autosave copy is then offered back). A Python plugin has your rights too, though a
+  crash in it doesn't close the app.
 - A project that uses an effect whose plugin is not installed still opens: the effect is
   shown as "Missing effect", is not applied, and is saved unchanged.
 - Effects and generators from plugins show their own names, untranslated.

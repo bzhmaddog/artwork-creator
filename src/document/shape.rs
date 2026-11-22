@@ -1609,7 +1609,9 @@ fn update_generated(layer: &mut Layer, px_per_unit: f32) {
         return;
     };
     let [w, h] = pixel_size(layer, px_per_unit);
-    let key = hash_of(&(inst, w.to_bits(), h.to_bits()));
+    // Made again once plugins allowed after startup are there.
+    let generation = crate::render::effects::registry().generation();
+    let key = hash_of(&(inst, w.to_bits(), h.to_bits(), generation));
     if layer
         .shape_state
         .generated

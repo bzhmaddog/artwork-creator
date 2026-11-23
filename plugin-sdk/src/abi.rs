@@ -96,7 +96,7 @@ pub type ApplyFn = unsafe extern "C" fn(
 #[derive(Clone, Copy, Debug)]
 pub struct EffectTable {
     /// Unique, stable id saved in projects, e.g. `"halftone.dots"`. Prefix it with
-    /// something unique to the plugin; `builtin.` is reserved.
+    /// something unique to the plugin; `builtin.` is reserved, and `/` not allowed.
     pub id: *const c_char,
     pub name: *const c_char,
     /// One line shown as a tooltip; may be empty.

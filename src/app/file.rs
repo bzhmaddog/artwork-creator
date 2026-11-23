@@ -361,6 +361,26 @@ impl ArtworkApp {
                     self.messages
                         .push(tr!("FONTS_NOT_INSTALLED", fonts = fonts.join("\n")));
                 }
+                // Plugin settings saved by a version the one installed may read differently;
+                // they are recorded as the installed version's from now on.
+                let reg = crate::render::effects::registry();
+                let mut outdated = Vec::new();
+                self.doc.for_each_layer_mut(|layer| {
+                    let generator = layer.shape.as_mut().and_then(|s| s.fill_generator.as_mut());
+                    let mut older = false;
+                    for inst in layer.effects.iter_mut().chain(generator) {
+                        older |= reg.update_version(inst);
+                    }
+                    if older {
+                        outdated.push(layer.name.clone());
+                    }
+                });
+                if !outdated.is_empty() {
+                    self.messages.push(tr!(
+                        "PLUGIN_SETTINGS_OUTDATED",
+                        layers = outdated.join("\n")
+                    ));
+                }
                 // Its own copy of its template, placed as that says.
                 self.kept_fingerprint = None;
                 self.postponed_fingerprint = None;

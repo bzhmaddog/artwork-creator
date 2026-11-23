@@ -179,6 +179,12 @@ pub struct ArtworkApp {
     /// The plugin manager was opened at the start for Python plugins waiting to be
     /// allowed (once).
     plugins_offered: bool,
+    /// Looking for new plugin versions, from the start until it's done.
+    plugin_check:
+        Option<std::thread::JoinHandle<(crate::render::effects::repository::Catalog, usize)>>,
+    /// New plugin versions found at startup, to ask about: the repositories' lists, and
+    /// how many plugins have one.
+    plugin_updates: Option<(crate::render::effects::repository::Catalog, usize)>,
     /// Closing to start again (the plugin manager's Restart); canceled with the close.
     restarting: bool,
     /// The project is about to be closed or replaced with unsaved changes: ask whether
@@ -360,6 +366,8 @@ impl ArtworkApp {
             shortcuts_editor: None,
             plugin_manager: None,
             plugins_offered: false,
+            plugin_check: crate::ui::plugins::check_updates(),
+            plugin_updates: None,
             restarting: false,
             confirm_leave: None,
             about: false,
@@ -766,6 +774,7 @@ impl eframe::App for ArtworkApp {
         self.template_end_modal(&ctx);
         self.recovery_modal(&ctx);
         self.offer_plugins();
+        self.plugin_updates_modal(&ctx);
         self.shortcuts_window(&ctx);
         self.plugins_window(&ctx);
 

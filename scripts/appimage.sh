@@ -4,8 +4,9 @@
 #
 #   sh scripts/appimage.sh <executable> <output.AppImage>
 #
-# The AppDir has the executable in usr/bin/ and the templates in
-# usr/share/artwork-creator/, where the app looks for them (`shipped_dir`). appimagetool
+# The AppDir has the executable in usr/bin/, the templates in usr/share/artwork-creator/,
+# where the app looks for them (`shipped_dir`), and the Python of the Python plugins
+# (target/python-linux, from scripts/python-linux.sh) in usr/lib/artwork-creator/python/. appimagetool
 # and the AppImage runtime are downloaded once into $APPIMAGE_TOOLS (default
 # ~/.cache/appimage), at pinned versions checked against their SHA-256; raise them on
 # purpose.
@@ -44,6 +45,10 @@ trap 'rm -rf "$appdir"' EXIT
 mkdir -p "$appdir/usr/bin" "$appdir/usr/share/$APP"
 cp "$exe" "$appdir/usr/bin/$APP"
 cp -r templates "$appdir/usr/share/$APP/"
+[ -f target/python-linux/bin/python3 ] || sh scripts/python-linux.sh >/dev/null
+mkdir -p "$appdir/usr/lib/$APP"
+cp -r target/python-linux "$appdir/usr/lib/$APP/python"
+rm "$appdir/usr/lib/$APP/python/.version"
 cp assets/$APP.desktop "$appdir/"
 cp assets/icon/png/$APP-256.png "$appdir/$APP.png"
 ln -s usr/bin/$APP "$appdir/AppRun"

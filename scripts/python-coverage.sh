@@ -17,5 +17,5 @@ rm -f "$DATA"
 "$PYTHON" -m coverage run --data-file="$DATA" --source=scripts \
     -m unittest discover -s scripts
 "$PYTHON" -m coverage run --data-file="$DATA" --append \
-    --source=plugin-sdk/python,plugin-examples/python \
+    --source=plugin-sdk/python \
     -m unittest discover -s plugin-sdk/python

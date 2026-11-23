@@ -1,18 +1,15 @@
-"""Tests of the Python plugin SDK and of the example plugin
-(python3 -m unittest discover -s plugin-sdk/python)."""
+"""Tests of the Python plugin SDK (python3 -m unittest discover -s plugin-sdk/python)."""
 
 import io
 import json
 import os
-import runpy
 import subprocess
 import sys
+import tempfile
 import unittest
 
 import artwork_plugin_sdk as ap
 
-HERE = os.path.dirname(os.path.abspath(__file__))
-EXAMPLE = os.path.join(HERE, "..", "..", "plugin-examples", "python", "posterize.py")
 
 
 class Fill(ap.Effect):
@@ -136,53 +133,17 @@ class SdkTest(unittest.TestCase):
         with open(ap.__file__, encoding="utf-8") as f:
             boot = f.read() + "\nmain(sys.argv[1])\n"
         request = json.dumps({"op": "describe"}).encode() + b"\n"
-        out = subprocess.run([sys.executable, "-c", boot, EXAMPLE], input=request,
-                             capture_output=True, check=True).stdout
-        self.assertEqual(json.loads(out)["name"], "Python example")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "sample.py")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write("from artwork_plugin_sdk import Plugin\nplugin = Plugin('Sample', '1')\n")
+            out = subprocess.run([sys.executable, "-c", boot, path], input=request,
+                                 capture_output=True, check=True).stdout
+        self.assertEqual(json.loads(out)["name"], "Sample")
         bad = subprocess.run([sys.executable, "-c", boot, os.devnull], input=b"",
                              capture_output=True)
         self.assertNotEqual(bad.returncode, 0)
         self.assertIn(b"defines no plugin", bad.stderr)
-
-
-class ExampleTest(unittest.TestCase):
-    def setUp(self):
-        self.plugin = runpy.run_path(EXAMPLE)["plugin"]
-
-    def test_posterize(self):
-        [(answer, pixels)] = exchange(self.plugin, (
-            {"op": "apply", "id": "pyexample.posterize", "values": {"levels": 2},
-             "width": 2, "height": 1, "scale": 1.0}, bytes([10, 200, 127, 77, 128, 0, 255, 255])))
-        self.assertTrue(answer["ok"], answer)
-        self.assertEqual(pixels, bytes([0, 255, 0, 77, 255, 0, 255, 255]))
-
-    def bands(self, angle, width, height):
-        values = {"width": 1, "angle": angle, "first": "#000000ff", "second": "#ffffffff"}
-        [(answer, pixels)] = exchange(self.plugin, (
-            {"op": "generate", "id": "pyexample.bands", "values": values,
-             "width": width, "height": height, "px_per_mm": 2.0}, b""))
-        self.assertTrue(answer["ok"], answer)
-        # One character per pixel: 0 for the first color, 1 for the second.
-        return ["".join("01"[pixels[(y * width + x) * 4] // 255] for x in range(width))
-                for y in range(height)]
-
-    def test_bands_turn(self):
-        self.assertEqual(self.bands(0, 3, 5), ["000", "000", "111", "111", "000"])
-        self.assertEqual(self.bands(90, 5, 2), ["00110", "00110"])
-        self.assertEqual(self.bands(-90, 5, 1), ["11001"])
-        self.assertEqual(self.bands(45, 4, 4), ["0011", "0111", "1110", "1100"])
-
-
-
-class SwapChannelsTest(unittest.TestCase):
-    def test_swaps(self):
-        plugin = runpy.run_path(os.path.join(HERE, "..", "..", "plugin-examples", "python",
-                                             "swap_channels.py"))["plugin"]
-        [(answer, pixels)] = exchange(plugin, (
-            {"op": "apply", "id": "pyswap.swap", "values": {"pair": "green-blue"},
-             "width": 1, "height": 1, "scale": 1.0}, bytes([1, 2, 3, 4])))
-        self.assertTrue(answer["ok"], answer)
-        self.assertEqual(pixels, bytes([1, 3, 2, 4]))
 
 
 if __name__ == "__main__":

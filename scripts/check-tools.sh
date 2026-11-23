@@ -67,8 +67,10 @@ tool 0 zig "old-glibc Linux build (make linux-portable)" "unpack the x86_64 Linu
 tool 0 cargo-zigbuild "old-glibc Linux build (make linux-portable)" "cargo install cargo-zigbuild --locked" cargo-zigbuild --version
 tool 0 cargo-deb "Debian package (make deb)" "cargo install cargo-deb --locked" cargo deb --version
 tool 0 zip "Windows .zip (make dist)" "sudo apt install zip" has zip
-tool 0 curl "AppImage tools download (make appimage)" "sudo apt install curl" has curl
+tool 0 curl "downloads (make appimage, the Pythons of the packages)" "sudo apt install curl" has curl
+tool 0 unzip "embeddable Python (the Windows packages)" "sudo apt install unzip" has unzip
 tool 0 "Docker or Podman" "make windows-setup, make check-dependencies" "install Docker or Podman" sh -c "command -v docker || command -v podman"
+tool 0 "Windows SDK" "Microsoft Store package (make msix)" "install the Windows SDK on Windows (https://developer.microsoft.com/windows/downloads/windows-sdk/)" sh -c "ls '/mnt/c/Program Files (x86)/Windows Kits/10/bin/'*/x64/makeappx.exe || command -v makeappx.exe"
 
 if [ $missing -gt 0 ]; then
     echo "check-tools: $missing required tool(s) missing." >&2

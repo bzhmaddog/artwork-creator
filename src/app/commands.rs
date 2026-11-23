@@ -394,7 +394,7 @@ impl ArtworkApp {
             Command::EyedropperTool => self.canvas.eyedropper = true,
             Command::ClearPaint => self.dirty |= canvas::clear_paint(&mut self.doc, self.selected),
             Command::ManagePlugins => {
-                self.plugin_manager = Some(crate::ui::plugins::Manager::new());
+                self.plugin_manager = Some(crate::ui::plugins::Manager::new(None));
             }
             // Only while a canvas is selected, to paint in.
             Command::PencilTool | Command::BrushTool | Command::EraserTool => {
@@ -427,7 +427,57 @@ impl ArtworkApp {
         }
         self.plugins_offered = true;
         if !crate::render::effects::registry().pending().is_empty() {
-            self.plugin_manager = Some(crate::ui::plugins::Manager::new());
+            self.plugin_manager = Some(crate::ui::plugins::Manager::new(None));
+        }
+    }
+
+    /// The question asked once new plugin versions are found at startup: Review opens the
+    /// plugin manager on its Installed tab, the new versions highlighted; Not now (Esc
+    /// too) leaves them for another time. A plugin manager already open just shows them.
+    pub(super) fn plugin_updates_modal(&mut self, ctx: &egui::Context) {
+        if let Some(check) = &self.plugin_check {
+            if !check.is_finished() {
+                ctx.request_repaint_after(std::time::Duration::from_millis(500));
+                return;
+            }
+            let check = self.plugin_check.take().unwrap();
+            let (catalog, n) = check.join().unwrap_or_default();
+            if n > 0 {
+                self.plugin_updates = Some((catalog, n));
+            }
+        }
+        if self.plugin_updates.is_none()
+            || !self.plugins_offered
+            || !self.orphans.is_empty()
+            || !self.messages.is_empty()
+            || self.confirm_leave.is_some()
+            || self.leave_after_save.is_some()
+        {
+            return;
+        }
+        if let Some(manager) = &mut self.plugin_manager {
+            let (catalog, _) = self.plugin_updates.take().unwrap();
+            manager.set_catalog(catalog);
+            return;
+        }
+        let n = self.plugin_updates.as_ref().map_or(0, |(_, n)| *n);
+        let (mut review, mut later) = (false, false);
+        let response = dialog(ctx, "plugin_updates").show(ctx, |ui| {
+            ui.set_width(420.0);
+            ui.strong(tr!("PLUGIN_UPDATES_TITLE"));
+            ui.add_space(4.0);
+            ui.label(tr_n!("PLUGIN_UPDATES_TEXT", n));
+            ui.add_space(8.0);
+            dialog_button_row(ui, |ui| {
+                review = ui.button(tr!("REVIEW_PLUGIN_UPDATES")).clicked();
+                later = ui.button(tr!("NOT_NOW")).clicked();
+            });
+        });
+        if review {
+            let (catalog, _) = self.plugin_updates.take().unwrap();
+            self.plugin_manager = Some(crate::ui::plugins::Manager::new(Some(catalog)));
+        } else if later || response.should_close() {
+            self.plugin_updates = None;
         }
     }
 

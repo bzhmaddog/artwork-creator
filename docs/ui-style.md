@@ -22,9 +22,10 @@ the image's test (`ui_tokens` in `src/ui/gallery.rs`). Values used by only one w
 
 - Every text has a translation key (see CLAUDE.md and README.md). Plain ASCII punctuation:
   `'` and `"..."`, not `’` or `« »`, also in French.
-- A helper text (an explanation, an empty state, a tip, a warning) is a callout:
+- A helper text (an explanation, an empty state, a tip, a warning, an error) is a callout:
   `callout::callout`, or `callout_small` in tight places (a menu, a table cell, a bar),
-  in the tone that fits: `Info`, `Tip` or `Warning`. Data shown for information
+  in the tone that fits: `Info`, `Tip`, `Warning` or `Error`. A button acting on what it
+  says goes inside it, at its right end (`callout_with`). Data shown for information
   (sizes, counts, paths) stays plain weak text (`ui.weak`).
 - Labels can't be selected (`selectable_labels = false` in `app::set_interaction`).
 - Don't add notes, hints or tooltips nobody asked for; one generic message rather than
@@ -59,7 +60,8 @@ the image's test (`ui_tokens` in `src/ui/gallery.rs`). Values used by only one w
 - A position or size in mm is `mm_value` (one decimal, up to 5000 mm).
 - A 0 to 100 % value is a slider, unless something else already sets it (a gradient
   stop is dragged on its bar, so its position is a plain field).
-- A list of values is a drop-down (`properties::choice`, 130 pt wide).
+- A list of values is a drop-down (`properties::choice`, 130 pt wide); one of names that
+  run longer (the plugin manager's repositories) is 260 pt wide.
 - A color is a color button (`colors::button`, `linked_button` when it can be linked to
   a color variable): a square swatch, a chain drawn in it when linked.
 - Fields in a popup get their frames back with `layers::field_frames`.
@@ -71,6 +73,9 @@ the image's test (`ui_tokens` in `src/ui/gallery.rs`). Values used by only one w
   Page, Template and Print panels (`PANEL_LABELS`, rows 4 pt apart), so controls line up
   from one section to the next in every language. A new label goes in the list.
 - Settings under a row (a fill's) go across the whole row, 8 pt in: `wide_row`.
+- A table whose rows come in groups (the plugin manager's Installed tab, by repository)
+  has a row above each group with its name in the strong text color (as `ui.strong`), drawn across the row from the first
+  column without widening it.
 - A Properties section is `properties::section`: a line above, the fold arrow and title,
   extra buttons at its right, its body not indented. Folding sections inside it (a fill's
   Settings, each effect) indent their body by `spacing.indent`, 8 pt, set app-wide in
@@ -83,6 +88,8 @@ the image's test (`ui_tokens` in `src/ui/gallery.rs`). Values used by only one w
 - Its buttons sit at the right of the bottom row, the main one rightmost and Cancel on
   its left (`dialog_buttons` / `dialog_button_row`); a secondary one ("Close without
   saving", Unlink) goes apart at the left edge (`at_left_edge`).
+- A dialog with tabs (the plugin manager) shows them as a row of `selectable_value`
+  buttons under its title, a separator below; the dialog keeps one width for all tabs.
 - A popup with text fields has a fixed width: a field with `desired_width(f32::INFINITY)`
   would stretch it across the screen.
 - A button or menu entry that runs a command (`ui::shortcuts::Command`) shows its

@@ -53,12 +53,12 @@ make            # release builds for Linux and Windows
 make linux      # Linux only
 make windows    # Windows .exe only
 make test       # run the tests
-make plugins    # build the example plugins into plugins/ (.so and .dll)
 make linux-portable  # Linux build that also runs on older distributions (see below)
 make dist       # package each build with the templates folder into dist/
 make deb        # Linux .deb package into dist/ (needs cargo-deb)
 make appimage   # Linux AppImage into dist/
 make windows-setup   # Windows installer into dist/ (Inno Setup in a Docker/Podman container)
+make msix       # Microsoft Store package into dist/ (the Windows SDK's makeappx, from WSL2)
 ```
 
 The Linux packages (`make dist`, `make deb`, `make appimage`) are made from
@@ -77,9 +77,18 @@ Windows ([Inno Setup](https://jrsoftware.org/isinfo.php), from
 and `.artwork` files opened with the app; a `.deb` (settings in `Cargo.toml`, made with
 [cargo-deb](https://github.com/kornelski/cargo-deb)) and an AppImage
 ([`scripts/appimage.sh`](scripts/appimage.sh)) for Linux. Built for glibc 2.28, the `.deb`
-installs on any Debian or Ubuntu from Debian 10 / Ubuntu 20.04 on. Installed, the app finds
-its templates in `../share/artwork-creator/` from the executable when there are none next
-to it.
+installs on any Debian or Ubuntu from Debian 10 / Ubuntu 20.04 on. The Microsoft Store gets
+an MSIX package instead ([`installer/msix`](installer/msix), `make msix`), which the Store
+signs. Every package ships a Python of its own for the Python plugins, the same version,
+with pip to install the packages plugins need, at pinned versions checked against their
+SHA-256: the Windows ones (zip, setup `.exe`, MSIX) python.org's embeddable Python with
+pip's wheel, in a `python` folder next to the app
+([`scripts/python-embed.sh`](scripts/python-embed.sh)); the Linux ones a relocatable
+CPython from [python-build-standalone](https://github.com/astral-sh/python-build-standalone),
+in a `python` folder next to the app (`.tar.gz`) or in `../lib/artwork-creator/python/`
+(`.deb`, AppImage) ([`scripts/python-linux.sh`](scripts/python-linux.sh)). Installed, the
+app finds its templates in `../share/artwork-creator/` from the executable when there are
+none next to it.
 
 The app's icon is in [`assets/icon`](assets/icon): the SVG it is drawn from, PNGs from 16
 to 1024 px and the Windows `.ico`. `build.rs` builds the `.ico` into the Windows
@@ -163,16 +172,16 @@ Plugins are shared libraries (`.dll` on Windows, `.so` on Linux) or Python scrip
 (`.py`) adding effects and generators (a shape's generated fill), loaded at startup from
 the `plugins` folder next to the app and from the one in its data folder (never from the
 current directory, except in debug builds); see "Plugins" in [docs/specs.md](docs/specs.md#plugins) for how the app finds
-and uses them.
+and uses them, and how to install plugins from a repository with the plugin manager.
 
 ### Writing a plugin
 
 In Rust, use the [`artwork-plugin-sdk`](plugin-sdk) crate: implement its `Effect` trait,
 which works on straight RGBA pixels, or its `Generator` trait, which draws a shape's
 fill given its pixels per mm; both describe their parameters so the app builds their
-controls. Export them with `export_plugin!`. The crate must be a `cdylib`. See
-[`plugin-examples/halftone`](plugin-examples/halftone) for a complete example, built by
-`make plugins`.
+controls. Export them with `export_plugin!`. The crate must be a `cdylib`. The
+[artwork-creator-plugins](https://github.com/bzhmaddog/artwork-creator-plugins)
+repository has complete examples, in Rust and Python.
 
 Other languages can implement the C interface described in
 [`plugin-sdk/include/artwork_plugin.h`](plugin-sdk/include/artwork_plugin.h): one
@@ -185,10 +194,12 @@ generators=[...])` with subclasses of `Effect` (`apply(image, values, scale)`) a
 `Generator` (`generate(image, values, px_per_mm)`) from the
 [`artwork_plugin_sdk`](plugin-sdk/python/artwork_plugin_sdk.py) module, which the app provides
 when it runs the file. Pixels are a `bytearray` (a writable numpy view works too, if
-numpy is installed); values are a dict. The module's docstring also describes the
+numpy is installed); values are a dict. List the packages it needs, if any, in a PEP 723
+block at the top of the file (`# /// script`, `# dependencies = ["numpy"]`, `# ///`): the
+app's own Python installs them when the plugin is allowed. The module's docstring also describes the
 protocol between the app and the plugin: a line of JSON each way over stdin and stdout.
-See [`plugin-examples/python/posterize.py`](plugin-examples/python/posterize.py), copied
-into `plugins/` by `make plugins`; its tests run with `make test`.
+See the Python plugins of
+[artwork-creator-plugins](https://github.com/bzhmaddog/artwork-creator-plugins).
 
 Effect and generator ids are saved in projects, so keep them stable and prefix them with
 something unique to your plugin (`builtin.` is reserved). Both may run on several threads

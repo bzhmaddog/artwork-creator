@@ -64,8 +64,12 @@ version too. It asks before committing, and makes no tag and pushes nothing. See
 
 5. Publishing runs the **Pages** workflow, which puts the Windows installer at
    `https://bzhmaddog.github.io/artwork-creator/download/vX.Y.Z/artwork-creator-windows-setup.exe`:
-   the link to give the Microsoft Store, which doesn't accept release asset links (they
-   redirect). The Store listing texts are in `installer/store/` (one `.md` file per
+   the link for the download page. The Microsoft Store gets the MSIX package instead:
+   download the **store-msix** artifact of the Release workflow run (Actions > the run >
+   Artifacts) and upload the `.msix` in Partner Center (the app's submission > Packages).
+   It is unsigned; the Store signs it. Its Identity Name and Publisher in
+   `installer/msix/AppxManifest.xml` are those Partner Center gives the product
+   (Product management > Product identity). The Store listing texts are in `installer/store/` (one `.md` file per
    language); after changing them, `make store-listing` writes the CSV to import in
    Partner Center (Store listings > Import), with the images next to it.
 
@@ -75,4 +79,5 @@ Run the **Release** workflow by hand (Actions > Release > Run workflow): it only
 packages and keeps them as the run's artifacts for 7 days. Locally, `make dist` builds the
 same packages into `dist/`, `make deb` and `make appimage` the Linux installers (all three
 need zig and cargo-zigbuild: see "Building" in README.md), and `make windows-setup` the
-Windows one (Inno Setup with Wine in a Docker or Podman container).
+Windows one (Inno Setup with Wine in a Docker or Podman container). `make msix` builds the
+Store package from WSL2 with the Windows SDK's `makeappx` and `makepri`.

@@ -1672,6 +1672,12 @@ mod tests {
             enabled: false,
             params: ParamValues::from([("x".into(), serde_json::Value::from(3))]),
             links: Default::default(),
+            // The plugin it came from is saved, to offer to install it.
+            plugin: Some(crate::render::effects::PluginRef {
+                id: "not-installed".into(),
+                version: "1.0.0".into(),
+            }),
+            name: Some("Not installed".into()),
         });
         let json = serde_json::to_string(&l).unwrap();
         let back: Layer = serde_json::from_str(&json).unwrap();

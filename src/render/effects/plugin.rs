@@ -20,11 +20,108 @@ use super::{Effect, Generator, ParamKind, ParamSpec, Params, color_from_hex, pyt
 pub struct PluginInfo {
     pub name: String,
     pub version: String,
-    pub path: PathBuf,
     /// Ids of its effects.
     pub effects: Vec<String>,
     /// Ids of its generators.
     pub generators: Vec<String>,
+    /// The repository it was installed from; `None` for one put in a plugins folder by
+    /// hand.
+    pub source: Option<Source>,
+    /// Its id and version in that repository, as recorded when it was installed.
+    pub entry: Option<Installed>,
+}
+
+/// A plugin file installed from a repository, as its origin's `source.json` records it.
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct Installed {
+    #[serde(flatten)]
+    pub entry: super::PluginRef,
+    /// The oldest version of the plugin whose saved settings this one reads; all of them
+    /// if `None` (see [`Version::compatible_from`](super::repository::Version)).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compatible_from: Option<String>,
+}
+
+/// A repository plugins were installed from, as `source.json` in its origin's folder
+/// says (see [`origin`]).
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct Source {
+    /// Its folder's name.
+    #[serde(skip)]
+    pub origin: String,
+    /// The name its list gives; empty if unknown.
+    pub name: String,
+    /// The address of its list.
+    pub url: String,
+    /// The plugins installed from it: by file name, their id and version there.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub plugins: std::collections::BTreeMap<String, Installed>,
+}
+
+/// The file in an origin's folder naming its repository.
+const SOURCE_FILE: &str = "source.json";
+
+impl Source {
+    /// The repository of the origin folder `dir`, from its `source.json`.
+    fn read(dir: &Path, origin: &str) -> Self {
+        let file = std::fs::read(dir.join(SOURCE_FILE)).ok();
+        let mut s: Self = file
+            .and_then(|data| serde_json::from_slice(&data).ok())
+            .unwrap_or_default();
+        s.origin = origin.to_owned();
+        s
+    }
+
+    /// Writes the `source.json` of each repository of `lists` (address and name) that
+    /// has a folder in the user's plugins folder, when it doesn't say that already: the
+    /// folders of plugins installed without it, or of a repository renamed since.
+    pub fn name_folders<'a>(lists: impl IntoIterator<Item = (&'a str, &'a str)>) {
+        let Some(plugins) = user_plugins_dir() else {
+            return;
+        };
+        for (url, name) in lists {
+            let origin = origin(url);
+            let dir = plugins.join(&origin);
+            let s = Self::read(&dir, &origin);
+            if dir.is_dir()
+                && (s.name != name || s.url != url)
+                && let Err(e) = Self::write(&dir, name, url)
+            {
+                log::warn!("cannot write {}: {e}", dir.join(SOURCE_FILE).display());
+            }
+        }
+    }
+
+    /// Writes the `source.json` of the repository `name` at `url` in `dir`, its origin's
+    /// folder (created if need be).
+    pub fn write(dir: &Path, name: &str, url: &str) -> std::io::Result<()> {
+        let mut s = Self::read(dir, "");
+        s.name = name.to_owned();
+        s.url = url.to_owned();
+        s.save(dir)
+    }
+
+    /// Records in the `source.json` of `dir` that the plugin file `file` is `entry`,
+    /// in place of the file `replaces`.
+    pub fn record(
+        dir: &Path,
+        file: &str,
+        entry: Installed,
+        replaces: Option<&str>,
+    ) -> std::io::Result<()> {
+        let mut s = Self::read(dir, "");
+        if let Some(old) = replaces {
+            s.plugins.remove(old);
+        }
+        s.plugins.insert(file.to_owned(), entry);
+        s.save(dir)
+    }
+
+    fn save(&self, dir: &Path) -> std::io::Result<()> {
+        std::fs::create_dir_all(dir)?;
+        std::fs::write(dir.join(SOURCE_FILE), serde_json::to_vec_pretty(self)?)
+    }
 }
 
 /// An effect of a plugin.
@@ -226,6 +323,43 @@ pub fn plugins_dirs() -> Vec<PathBuf> {
     found
 }
 
+/// Length of an origin's name (see [`origin`]).
+const ORIGIN_LEN: usize = 16;
+
+/// The origin of the plugins installed from the repository at `url`: a hash of its
+/// address, the name of the folder of the user's plugins folder they go in. A plugin's
+/// effects and generators from there have ids made of it and theirs, `<origin>/<id>`:
+/// the same plugin from two repositories is two plugins.
+pub fn origin(url: &str) -> String {
+    hash(url.as_bytes())[..ORIGIN_LEN].to_owned()
+}
+
+/// The origin of the plugin file `path`: its folder's name if that is an origin's, else
+/// `None` (a plugin put in a plugins folder by hand).
+pub fn origin_of(path: &Path) -> Option<&str> {
+    let name = path.parent()?.file_name()?.to_str()?;
+    is_origin(name).then_some(name)
+}
+
+/// The id and version of the plugin file `path` in the repository it was installed from,
+/// as its origin's `source.json` recorded them; `None` for a file not installed from one.
+pub fn recorded(path: &Path) -> Option<Installed> {
+    let file = path.file_name()?.to_str()?;
+    source_of(path)?.plugins.remove(file)
+}
+
+/// The repository the plugin file `path` was installed from, as its origin's
+/// `source.json` says; `None` for a file not installed from one.
+pub fn source_of(path: &Path) -> Option<Source> {
+    let origin = origin_of(path)?;
+    Some(Source::read(path.parent()?, origin))
+}
+
+/// Whether `name` is an origin's (see [`origin`]).
+pub fn is_origin(name: &str) -> bool {
+    name.len() == ORIGIN_LEN && name.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+}
+
 /// The user's plugins folder, in the app's data folder; it may not exist yet.
 pub fn user_plugins_dir() -> Option<PathBuf> {
     crate::data_dir().map(|d| d.join("plugins"))
@@ -233,7 +367,8 @@ pub fn user_plugins_dir() -> Option<PathBuf> {
 
 /// The user's choices about plugins, kept in `plugins.json` in the app's data folder:
 /// the Python plugins allowed to run, each file's path with the SHA-256 of the content
-/// allowed (a file that changed is asked about again), and the plugins disabled.
+/// allowed (a file that changed is asked about again), the plugins disabled, and the
+/// plugin repositories the user added.
 #[derive(Debug, Default)]
 pub struct Settings {
     /// Where it is saved; `None`: not saved.
@@ -247,6 +382,8 @@ struct Saved {
     /// Path to hash.
     allowed: std::collections::BTreeMap<String, String>,
     disabled: std::collections::BTreeSet<String>,
+    /// Addresses of plugin lists; `None`: never changed, the official one only.
+    repositories: Option<Vec<String>>,
 }
 
 impl Settings {
@@ -283,6 +420,32 @@ impl Settings {
         } else {
             self.saved.disabled.remove(&key(path));
         }
+    }
+
+    /// Drops what is kept about the plugin file `path`, uninstalled.
+    pub fn forget(&mut self, path: &Path) {
+        self.saved.allowed.remove(&key(path));
+        self.saved.disabled.remove(&key(path));
+    }
+
+    /// The plugin repositories, in the order added: the official one until removed.
+    pub fn repositories(&self) -> Vec<String> {
+        let official = || vec![super::repository::OFFICIAL.to_owned()];
+        self.saved.repositories.clone().unwrap_or_else(official)
+    }
+
+    pub fn add_repository(&mut self, url: &str) {
+        let mut list = self.repositories();
+        if !list.iter().any(|r| r == url) {
+            list.push(url.to_owned());
+        }
+        self.saved.repositories = Some(list);
+    }
+
+    pub fn remove_repository(&mut self, url: &str) {
+        let mut list = self.repositories();
+        list.retain(|r| r != url);
+        self.saved.repositories = Some(list);
     }
 
     /// Allows every plugin file of `dir`, as it is now.
@@ -374,7 +537,8 @@ pub struct Pending {
     pub hash: String,
 }
 
-/// Loads every library of this platform (`.dll` or `.so`) in `dir`, in name order.
+/// Loads every library of this platform (`.dll` or `.so`) and Python plugin in `dir`,
+/// in name order, then those of its origins' folders (see [`origin`]).
 /// Plugins disabled in `settings` are not loaded, and the others only if `settings`
 /// allows them with their content; those are in [`Loaded::pending`].
 pub fn load_dir(dir: &Path, settings: &Settings) -> Loaded {
@@ -388,20 +552,28 @@ pub(super) fn load_dir_with(
     settings: &Settings,
 ) -> Loaded {
     let mut loaded = Loaded::default();
-    let Ok(read) = std::fs::read_dir(dir) else {
-        return loaded;
+    let entries = |dir: &Path| -> Vec<PathBuf> {
+        let read = std::fs::read_dir(dir).into_iter().flatten().flatten();
+        let mut paths: Vec<PathBuf> = read.map(|e| e.path()).collect();
+        paths.sort();
+        paths
     };
-    let mut paths: Vec<PathBuf> = read
-        .flatten()
-        .map(|e| e.path())
-        .filter(|p| {
-            p.is_file()
-                && p.extension().is_some_and(|e| {
-                    e.eq_ignore_ascii_case(std::env::consts::DLL_EXTENSION) || is_python(p)
-                })
-        })
-        .collect();
-    paths.sort();
+    let is_plugin = |p: &PathBuf| {
+        p.is_file()
+            && p.extension().is_some_and(|e| {
+                e.eq_ignore_ascii_case(std::env::consts::DLL_EXTENSION) || is_python(p)
+            })
+    };
+    let all = entries(dir);
+    let mut paths: Vec<PathBuf> = all.iter().filter(|p| is_plugin(p)).cloned().collect();
+    for origin in all.iter().filter(|p| {
+        p.is_dir()
+            && p.file_name()
+                .and_then(|n| n.to_str())
+                .is_some_and(is_origin)
+    }) {
+        paths.extend(entries(origin).into_iter().filter(is_plugin));
+    }
     let mut python_missing = false;
     for path in paths {
         let file = path.file_name().unwrap_or_default().to_string_lossy();
@@ -465,8 +637,107 @@ pub(super) fn load_dir_with(
     loaded
 }
 
-/// Loads one plugin file, a library or a Python plugin run with `python`.
+/// Loads one plugin file, a library or a Python plugin run with `python`; the ids of
+/// its effects and generators start with its origin, if it has one (see [`origin`]).
 pub(super) fn load_file(
+    path: &Path,
+    python: Option<&'static python::Python>,
+) -> Result<python::Contents, String> {
+    let (mut info, effects, generators) = load_file_as_is(path, python)?;
+    let Some(origin) = origin_of(path) else {
+        return Ok((info, effects, generators));
+    };
+    info.source = path.parent().map(|dir| Source::read(dir, origin));
+    let file = path.file_name().unwrap_or_default().to_string_lossy();
+    info.entry = (info.source.as_ref()).and_then(|s| s.plugins.get(file.as_ref()).cloned());
+    let id = |id: &str| format!("{origin}/{id}");
+    info.effects = info.effects.iter().map(|e| id(e)).collect();
+    info.generators = info.generators.iter().map(|g| id(g)).collect();
+    let effects = effects
+        .into_iter()
+        .map(|e| {
+            Box::new(FromOrigin {
+                id: id(e.id()),
+                inner: e,
+            }) as Box<dyn Effect>
+        })
+        .collect();
+    let generators = generators
+        .into_iter()
+        .map(|g| {
+            Box::new(FromOrigin {
+                id: id(g.id()),
+                inner: g,
+            }) as Box<dyn Generator>
+        })
+        .collect();
+    Ok((info, effects, generators))
+}
+
+/// An effect or a generator of a plugin with an origin, under its id with the origin.
+struct FromOrigin<T: ?Sized> {
+    id: String,
+    inner: Box<T>,
+}
+
+impl Effect for FromOrigin<dyn Effect> {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn description(&self) -> &str {
+        self.inner.description()
+    }
+
+    fn params(&self) -> &[ParamSpec] {
+        self.inner.params()
+    }
+
+    fn plugin(&self) -> Option<&str> {
+        self.inner.plugin()
+    }
+
+    fn padding(&self, params: &Params) -> [f32; 4] {
+        self.inner.padding(params)
+    }
+
+    fn apply(&self, img: &mut RgbaImage, params: &Params, scale: f32) -> Result<(), String> {
+        self.inner.apply(img, params, scale)
+    }
+}
+
+impl Generator for FromOrigin<dyn Generator> {
+    fn id(&self) -> &str {
+        &self.id
+    }
+
+    fn name(&self) -> &str {
+        self.inner.name()
+    }
+
+    fn description(&self) -> &str {
+        self.inner.description()
+    }
+
+    fn params(&self) -> &[ParamSpec] {
+        self.inner.params()
+    }
+
+    fn plugin(&self) -> Option<&str> {
+        self.inner.plugin()
+    }
+
+    fn generate(&self, img: &mut RgbaImage, params: &Params, px_per_mm: f32) -> Result<(), String> {
+        self.inner.generate(img, params, px_per_mm)
+    }
+}
+
+/// [`load_file`], the ids as the plugin gives them.
+fn load_file_as_is(
     path: &Path,
     python: Option<&'static python::Python>,
 ) -> Result<python::Contents, String> {
@@ -491,16 +762,20 @@ pub(super) fn load_file(
 
 /// The plugin file `path` with the hash of its content.
 pub fn pending(path: &Path) -> Result<Pending, String> {
-    use sha2::{Digest, Sha256};
     let data = std::fs::read(path).map_err(|e| e.to_string())?;
-    let hash = Sha256::digest(&data)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect();
     Ok(Pending {
         path: path.to_owned(),
-        hash,
+        hash: hash(&data),
     })
+}
+
+/// The SHA-256 of `data`, in hex.
+pub fn hash(data: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    Sha256::digest(data)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// A Python plugin, by its `.py` extension.
@@ -621,9 +896,10 @@ pub unsafe fn from_table(
     let info = PluginInfo {
         name,
         version: plugin_version,
-        path: path.to_owned(),
         effects: effects.iter().map(|e| e.id.clone()).collect(),
         generators: generators.iter().map(|g| g.id.clone()).collect(),
+        source: None,
+        entry: None,
     };
     Ok((info, effects, generators))
 }
@@ -688,6 +964,9 @@ pub(super) fn check(
     }
     if id.starts_with("builtin.") {
         return Err(err("ids starting with \"builtin.\" are reserved".into()));
+    }
+    if id.contains('/') {
+        return Err(err("ids can't contain \"/\"".into()));
     }
     if taken.contains(&id) {
         return Err(err("id used twice".into()));
@@ -1038,7 +1317,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(dir);
     }
 
-    /// Loads a real library, e.g. the halftone example built by `make plugins`:
+    /// Loads a real library, e.g. one from the plugin repository:
     /// `ARTWORK_TEST_PLUGIN=plugins/libhalftone.so cargo test loads_plugin_library`.
     #[test]
     fn loads_plugin_library() {
@@ -1061,5 +1340,47 @@ mod tests {
             e.apply(&mut img, &Params::new(e.params(), &inst.params), 0.5)
                 .unwrap();
         }
+    }
+
+    #[test]
+    fn a_source_is_named_by_its_file_or_its_origin() {
+        let dir = std::env::temp_dir().join(format!("artwork-source-{}", std::process::id()));
+        let origin = origin("http://localhost:8000/plugins.json");
+        let folder = dir.join(&origin);
+        assert_eq!(Source::read(&folder, &origin).name, "");
+        Source::write(&folder, "Test server", "http://localhost:8000/plugins.json").unwrap();
+        let s = Source::read(&folder, &origin);
+        assert_eq!(
+            (s.origin.as_str(), s.name.as_str(), s.url.as_str()),
+            (
+                origin.as_str(),
+                "Test server",
+                "http://localhost:8000/plugins.json"
+            )
+        );
+        // It records which plugin each file is, kept when it is named again.
+        let entry = |v: &str| Installed {
+            entry: super::super::PluginRef {
+                id: "posterize".into(),
+                version: v.into(),
+            },
+            compatible_from: Some("1.0".into()),
+        };
+        Source::record(&folder, "posterize.py", entry("1.0"), None).unwrap();
+        Source::record(
+            &folder,
+            "posterize-2.py",
+            entry("2.0"),
+            Some("posterize.py"),
+        )
+        .unwrap();
+        Source::write(&folder, "Renamed", "http://localhost:8000/plugins.json").unwrap();
+        let s = Source::read(&folder, &origin);
+        assert_eq!(s.name, "Renamed");
+        assert_eq!(
+            s.plugins.into_iter().collect::<Vec<_>>(),
+            [("posterize-2.py".to_owned(), entry("2.0"))]
+        );
+        let _ = std::fs::remove_dir_all(dir);
     }
 }

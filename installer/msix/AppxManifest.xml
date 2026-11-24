@@ -1,0 +1,67 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  The Microsoft Store package (MSIX): the executable, its templates folder, the python
+  folder (python.org's embeddable Python, for the Python plugins: scripts/python-embed.sh)
+  and the icons in Assets/. scripts/msix.sh (make msix, and the Release workflow) fills in @VERSION@
+  and packs it, unsigned: the Store signs it.
+
+  Identity Name and Publisher are the ones Partner Center gives the product (Product
+  management > Product identity: Package/Identity/Name and Package/Identity/Publisher).
+
+  Settings and user data are in %APPDATA%\artwork-creator as with the setup
+  .exe, but Windows keeps what the app creates there in the package's own folder.
+-->
+<Package
+  xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap rescap">
+
+  <Identity
+    Name="bzhmaddog.ArtworkCreator"
+    Publisher="CN=8C69434A-63BF-48FC-96AB-8B6367FDCD3E"
+    Version="@VERSION@"
+    ProcessorArchitecture="x64" />
+
+  <Properties>
+    <DisplayName>Artwork Creator</DisplayName>
+    <PublisherDisplayName>bzhmaddog</PublisherDisplayName>
+    <Logo>Assets\StoreLogo.png</Logo>
+  </Properties>
+
+  <Dependencies>
+    <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.17763.0" MaxVersionTested="10.0.26100.0" />
+  </Dependencies>
+
+  <Resources>
+    <Resource Language="en-US" />
+    <Resource Language="fr-FR" />
+  </Resources>
+
+  <Applications>
+    <Application Id="ArtworkCreator" Executable="artwork-creator.exe" EntryPoint="Windows.FullTrustApplication">
+      <uap:VisualElements
+        DisplayName="Artwork Creator"
+        Description="Design printed artwork for arcade controllers and fightsticks"
+        BackgroundColor="transparent"
+        Square150x150Logo="Assets\Square150x150Logo.png"
+        Square44x44Logo="Assets\Square44x44Logo.png" />
+      <Extensions>
+        <!-- .artwork project files open with the app, the path as its argument. -->
+        <uap:Extension Category="windows.fileTypeAssociation">
+          <uap:FileTypeAssociation Name="artwork">
+            <uap:DisplayName>Artwork Creator project</uap:DisplayName>
+            <uap:Logo>Assets\Square44x44Logo.png</uap:Logo>
+            <uap:SupportedFileTypes>
+              <uap:FileType>.artwork</uap:FileType>
+            </uap:SupportedFileTypes>
+          </uap:FileTypeAssociation>
+        </uap:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+
+  <Capabilities>
+    <rescap:Capability Name="runFullTrust" />
+  </Capabilities>
+</Package>

@@ -224,10 +224,12 @@ cmd_check() {
     sdk_status
     if [ -n "$next" ]; then
         echo
-        if [ "$next" = "$current" ]; then
+        sdk_suggested
+        if [ "$next" = "$current" ] && [ -n "$sdk_next" ]; then
+            echo "Cargo.toml is at it, the plugin SDK isn't: make version-bump APP=$next SDK=$sdk_next"
+        elif [ "$next" = "$current" ]; then
             echo "Cargo.toml is at it: tag v$next to release it (see doc/releasing.md)"
         else
-            sdk_suggested
             echo "Set it with: make version-bump APP=$next${sdk_next:+ SDK=$sdk_next}"
         fi
     fi

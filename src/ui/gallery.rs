@@ -191,7 +191,7 @@ fn ui_tokens() {
 #[ignore = "draws docs/widgets.png"]
 fn widget_gallery() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/docs/widgets.png");
-    crate::ui::preview::render(path, vec2(640.0, 1160.0), |ui| {
+    crate::ui::preview::render(path, vec2(640.0, 1200.0), |ui| {
         layers::field_frames(ui);
 
         section(ui, "egui widgets, as the app uses them");
@@ -367,6 +367,10 @@ fn widget_gallery() {
             callout::callout(ui, Tone::Info, "Info: an explanation or an empty state.");
             callout::callout(ui, Tone::Tip, "Tip: how to do something.");
             callout::callout(ui, Tone::Warning, "Warning: something to look out for.");
+            callout::callout(ui, Tone::Error, "Error: something wrong.");
+            callout::callout_with(ui, Tone::Error, "With a button at its end.", |ui| {
+                let _ = ui.button("Install");
+            });
             callout::callout_small(ui, Tone::Warning, "A small one, under a field.");
         });
         row(ui, "Warning marks", |ui| {

@@ -7,9 +7,9 @@ license-file = "LICENSE"
 homepage = "https://github.com/bzhmaddog/artwork-creator"
 publish = false
 
-# The plugin SDK and the example plugin live in the same workspace; see "Plugins" in README.md.
+# The plugin SDK lives in the same workspace; see "Plugins" in README.md.
 [workspace]
-members = [".", "plugin-sdk", "plugin-examples/halftone"]
+members = [".", "plugin-sdk"]
 
 [dependencies]
 artwork-plugin-sdk = { path = "plugin-sdk" }
@@ -55,6 +55,7 @@ resvg = { version = "0.49", default-features = false }
 hayro = "0.9"
 # Python plugins are allowed by the SHA-256 of their content.
 sha2 = "0.11"
+ureq = "3"
 
 # On Wayland (e.g. WSLg) the window draws its own title bar. eframe leaves out winit's
 # decorations, so without this the bar has no title text.
@@ -76,7 +77,8 @@ windows-sys = { version = "0.61", features = [
 ] }
 
 # The Linux .deb package (`make deb`, cargo-deb). The app finds its templates in
-# ../share/artwork-creator/ from the executable. The release build links only to glibc,
+# ../share/artwork-creator/ from the executable, and the Python of the Python plugins
+# (target/python-linux, scripts/python-linux.sh) in ../lib/artwork-creator/python/. The release build links only to glibc,
 # at the version it is built for (GLIBC in the Makefile; $auto would ask for the build
 # machine's); the other libraries are loaded at run time (OpenGL, X11 or Wayland, fontconfig).
 [package.metadata.deb]
@@ -85,11 +87,11 @@ copyright = "bzhmaddog"
 section = "graphics"
 extended-description = "A desktop app for designing printed artwork for arcade controllers and fightsticks: load a controller template, arrange images on it and export print-ready PNG, PDF or SVG at true size."
 depends = "libc6 (>= 2.28), libgl1, libegl1, libfontconfig1, libxkbcommon0, libwayland-client0, libx11-6, libxcursor1, libxi6, libxrandr2"
-# Python plugins run with it; apt installs it unless told not to (--no-install-recommends).
-recommends = "python3"
 assets = [
     ["target/release/artwork-creator", "usr/bin/", "755"],
     ["templates/**/*", "usr/share/artwork-creator/templates/", "644"],
+    ["target/python-linux/bin/python3", "usr/lib/artwork-creator/python/bin/", "755"],
+    ["target/python-linux/lib/**/*", "usr/lib/artwork-creator/python/lib/", "644"],
     ["assets/artwork-creator.desktop", "usr/share/applications/", "644"],
     ["assets/icon/artwork-creator.svg", "usr/share/icons/hicolor/scalable/apps/", "644"],
     ["assets/icon/png/artwork-creator-256.png", "usr/share/icons/hicolor/256x256/apps/artwork-creator.png", "644"],

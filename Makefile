@@ -25,20 +25,23 @@
 #   make pre-commit   run those checks now: clippy for Linux and Windows, tests and
 #                     coverage on Linux;
 #                     ARGS=--linux or ARGS=--windows checks one target only
-#   make plugins      build the example plugins for Linux and Windows into plugins/, and
-#                     copy the Python example there
 #   make linux-portable
 #                     release build for Linux that runs on glibc GLIBC and later (older
 #                     distributions too), with cargo-zigbuild: install zig
 #                     (https://ziglang.org/download/) and cargo install cargo-zigbuild --locked
 #   make dist         package each release build with its templates folder into dist/
-#                     (the Linux one is linux-portable)
+#                     and a Python for the Python plugins (the Linux one is linux-portable,
+#                     with python-build-standalone's Python, see scripts/python-linux.sh;
+#                     the Windows one with python.org's embeddable Python, see
+#                     scripts/python-embed.sh)
 #   make deb          Linux .deb package into dist/, from linux-portable (needs cargo-deb:
 #                     cargo install cargo-deb --locked)
 #   make appimage     Linux AppImage into dist/, from linux-portable (see scripts/appimage.sh)
 #   make windows-setup
 #                     Windows installer into dist/, with Inno Setup in a Docker or
 #                     Podman container (see scripts/windows-setup.sh)
+#   make msix         Microsoft Store package (MSIX) into dist/, with the Windows SDK's
+#                     makeappx and makepri (see scripts/msix.sh)
 #   make store-listing
 #                     Microsoft Store listing import file installer/store/store-listing.csv,
 #                     from the listing texts in installer/store/*.md (see scripts/store-listing.sh)
@@ -66,11 +69,6 @@ GLIBC   := 2.28
 LINUX_BIN   := target/$(LINUX)/release/$(APP)
 WINDOWS_BIN := target/$(WINDOWS)/release/$(APP).exe
 
-# Example plugins (crates in plugin-examples/), built as .so and .dll into plugins/,
-# where a debug build run from the repository (make run) finds them, with the Python example.
-PLUGINS     := halftone
-PLUGINS_DIR := plugins
-
 # Dependency scan (check-dependencies): Docker if installed, else Podman; CONTAINER=...
 # picks one. The Trivy version is pinned so a freshly published (possibly compromised)
 # image is never pulled on its own; raise TRIVY_VERSION on purpose. The vulnerability
@@ -84,7 +82,7 @@ TRIVY_CACHE   ?= $(HOME)/.cache/trivy
 VERSION_STEPS := $(foreach p,patch minor major,version-bump-$(p))
 
 .PHONY: all linux linux-portable windows debug debug-linux debug-windows run run-windows \
-        test coverage dev-setup check check-tools check-dependencies fmt clippy hooks pre-commit plugins dist version-check version-bump $(VERSION_STEPS) dist-linux dist-windows deb appimage windows-setup store-listing clean
+        test coverage dev-setup check check-tools check-dependencies fmt clippy hooks pre-commit dist version-check version-bump $(VERSION_STEPS) dist-linux dist-windows python-embed python-linux deb appimage windows-setup msix store-listing clean
 
 all: linux windows
 
@@ -141,15 +139,6 @@ dev-setup:
 	$(MAKE) --no-print-directory .venv/bin/coverage
 	@sh scripts/check-tools.sh
 
-plugins:
-	$(CARGO) build --release --target $(LINUX) $(PLUGINS:%=-p %)
-	$(CARGO) build --release --target $(WINDOWS) $(PLUGINS:%=-p %)
-	mkdir -p $(PLUGINS_DIR)
-	for p in $(PLUGINS); do \
-		cp target/$(LINUX)/release/lib$$p.so target/$(WINDOWS)/release/$$p.dll $(PLUGINS_DIR)/; \
-	done
-	cp plugin-examples/python/*.py $(PLUGINS_DIR)/
-
 # Git hooks are versioned in .githooks/; this points the local clone at them.
 hooks:
 	git config core.hooksPath .githooks
@@ -196,39 +185,54 @@ version-bump:
 # The app looks for templates/ next to the executable, so ship them together.
 dist: dist-linux dist-windows
 
-dist-linux: linux-portable
+dist-linux: linux-portable python-linux
 	rm -rf $(DIST)/$(APP)-linux
 	mkdir -p $(DIST)/$(APP)-linux
 	cp $(LINUX_BIN) $(DIST)/$(APP)-linux/
 	cp -r templates $(DIST)/$(APP)-linux/
+	cp -r target/python-linux $(DIST)/$(APP)-linux/python
+	rm $(DIST)/$(APP)-linux/python/.version
 	# For desktop menus: see "Building" in README.md.
 	cp assets/icon/png/$(APP)-256.png $(DIST)/$(APP)-linux/$(APP).png
 	cp assets/$(APP).desktop $(DIST)/$(APP)-linux/
 	tar -czf $(DIST)/$(APP)-linux.tar.gz -C $(DIST) $(APP)-linux
 
-dist-windows: windows
+# The packages ship a Python of their own, for the Python plugins: python.org's
+# embeddable Python on Windows, python-build-standalone's on Linux.
+python-embed:
+	sh scripts/python-embed.sh
+
+python-linux:
+	sh scripts/python-linux.sh
+
+dist-windows: windows python-embed
 	rm -rf $(DIST)/$(APP)-windows
 	mkdir -p $(DIST)/$(APP)-windows
 	cp $(WINDOWS_BIN) $(DIST)/$(APP)-windows/
 	cp -r templates $(DIST)/$(APP)-windows/
+	cp -r target/python-embed $(DIST)/$(APP)-windows/python
+	rm $(DIST)/$(APP)-windows/python/.version
 	cd $(DIST) && rm -f $(APP)-windows.zip && \
 		if command -v zip >/dev/null; then zip -qr $(APP)-windows.zip $(APP)-windows; \
 		else echo "zip not installed; skipping $(APP)-windows.zip (folder is in $(DIST)/)"; fi
 
 # Installers: the app finds its templates in ../share/artwork-creator/ from the executable.
-deb: linux-portable
+deb: linux-portable python-linux
 	mkdir -p $(DIST)
 	$(CARGO) deb --no-build --target $(LINUX) -o $(DIST)/
 
-appimage: linux-portable
+appimage: linux-portable python-linux
 	sh scripts/appimage.sh $(LINUX_BIN) $(DIST)/$(APP)-linux-x86_64.AppImage
 
-windows-setup: windows
+windows-setup: windows python-embed
 	sh scripts/windows-setup.sh $(WINDOWS_BIN)
+
+msix: windows python-embed
+	sh scripts/msix.sh $(WINDOWS_BIN)
 
 store-listing:
 	sh scripts/store-listing.sh
 
 clean:
 	$(CARGO) clean
-	rm -rf $(DIST) $(PLUGINS_DIR)
+	rm -rf $(DIST)

@@ -43,7 +43,7 @@ pub use params::{ChoiceOption, Param, ParamKind, Values, color_from_hex, color_t
 /// An image effect.
 pub trait Effect: Send + Sync + 'static {
     /// Unique, stable id saved in projects. Prefix it with something unique to the
-    /// plugin, e.g. `"halftone.dots"`; `builtin.` is reserved.
+    /// plugin, e.g. `"halftone.dots"`; `builtin.` is reserved, and `/` not allowed.
     fn id(&self) -> &str;
     /// Shown in menus and in the effect list.
     fn name(&self) -> &str;

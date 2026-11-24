@@ -17,6 +17,8 @@ pub enum Tone {
     Tip,
     /// Something to look out for: amber, a triangle with "!".
     Warning,
+    /// Something wrong: red, a triangle with "!".
+    Error,
 }
 
 impl Tone {
@@ -26,6 +28,7 @@ impl Tone {
             Tone::Info => visuals.hyperlink_color,
             Tone::Tip => crate::ui::tokens::tip(visuals),
             Tone::Warning => visuals.warn_fg_color,
+            Tone::Error => visuals.error_fg_color,
         }
     }
 }
@@ -37,16 +40,25 @@ const BAR: f32 = 3.0;
 
 /// A callout as wide as the room it is given, its text wrapped.
 pub fn callout(ui: &mut Ui, tone: Tone, text: &str) -> Response {
-    show(ui, tone, RichText::new(text), false)
+    show(ui, tone, RichText::new(text), false, None)
+}
+
+/// A callout as wide as the room it is given, with what `right` adds (a button) at its
+/// right end, centered on the text.
+pub fn callout_with(ui: &mut Ui, tone: Tone, text: &str, right: impl FnOnce(&mut Ui)) -> Response {
+    show(ui, tone, RichText::new(text), false, Some(Box::new(right)))
 }
 
 /// A small callout, as wide as its text, for tight places: a menu, a table cell, a bar
 /// of buttons.
 pub fn callout_small(ui: &mut Ui, tone: Tone, text: &str) -> Response {
-    show(ui, tone, RichText::new(text).small(), true)
+    show(ui, tone, RichText::new(text).small(), true, None)
 }
 
-fn show(ui: &mut Ui, tone: Tone, text: RichText, compact: bool) -> Response {
+/// What goes at the right end of a callout.
+type Right<'a> = Option<Box<dyn FnOnce(&mut Ui) + 'a>>;
+
+fn show(ui: &mut Ui, tone: Tone, text: RichText, compact: bool, right: Right) -> Response {
     let color = tone.color(ui.visuals());
     let icon = if compact { 13.0 } else { 16.0 };
     let pad: i8 = if compact { 4 } else { 7 };
@@ -73,7 +85,22 @@ fn show(ui: &mut Ui, tone: Tone, text: RichText, compact: bool) -> Response {
                 let (rect, _) = ui.allocate_exact_size(vec2(icon, height), Sense::hover());
                 let rect = Rect::from_center_size(rect.center(), vec2(icon, icon));
                 paint_icon(ui.painter(), rect, tone, color, ui.visuals());
-                ui.add(Label::new(text.color(ui.visuals().text_color())).wrap());
+                let label = Label::new(text.color(ui.visuals().text_color())).wrap();
+                match right {
+                    None => {
+                        ui.add(label);
+                    }
+                    Some(right) => {
+                        // One row as tall as the button, the text wrapping left of it.
+                        let row = vec2(ui.available_width(), ui.spacing().interact_size.y);
+                        let layout = egui::Layout::right_to_left(egui::Align::Center);
+                        ui.allocate_ui_with_layout(row, layout, |ui| {
+                            right(ui);
+                            let left = egui::Layout::left_to_right(egui::Align::Center);
+                            ui.with_layout(left, |ui| ui.add(label));
+                        });
+                    }
+                }
             });
         })
         .response;
@@ -116,7 +143,7 @@ fn paint_icon(painter: &Painter, rect: Rect, tone: Tone, color: Color32, visuals
             // A glint on the glass.
             painter.circle_filled(bulb + vec2(-s * 0.1, -s * 0.08), s * 0.06, cut);
         }
-        Tone::Warning => paint_warning(painter, rect, color, cut),
+        Tone::Warning | Tone::Error => paint_warning(painter, rect, color, cut),
     }
 }
 
@@ -181,8 +208,10 @@ mod tests {
         );
         // Each tone has its own color, in both themes.
         for v in [Visuals::dark(), Visuals::light()] {
-            let c = [Tone::Info, Tone::Tip, Tone::Warning].map(|t| t.color(&v));
-            assert!(c[0] != c[1] && c[1] != c[2] && c[0] != c[2]);
+            let c = [Tone::Info, Tone::Tip, Tone::Warning, Tone::Error].map(|t| t.color(&v));
+            for i in 0..c.len() {
+                assert!(c[i + 1..].iter().all(|o| *o != c[i]));
+            }
         }
     }
 

@@ -824,15 +824,24 @@ opened from: plugins found there would run without being asked for. Debug builds
 look there, so `make run` finds the `plugins` folder of the repository.
 
 - The app loads them at startup and lists their effects in **Add effect**, and their
-  generators in a fill's **Generated** menu, under the plugin's name. A library that
+  generators in a fill's **Generated** menu (an entry's tooltip gives its plugin's name
+  and version), grouped by source:
+  "Local plugins" (those not installed from a repository), then each repository's under
+  its name (its address in the tooltip; "Unknown repository" until its list was read). A library that
   fails to load, or was made for a plugin interface version this app doesn't know, is
   skipped and reported at the bottom of the Add effect menu. Plugins made for version 1
   of the interface, which had effects only, still load.
-- Python plugins need Python 3.8 or later, found as `py -3` or `python` on Windows,
-  `python3` or `python` elsewhere. Without it they are skipped, and the Add effect menu
-  reports "Python plugins need Python 3, which was not found". The Windows installer
-  offers to install Python when none is installed; the `.deb` package recommends it
-  (apt installs it unless told not to); the AppImage uses the system's.
+- Python plugins need Python 3.8 or later. Every package comes with one, the same
+  version everywhere, which it uses first: the Windows ones (zip, installer, Microsoft
+  Store) in a `python` folder next to the app, the Linux ones in a `python` folder next
+  to it (the `.tar.gz`) or in `../lib/artwork-creator/python` (the `.deb`, the
+  AppImage). On Linux that Python is isolated from the system's (no user site-packages,
+  no `PYTHON*` variables), which is used only by debug builds (`python3` or `python`).
+  On Windows, without it, Python is found as `py -3` or `python`. Without any, Python
+  plugins are skipped, and the Add effect menu reports "Python plugins need Python 3,
+  which was not found". The Python that comes with the app starts with the standard
+  library only: the other packages a plugin needs are installed when it is allowed
+  (below).
 - **A plugin runs only once you allow it**, a library or a Python plugin, wherever it
   is. At startup, a plugin file that is new, or has changed since you allowed it, is not
   loaded: once the window is open (after the question about recovering unsaved work),
@@ -850,7 +859,90 @@ look there, so `make run` finds the `plugins` folder of the repository.
   on Windows, its "edit" action, or Notepad). Enabling and disabling apply at the next
   start (the window says so; its **Restart** button closes the app and starts it again
   with the same project, asking first to save unsaved changes): until then, the effects
-  of a plugin disabled stay available. The choices are kept in `plugins.json`. To remove a plugin, delete its file.
+  of a plugin disabled stay available. The choices are kept in `plugins.json`.
+  **Uninstall**, on the row of a plugin in **your** plugins folder (not one that comes with
+  the app), removes its file (set aside as `.<name>.old` beside it, never loaded, as
+  Update does) and what `plugins.json` says of it; the plugin leaves the list, and its
+  effects stay available until the next start (the window offers the restart). The
+  packages a Python plugin needed stay installed.
+  These are on its **Installed** tab, where the plugins are grouped by the repository
+  they were installed from (its name above them, its address in the tooltip; by name),
+  then those that come from none (shipped with the app or put in a plugins folder by
+  hand) under "Not from a repository".
+- **Installing plugins from a repository**: the manager's **Available** tab lists the
+  plugins of one repository at a time, picked in its drop-down (the official one by
+  default, else the first; its address in the tooltip) among those listed on its
+  **Repositories** tab (name, address, number of
+  plugins or why its list could not be read), a list of plugins on the web (a `plugins.json` file, format
+  described in `src/render/effects/repository.rs`). The official one,
+  [artwork-creator-plugins](https://github.com/bzhmaddog/artwork-creator-plugins), is
+  there to begin with; **Add repository** adds another by the address of its list, which
+  is downloaded and checked first (a list that can't be read or is not valid is not
+  added, and the window says why). **Remove** takes a repository out, the official one
+  too (add its address again to get it back); the plugins installed from it stay
+  installed. The repositories are kept in `plugins.json`; their lists are downloaded
+  each time the plugin manager opens.
+  The search field filters the plugins of that repository by name, description, author
+  or the name of one of their effects or generators. Each plugin shows the latest version that works with this version of the
+  app on this system (its `min_app`, plugin interface version and a file for this system;
+  "Not available" otherwise) and, in its **Provides** column, how many effects and
+  generators that version adds ("1 effect, 1 generator", their names in the tooltip; empty
+  when the list does not say). **Install** downloads its file (the `.dll`, `.so` or `.py`)
+  into the repository's folder in **your** plugins folder (named with a hash of the
+  repository's address, with a `source.json` giving its name and address, written again
+  whenever the repositories' lists are downloaded), checks its size and SHA-256 against the list (a file that
+  differs is not kept), installs the packages a Python plugin needs as **Allow** does, and,
+  since you chose to install it, allows and enables it: it is loaded at once, and can be
+  disabled later on the Installed tab like any other. A plugin installed from that
+  repository already shows "Installed". The same plugin from two repositories is two
+  plugins: both can be installed, their effects and generators are listed apart (each
+  under its repository), and a project using one
+  shows the effect as missing or "Missing generator" where only the other is installed.
+- **Installed plugins a repository lists** are recognized by the SHA-256 of their file,
+  or, for one installed from a repository whose list no longer has that version, by the
+  id and version its `source.json` recorded (one edited by hand, or that no repository
+  lists, is not; one installed from a repository, by that repository's list only): the
+  Installed tab shows the
+  repository's description in its **Description** column, what the installed version
+  provides in its **Provides** column, and when a later version
+  works here (none past the plugin's `latest` in the list), "New: x.y.z" highlighted
+  next to the version (what changed in its tooltip) and an **Update** button. When that
+  version's `compatible_from` is later than the installed one (it can't read the
+  settings the installed version saved), "New: x.y.z" is in the warning color and its
+  tooltip and Update's say so.
+- **Plugin settings in projects**: an effect or generator of a plugin installed from a
+  repository saves that plugin's id and version with its settings. Install and Update
+  record the version's `compatible_from` in `source.json`. When a project is opened,
+  settings saved by a version older than the installed one's `compatible_from` are
+  reported in one message listing their layers, since they may now be read differently;
+  every saved version is then set to the installed one, so the project no longer warns
+  once saved. Update downloads and checks the new file like Install, in the
+  folder of the old one, which is replaced (set aside as `.<name>.old` beside it, never
+  loaded: a library in use can't be deleted on Windows); the new file is allowed, keeps
+  the old one's enabled or disabled state, and is used from the next start (the row says
+  "Updated to x.y.z" and the window offers the restart).
+- **At startup**, if plugins are installed, the app downloads the repositories' lists in
+  the background (one that can't be read is skipped, without a message). If new versions
+  are found, once the window is open and the other startup questions answered it asks
+  whether to review them: **Review** opens the plugin manager on its Installed tab, the
+  new versions highlighted; **Not now** (or Esc) asks again at the next start. When the
+  plugin manager is already open (plugins waiting to be allowed), it just shows them.
+- **Packages a Python plugin needs** (numpy...) are listed in a block at the top of its
+  file, the standard one of Python's inline script metadata (PEP 723):
+
+  ```python
+  # /// script
+  # dependencies = ["numpy>=1.24", "pillow"]
+  # ///
+  ```
+
+  With the Python that comes with the app, which has pip, **Allow** first installs
+  those not already there (from PyPI, into `python-packages` in the app's data folder,
+  which every Python plugin has on its path; its tooltip lists them), then loads the
+  plugin. If the install fails, the plugin stays waiting and the window says why (pip's
+  last line). With another Python, nothing is installed: the Allow tooltip lists the
+  packages, to install for that Python. To remove a package, delete its folder in
+  `python-packages`.
 - Each Python plugin runs in a Python process of its own, started with the app and kept
   running: its calls wait their turn. If it crashes, only that call fails, like an effect
   error of a native plugin (the layer is drawn without it, the error goes to the log), and
@@ -860,7 +952,14 @@ look there, so `make run` finds the `plugins` folder of the repository.
   autosave copy is then offered back). A Python plugin has your rights too, though a
   crash in it doesn't close the app.
 - A project that uses an effect whose plugin is not installed still opens: the effect is
-  shown as "Missing effect", is not applied, and is saved unchanged.
+  shown by its name in red (saved with it; its id for one saved before), unchecked, with
+  an error box saying it is missing; it is not applied, and is saved unchanged. An effect saves the repository plugin it came from and
+  its version (recorded in the repository folder's `source.json` when the plugin is
+  installed or updated): when the same repository, among yours, lists that plugin at the
+  same version or a later one that works here, the box has an **Install** button, which
+  installs it as the plugin manager does (a spinner meanwhile; the effect shows again once
+  loaded, or the box asks for a restart). Effects added before this, or from plugins put
+  in a plugins folder by hand, have no such button.
 - Effects and generators from plugins show their own names, untranslated.
 
 Writing a plugin: see "Plugins" in [README.md](../README.md#plugins).

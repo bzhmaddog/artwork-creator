@@ -6,6 +6,7 @@ use egui::{ComboBox, CursorIcon, DragAndDrop, RichText, Sense, Slider, Stroke, U
 use serde_json::Value;
 
 use crate::i18n::{tr, tr_n, translate};
+use crate::render::effects::plugin::{PluginInfo, Source};
 use crate::render::effects::{
     Effect, EffectInstance, Generator, ParamKind, ParamSpec, Params, color_to_hex, registry,
 };
@@ -100,10 +101,11 @@ fn add_menu(ui: &mut Ui) -> Option<EffectInstance> {
     let button = layers::tool_icon(ui, Tool::Add, true, tr!("ADD_EFFECT"));
     egui::Popup::menu(&button).show(|ui| {
         let reg = registry();
-        let mut add = |ui: &mut Ui, effect: &dyn Effect| {
+        let mut add = |ui: &mut Ui, effect: &dyn Effect, plugin: Option<&PluginInfo>| {
             let mut r = ui.button(effect.name());
-            if !effect.description().is_empty() {
-                r = r.on_hover_text(effect.description());
+            let tip = entry_tip(effect.description(), plugin);
+            if !tip.is_empty() {
+                r = r.on_hover_text(tip);
             }
             if r.clicked() {
                 added = Some(EffectInstance::new(effect));
@@ -111,20 +113,16 @@ fn add_menu(ui: &mut Ui) -> Option<EffectInstance> {
             }
         };
         for effect in reg.all().filter(|e| e.plugin().is_none()) {
-            add(ui, effect);
+            add(ui, effect, None);
         }
-        // Each plugin's effects under its name.
-        for plugin in reg.plugins() {
-            let effects: Vec<_> = plugin.effects.iter().filter_map(|id| reg.get(id)).collect();
-            if effects.is_empty() {
-                continue;
-            }
-            ui.separator();
-            let title = format!("{} {}", plugin.name, plugin.version);
-            ui.weak(title.trim_end())
-                .on_hover_text(tr!("PLUGIN_LOADED_FROM", path = plugin.path.display()));
-            for effect in effects {
-                add(ui, effect);
+        // The plugins' effects, by source.
+        let groups = by_source(|p| p.effects.iter().filter_map(|id| reg.get(id)).collect());
+        for (source, plugins) in groups {
+            source_header(ui, source);
+            for (plugin, effects) in plugins {
+                for effect in effects {
+                    add(ui, effect, Some(plugin));
+                }
             }
         }
         let errors = reg.errors();
@@ -175,9 +173,8 @@ fn stack_ui(
                 layer: layer_id,
                 index: i,
             });
-            let name = effect
-                .map_or(tr!("MISSING_EFFECT"), |e| e.name())
-                .to_owned();
+            let name =
+                effect.map_or_else(|| missing_name(inst).to_owned(), |e| e.name().to_owned());
             if handle.dragged()
                 && let Some(p) = ui.ctx().pointer_interact_pos()
             {
@@ -193,10 +190,15 @@ fn stack_ui(
             ui.vertical(|ui| {
                 CollapsingState::load_with_default_open(ui.ctx(), id, true)
                     .show_header(ui, |ui| {
-                        changed |= ui
-                            .checkbox(&mut inst.enabled, "")
-                            .on_hover_text(tr!("ENABLE_EFFECT"))
-                            .changed();
+                        if effect.is_some() {
+                            changed |= ui
+                                .checkbox(&mut inst.enabled, "")
+                                .on_hover_text(tr!("ENABLE_EFFECT"))
+                                .changed();
+                        } else {
+                            // Shown off, but kept as saved for when the plugin is back.
+                            ui.add_enabled(false, egui::Checkbox::new(&mut false, ""));
+                        }
                         let (text, tip) = match effect {
                             Some(e) => {
                                 let t = RichText::new(e.name());
@@ -204,9 +206,9 @@ fn stack_ui(
                                 (t, e.description().to_owned())
                             }
                             None => (
-                                RichText::new(tr!("MISSING_EFFECT"))
-                                    .color(ui.visuals().warn_fg_color),
-                                tr!("MISSING_EFFECT_HINT", id = inst.effect),
+                                RichText::new(missing_name(inst))
+                                    .color(ui.visuals().error_fg_color),
+                                String::new(),
                             ),
                         };
                         let mut r = ui.add(egui::Label::new(text).sense(Sense::click()));
@@ -238,6 +240,22 @@ fn stack_ui(
                             ui.add_enabled_ui(inst.enabled, |ui| {
                                 changed |= params_ui(ui, (layer_id, i), e, inst, px_mm);
                             });
+                        } else {
+                            let tone = crate::ui::callout::Tone::Error;
+                            let mut note = None;
+                            let text = tr!("MISSING_EFFECT");
+                            crate::ui::callout::callout_with(ui, tone, text, |ui| {
+                                if let Some(entry) = &inst.plugin {
+                                    note = crate::ui::plugins::install_missing(
+                                        ui,
+                                        &inst.effect,
+                                        entry,
+                                    );
+                                }
+                            });
+                            if let Some((tone, text)) = note {
+                                crate::ui::callout::callout_small(ui, tone, &text);
+                            }
                         }
                     });
             });
@@ -349,34 +367,32 @@ pub fn generator_menu(ui: &mut Ui, key: u64, inst: &mut EffectInstance) -> bool 
     let r = ComboBox::from_id_salt(("generator", key))
         .selected_text(text)
         .show_ui(ui, |ui| {
-            let mut item = |ui: &mut Ui, g: &'static dyn Generator| {
+            let mut item = |ui: &mut Ui, g: &'static dyn Generator, plugin: Option<&PluginInfo>| {
                 let mut r = ui.selectable_label(inst.effect == g.id(), g.name());
-                if !g.description().is_empty() {
-                    r = r.on_hover_text(g.description());
+                let tip = entry_tip(g.description(), plugin);
+                if !tip.is_empty() {
+                    r = r.on_hover_text(tip);
                 }
                 if r.clicked() && inst.effect != g.id() {
                     picked = Some(g);
                 }
             };
             for g in reg.generators().filter(|g| g.plugin().is_none()) {
-                item(ui, g);
+                item(ui, g, None);
             }
-            // Each plugin's generators under its name.
-            for plugin in reg.plugins() {
-                let gens: Vec<_> = plugin
-                    .generators
+            // The plugins' generators, by source.
+            let groups = by_source(|p| {
+                p.generators
                     .iter()
                     .filter_map(|id| reg.generator(id))
-                    .collect();
-                if gens.is_empty() {
-                    continue;
-                }
-                ui.separator();
-                let title = format!("{} {}", plugin.name, plugin.version);
-                ui.weak(title.trim_end())
-                    .on_hover_text(tr!("PLUGIN_LOADED_FROM", path = plugin.path.display()));
-                for g in gens {
-                    item(ui, g);
+                    .collect()
+            });
+            for (source, plugins) in groups {
+                source_header(ui, source);
+                for (plugin, gens) in plugins {
+                    for g in gens {
+                        item(ui, g, Some(plugin));
+                    }
                 }
             }
         });
@@ -742,6 +758,75 @@ fn curve_ui(
     changed
 }
 
+/// What `items` keeps of each plugin loaded, those with something kept only, grouped by
+/// source: the plugins put in a plugins folder by hand first, then each repository's, in
+/// loading order.
+#[allow(clippy::type_complexity)]
+fn by_source<T>(
+    items: impl Fn(&'static PluginInfo) -> Vec<T>,
+) -> Vec<(Option<&'static Source>, Vec<(&'static PluginInfo, Vec<T>)>)> {
+    let mut groups: Vec<(Option<&Source>, Vec<_>)> = Vec::new();
+    for plugin in registry().plugins() {
+        let kept = items(plugin);
+        if kept.is_empty() {
+            continue;
+        }
+        let source = plugin.source.as_ref();
+        let origin = source.map(|s| &s.origin);
+        match groups
+            .iter_mut()
+            .find(|(s, _)| s.map(|s| &s.origin) == origin)
+        {
+            Some((_, plugins)) => plugins.push((plugin, kept)),
+            None => groups.push((source, vec![(plugin, kept)])),
+        }
+    }
+    groups.sort_by_key(|(s, _)| s.is_some());
+    groups
+}
+
+/// The title of a group of plugins of a menu: their repository's name (its address in
+/// the tooltip), or "Local plugins".
+fn source_header(ui: &mut Ui, source: Option<&Source>) {
+    ui.separator();
+    match source {
+        Some(s) => {
+            let r = if s.name.is_empty() {
+                ui.strong(tr!("UNKNOWN_REPOSITORY"))
+            } else {
+                ui.strong(&s.name)
+            };
+            if !s.url.is_empty() {
+                r.on_hover_text(&s.url);
+            }
+        }
+        None => {
+            ui.strong(tr!("LOCAL_PLUGINS"))
+                .on_hover_text(tr!("LOCAL_PLUGINS_HINT"));
+        }
+    }
+}
+
+/// The tooltip of an effect's or generator's menu entry: its description, then the
+/// name and version of its plugin, if any.
+fn entry_tip(description: &str, plugin: Option<&PluginInfo>) -> String {
+    let plugin = plugin.map(|p| format!("{} {}", p.name, p.version));
+    let lines = [Some(description.to_owned()), plugin];
+    let lines: Vec<_> = lines
+        .into_iter()
+        .flatten()
+        .filter(|l| !l.trim().is_empty())
+        .collect();
+    lines.join("\n").trim_end().to_owned()
+}
+
+/// The name a missing effect is shown by: the one saved with it, else its id without
+/// the origin of its plugin.
+fn missing_name(inst: &EffectInstance) -> &str {
+    let id = inst.effect.as_str();
+    (inst.name.as_deref()).unwrap_or_else(|| id.rsplit('/').next().unwrap_or(id))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -753,6 +838,8 @@ mod tests {
                 enabled: true,
                 params: Default::default(),
                 links: Default::default(),
+                plugin: None,
+                name: None,
             })
             .collect()
     }

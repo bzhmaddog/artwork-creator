@@ -19,6 +19,7 @@ pub mod cache;
 pub mod generators;
 pub mod plugin;
 pub mod python;
+pub mod repository;
 
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
@@ -431,18 +432,40 @@ pub struct EffectInstance {
     /// `colors`).
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub links: std::collections::BTreeMap<String, String>,
+    /// The repository plugin it came from and its version, for an effect of a plugin
+    /// installed from a repository: what to offer to install when it is missing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plugin: Option<PluginRef>,
+    /// The name of a plugin's effect, to show it by when it is missing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+/// A plugin of a repository: its id there and a version.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PluginRef {
+    pub id: String,
+    pub version: String,
 }
 
 impl EffectInstance {
     /// A new instance with every parameter at its default.
     pub fn new(effect: &dyn Effect) -> Self {
-        Self::with_defaults(effect.id(), effect.params())
+        Self {
+            plugin: registry().plugin_ref(effect.id()),
+            name: effect.plugin().map(|_| effect.name().to_owned()),
+            ..Self::with_defaults(effect.id(), effect.params())
+        }
     }
 
     /// A generator's settings, every parameter at its default; `effect` is then the
     /// generator's id.
     pub fn generator(generator: &dyn Generator) -> Self {
-        Self::with_defaults(generator.id(), generator.params())
+        Self {
+            plugin: registry().plugin_ref(generator.id()),
+            name: generator.plugin().map(|_| generator.name().to_owned()),
+            ..Self::with_defaults(generator.id(), generator.params())
+        }
     }
 
     fn with_defaults(id: &str, specs: &[ParamSpec]) -> Self {
@@ -454,6 +477,8 @@ impl EffectInstance {
                 .map(|p| (p.id.clone(), p.default_value()))
                 .collect(),
             links: Default::default(),
+            plugin: None,
+            name: None,
         }
     }
 }
@@ -466,7 +491,13 @@ pub struct Registry {
     pending: Vec<plugin::Pending>,
     /// For each pending plugin, once allowed: what it added, or why it failed.
     late: Vec<OnceLock<Part>>,
+    /// Plugins installed from a repository since startup, loaded at once, in the order
+    /// installed; past [`INSTALLED_SLOTS`], they load at the next start.
+    installed: Vec<OnceLock<Part>>,
 }
+
+/// How many plugins installed from a repository can load without a restart.
+const INSTALLED_SLOTS: usize = 16;
 
 /// Effects, generators and plugins loaded together, checked against those before them.
 #[derive(Default)]
@@ -538,6 +569,7 @@ impl Registry {
             },
             pending: Vec::new(),
             late: Vec::new(),
+            installed: (0..INSTALLED_SLOTS).map(|_| OnceLock::new()).collect(),
         }
     }
 
@@ -573,7 +605,8 @@ impl Registry {
 
     /// The parts: the first, then those of the plugins allowed since.
     fn parts(&self) -> impl Iterator<Item = &Part> {
-        std::iter::once(&self.first).chain(self.late.iter().filter_map(OnceLock::get))
+        let late = self.late.iter().chain(&self.installed);
+        std::iter::once(&self.first).chain(late.filter_map(OnceLock::get))
     }
 
     /// The Python plugins waiting to be allowed.
@@ -598,9 +631,27 @@ impl Registry {
         };
         settings.allow(p);
         settings.save();
-        let file = p.path.file_name().unwrap_or_default().to_string_lossy();
+        let _ = late.set(self.load(&p.path));
+    }
+
+    /// Loads the plugin installed at `path` from a repository, already allowed in the
+    /// user's settings: false if it can't be until the next start (one loaded there
+    /// already, or no room left).
+    pub fn add_installed(&self, path: &std::path::Path) -> bool {
+        if self.files().iter().any(|f| f.path == path) {
+            return false;
+        }
+        let Some(slot) = self.installed.iter().find(|s| s.get().is_none()) else {
+            return false;
+        };
+        slot.set(self.load(path)).is_ok()
+    }
+
+    /// The plugin file `path` loaded, checked against what is loaded already.
+    fn load(&self, path: &std::path::Path) -> Part {
+        let file = path.file_name().unwrap_or_default().to_string_lossy();
         let mut loaded = plugin::Loaded::default();
-        let result = plugin::load_file(&p.path, python::python());
+        let result = plugin::load_file(path, python::python());
         let status = match result {
             Ok((info, effects, generators)) => {
                 let status = plugin::Status::Loaded {
@@ -618,31 +669,34 @@ impl Registry {
             }
         };
         loaded.files.push(plugin::PluginFile {
-            path: p.path.clone(),
-            python: plugin::is_python(&p.path),
+            path: path.to_owned(),
+            python: plugin::is_python(path),
             status,
         });
-        let _ = late.set(Part::checked(loaded, |id| self.params_of(id).is_some()));
+        Part::checked(loaded, |id| self.params_of(id).is_some())
     }
 
-    /// How many plugins were allowed since startup: cached pictures made with effects or
-    /// generators that were missing are made again when it changes.
+    /// How many plugins were allowed or installed since startup: cached pictures made
+    /// with effects or generators that were missing are made again when it changes.
     pub fn generation(&self) -> usize {
-        self.late.iter().filter(|l| l.get().is_some()).count()
+        let late = self.late.iter().chain(&self.installed);
+        late.filter(|l| l.get().is_some()).count()
     }
 
     /// Every plugin file found, in loading order, with what became of it (since it was
-    /// allowed, for a pending one).
+    /// allowed, for a pending one), then those installed since startup.
     pub fn files(&self) -> Vec<plugin::PluginFile> {
         let mut files = self.first.files.clone();
         for late in self
             .late
             .iter()
+            .chain(&self.installed)
             .filter_map(OnceLock::get)
             .flat_map(|p| &p.files)
         {
-            if let Some(f) = files.iter_mut().find(|f| f.path == late.path) {
-                *f = late.clone();
+            match files.iter_mut().find(|f| f.path == late.path) {
+                Some(f) => *f = late.clone(),
+                None => files.push(late.clone()),
             }
         }
         files
@@ -658,6 +712,37 @@ impl Registry {
         self.parts()
             .flat_map(|p| p.errors.iter().map(String::as_str))
             .collect()
+    }
+
+    /// The repository plugin and version the effect or generator `id` comes from, if
+    /// known.
+    pub fn plugin_ref(&self, id: &str) -> Option<PluginRef> {
+        self.installed(id).map(|i| i.entry.clone())
+    }
+
+    /// What the plugin of the effect or generator `id` recorded when installed from a
+    /// repository.
+    fn installed(&self, id: &str) -> Option<&plugin::Installed> {
+        let mut plugins = self.plugins();
+        let p = plugins.find(|p| p.effects.iter().chain(&p.generators).any(|e| e == id))?;
+        p.entry.as_ref()
+    }
+
+    /// Brings the plugin version `inst` records up to the one installed, which reads
+    /// its settings from now on; true if they were saved by a version older than its
+    /// `compatible_from`, that it may read differently.
+    pub fn update_version(&self, inst: &mut EffectInstance) -> bool {
+        let (Some(saved), Some(i)) = (&mut inst.plugin, self.installed(&inst.effect)) else {
+            return false;
+        };
+        if saved.id != i.entry.id {
+            return false;
+        }
+        let parts = repository::version_parts;
+        let older =
+            (i.compatible_from.as_deref()).is_some_and(|c| parts(c) > parts(&saved.version));
+        saved.version = i.entry.version.clone();
+        older
     }
 
     pub fn get(&self, id: &str) -> Option<&dyn Effect> {
@@ -848,6 +933,49 @@ mod tests {
     use super::*;
 
     #[test]
+    fn settings_older_than_compatible_from_are_told_and_brought_up_to_date() {
+        let mut reg = Registry::builtin();
+        let entry = |v: &str| PluginRef {
+            id: "halftone".into(),
+            version: v.into(),
+        };
+        reg.first.plugins.push(plugin::PluginInfo {
+            name: "Halftone".into(),
+            version: "1.0.0".into(),
+            effects: vec!["o/halftone".into()],
+            generators: vec!["o/dots".into()],
+            source: None,
+            entry: Some(plugin::Installed {
+                entry: entry("1.0.0"),
+                compatible_from: Some("0.5.0".into()),
+            }),
+        });
+        let inst = |effect: &str, v: &str| EffectInstance {
+            effect: effect.into(),
+            enabled: true,
+            params: Default::default(),
+            links: Default::default(),
+            plugin: Some(entry(v)),
+            name: None,
+        };
+        let mut old = inst("o/dots", "0.1.0");
+        assert!(reg.update_version(&mut old));
+        assert_eq!(old.plugin, Some(entry("1.0.0")));
+        // Read the same: brought up to date without a word; so is it once updated.
+        let mut recent = inst("o/halftone", "0.5.0");
+        assert!(!reg.update_version(&mut recent));
+        assert_eq!(recent.plugin, Some(entry("1.0.0")));
+        assert!(!reg.update_version(&mut old));
+        // Another plugin's, or one not installed, is left as it is.
+        let mut other = inst("o/halftone", "0.1.0");
+        other.plugin.as_mut().unwrap().id = "other".into();
+        assert!(!reg.update_version(&mut other));
+        let mut gone = inst("o/gone", "0.1.0");
+        assert!(!reg.update_version(&mut gone));
+        assert_eq!(gone.plugin, Some(entry("0.1.0")));
+    }
+
+    #[test]
     fn plugins_whose_ids_are_taken_are_left_out() {
         let reg = Registry::builtin();
         let loaded = plugin::Loaded {
@@ -986,6 +1114,8 @@ mod tests {
                 enabled: true,
                 params: ParamValues::new(),
                 links: Default::default(),
+                plugin: None,
+                name: None,
             },
             invert,
         ];

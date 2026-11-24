@@ -65,6 +65,10 @@ jobs:
       - name: Build (Windows)
         if: matrix.name == 'windows'
         run: cargo build --release --locked -p ${{ env.APP }}
+      # python-build-standalone's Python, shipped by the Linux packages for the Python plugins.
+      - name: Python (Linux)
+        if: matrix.name == 'linux'
+        run: sh scripts/python-linux.sh
       - name: Package (Linux)
         if: matrix.name == 'linux'
         run: |
@@ -72,6 +76,8 @@ jobs:
           mkdir -p "dist/$dir"
           cp "target/release/${{ matrix.exe }}" "dist/$dir/"
           cp -r templates "dist/$dir/"
+          cp -r target/python-linux "dist/$dir/python"
+          rm "dist/$dir/python/.version"
           tar -czf "dist/$dir.tar.gz" -C dist "$dir"
       - name: Installers (Linux)
         if: matrix.name == 'linux'
@@ -79,6 +85,11 @@ jobs:
           cargo install cargo-deb --version 3.8.0 --locked
           cargo deb --no-build --target x86_64-unknown-linux-gnu -o dist/
           sh scripts/appimage.sh "target/release/${{ matrix.exe }}" "dist/$APP-linux-x86_64.AppImage"
+      # python.org's embeddable Python, shipped by the Windows packages for the Python plugins.
+      - name: Python (Windows)
+        if: matrix.name == 'windows'
+        shell: bash
+        run: sh scripts/python-embed.sh
       - name: Package (Windows)
         if: matrix.name == 'windows'
         shell: pwsh
@@ -87,6 +98,8 @@ jobs:
           New-Item -ItemType Directory -Force "dist/$dir" | Out-Null
           Copy-Item "target/release/${{ matrix.exe }}" "dist/$dir/"
           Copy-Item -Recurse templates "dist/$dir/"
+          Copy-Item -Recurse target/python-embed "dist/$dir/python"
+          Remove-Item "dist/$dir/python/.version"
           Compress-Archive -Path "dist/$dir" -DestinationPath "dist/$dir.zip"
       # Inno Setup at a pinned version, checked against its SHA-256; raise it on purpose.
       - name: Installer (Windows)
@@ -106,6 +119,22 @@ jobs:
           $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"' | Select-Object -First 1).Matches.Groups[1].Value
           & $iscc "/DAppVersion=$version" installer/artwork-creator.iss
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      # The Microsoft Store package, unsigned (the Store signs it): a separate artifact,
+      # to upload to Partner Center, not attached to the release (Windows won't install it).
+      - name: Store package (Windows)
+        if: matrix.name == 'windows'
+        shell: bash
+        run: |
+          mkdir -p store
+          sh scripts/msix.sh "target/release/${{ matrix.exe }}"
+          mv dist/artwork-creator.msix store/
+      - uses: actions/upload-artifact@v4
+        if: matrix.name == 'windows'
+        with:
+          name: store-msix
+          path: store/*.msix
+          if-no-files-found: error
+          retention-days: 7
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ env.APP }}-${{ matrix.name }}
@@ -138,6 +167,7 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist
+          pattern: ${{ env.APP }}-*
           merge-multiple: true
       - name: Create the draft release
         env:

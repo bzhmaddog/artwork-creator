@@ -32,6 +32,8 @@ cd "$(git rev-parse --show-toplevel)"
 
 APP_TOML=Cargo.toml
 SDK_TOML=plugin-sdk/Cargo.toml
+# The Python SDK's __version__, kept equal to the crate's.
+SDK_PY=plugin-sdk/python/artwork_plugin_sdk.py
 ABI_FILE=plugin-sdk/src/abi.rs
 APP_PATHS='src locales templates plugin-sdk Cargo.toml Cargo.lock'
 FEATURE_WORDS='add|added|adds|adding|new|feat|feature|features|implement|implemented|support|supports'
@@ -286,10 +288,13 @@ cmd_bump() {
     esac
 
     [ "$new" != "$current" ] && set_toml_version "$APP_TOML" "$new"
-    [ -n "$sdk_new" ] && [ "$sdk_new" != "$sdk_old" ] && set_toml_version "$SDK_TOML" "$sdk_new"
+    if [ -n "$sdk_new" ] && [ "$sdk_new" != "$sdk_old" ]; then
+        set_toml_version "$SDK_TOML" "$sdk_new"
+        sed -i "s/^__version__ = \".*\"$/__version__ = \"$sdk_new\"/" "$SDK_PY"
+    fi
     # Brings the workspace versions in Cargo.lock up to date.
     cargo update --workspace --quiet
-    git add -A "$APP_TOML" "$SDK_TOML" Cargo.lock
+    git add -A "$APP_TOML" "$SDK_TOML" "$SDK_PY" Cargo.lock
     git commit -q -m "$subject"
 
     echo "Version set to $new. Nothing is pushed. To release it, merge this commit into main"

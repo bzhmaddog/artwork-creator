@@ -44,17 +44,40 @@ import math
 import runpy
 import sys
 
-
-def float_param(id, label, min, max, default, unit="", decimals=1):
-    """A number with decimals; `unit` is shown after it, e.g. " px"."""
-    return {"id": id, "label": label, "type": "float", "min": min, "max": max,
-            "default": default, "unit": unit, "decimals": decimals}
+# The SDK's version, the same as the artwork-plugin-sdk crate's.
+__version__ = "0.4.0"
 
 
-def int_param(id, label, min, max, default, unit=""):
-    """A whole number."""
-    return {"id": id, "label": label, "type": "int", "min": min, "max": max,
-            "default": default, "unit": unit}
+def _with_role(param, role):
+    return dict(param, role=role) if role else param
+
+
+def float_param(id, label, min, max, default, unit="", decimals=1, role=None):
+    """A number with decimals; `unit` is shown after it, e.g. " px". `role` says what it
+    is for, which picks its control: "angle" (degrees, counterclockwise from the right:
+    a value and a dial) or "size" (a length in the image's pixels: fine steps for small
+    values, shown in mm on layers whose pixels have a size on the page). Without one, a
+    float in "°" is taken for an angle and one in "px" for a size."""
+    return _with_role({"id": id, "label": label, "type": "float", "min": min, "max": max,
+                       "default": default, "unit": unit, "decimals": decimals}, role)
+
+
+def int_param(id, label, min, max, default, unit="", role=None):
+    """A whole number. For a random variation, use `seed_param`; without a role, one
+    with the id "seed" is taken for one."""
+    return _with_role({"id": id, "label": label, "type": "int", "min": min, "max": max,
+                       "default": default, "unit": unit}, role)
+
+
+# The largest value of a seed_param.
+SEED_MAX = 2**31 - 1
+
+
+def seed_param(id, label):
+    """A seed: a random variation the app picks, when the effect is added and with a
+    regenerate button shown in place of a slider, from 0 to SEED_MAX. Seed a random
+    generator with it, so the same value gives the same result on every render."""
+    return int_param(id, label, 0, SEED_MAX, 0, role="seed")
 
 
 def bool_param(id, label, default):

@@ -2,7 +2,7 @@
 
 use image::RgbaImage;
 
-use super::{Effect, ParamSpec, Params, par_pixels, par_rows};
+use super::{Effect, ParamSpec, Params, Role, par_pixels, par_rows};
 use crate::i18n::{tr_noop, translate};
 
 type ApplyFn = fn(&mut RgbaImage, &Params, f32) -> Result<(), String>;
@@ -88,6 +88,7 @@ pub fn all() -> Vec<Box<dyn Effect>> {
             vec![
                 ParamSpec::float("hue", tr_noop!("PARAM_HUE"), -180.0, 180.0, 0.0)
                     .unit("°")
+                    .with_role(Role::Angle)
                     .decimals(0),
                 percent(
                     "saturation",
@@ -179,12 +180,15 @@ pub fn all() -> Vec<Box<dyn Effect>> {
                 percent("opacity", tr_noop!("PARAM_OPACITY"), 0.0, 100.0, 60.0),
                 ParamSpec::float("angle", tr_noop!("PARAM_LIGHT_ANGLE"), -180.0, 180.0, 135.0)
                     .unit("°")
+                    .with_role(Role::Angle)
                     .decimals(0),
                 ParamSpec::float("distance", tr_noop!("PARAM_DISTANCE"), 0.0, 1000.0, 20.0)
                     .unit(" px")
+                    .with_role(Role::Size)
                     .decimals(0),
                 ParamSpec::float("softness", tr_noop!("PARAM_SOFTNESS"), 0.0, 200.0, 10.0)
                     .unit(" px")
+                    .with_role(Role::Size)
                     .decimals(1),
             ],
             apply: drop_shadow,
@@ -198,6 +202,7 @@ pub fn all() -> Vec<Box<dyn Effect>> {
                 ParamSpec::color("color", tr_noop!("PARAM_COLOR"), [255, 255, 255, 255]),
                 ParamSpec::float("width", tr_noop!("PARAM_WIDTH"), 0.0, 500.0, 8.0)
                     .unit(" px")
+                    .with_role(Role::Size)
                     .decimals(1),
                 ParamSpec::choice(
                     "position",
@@ -269,6 +274,7 @@ pub fn all() -> Vec<Box<dyn Effect>> {
             vec![
                 ParamSpec::float("radius", tr_noop!("PARAM_RADIUS"), 0.0, 200.0, 4.0)
                     .unit(" px")
+                    .with_role(Role::Size)
                     .decimals(1),
             ],
             blur,
@@ -281,6 +287,7 @@ pub fn all() -> Vec<Box<dyn Effect>> {
                 percent("amount", tr_noop!("PARAM_AMOUNT"), 0.0, 500.0, 100.0),
                 ParamSpec::float("radius", tr_noop!("PARAM_RADIUS"), 0.1, 50.0, 2.0)
                     .unit(" px")
+                    .with_role(Role::Size)
                     .decimals(1),
                 ParamSpec::int("threshold", tr_noop!("PARAM_THRESHOLD"), 0, 255, 0),
             ],

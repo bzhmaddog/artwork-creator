@@ -676,8 +676,9 @@ that folds them away.
 | Stripes | width, color 1, color 2, angle |
 
 - The circular-arrow button next to the generator menu (Noise, Clouds, and a plugin's
-  generator with an integer setting `seed`) draws another random picture with the same
-  settings. The picture is saved with the project.
+  generator with a seed setting) draws another random picture with the same
+  settings. A new generated fill, or one switched to another generator, starts with a
+  random picture too. The picture is saved with the project.
 - More generators come from [plugins](#plugins), listed under the plugin's name. A project
   using one whose plugin is not installed still opens: it shows as "Missing generator",
   is not drawn, and is saved unchanged.
@@ -805,7 +806,11 @@ page (a text's follow the font size).
   do not count. Their **curve** is an easing curve as in animation tools: Linear, Ease in,
   Ease out, Ease in-out, or your own by dragging the two handles of its graph.
 - Angles have an angle dial; colors a color picker; numbers can be linked to variables.
-- More effects come from [plugins](#plugins).
+- More effects come from [plugins](#plugins). A plugin's effect with a seed setting (a
+  random variation) shows a circular-arrow button in its place, which gives another random result
+  with the same settings, as for [generated fills](#generated-fills). Such an effect
+  starts with a random result when added; **Reset to defaults** keeps it. It is saved with
+  the project.
 
 ## Plugins
 
@@ -830,7 +835,10 @@ look there, so `make run` finds the `plugins` folder of the repository.
   its name (its address in the tooltip; "Unknown repository" until its list was read). A library that
   fails to load, or was made for a plugin interface version this app doesn't know, is
   skipped and reported at the bottom of the Add effect menu. Plugins made for version 1
-  of the interface, which had effects only, still load.
+  of the interface, which had effects only, still load. A Python plugin installed from a
+  repository for a plugin SDK older than the oldest this app runs (one the SDK has since
+  changed in a way that breaks it) is skipped and reported the same way, asking to
+  update it.
 - Python plugins need Python 3.8 or later. Every package comes with one, the same
   version everywhere, which it uses first: the Windows ones (zip, installer, Microsoft
   Store) in a `python` folder next to the app, the Linux ones in a `python` folder next
@@ -884,7 +892,8 @@ look there, so `make run` finds the `plugins` folder of the repository.
   each time the plugin manager opens.
   The search field filters the plugins of that repository by name, description, author
   or the name of one of their effects or generators. Each plugin shows the latest version that works with this version of the
-  app on this system (its `min_app`, plugin interface version and a file for this system;
+  app on this system (what its `engines` asks of the app and, for a Python plugin, of the
+  plugin SDK, a library's plugin interface version, and a file for this system;
   "Not available" otherwise) and, in its **Provides** column, how many effects and
   generators that version adds ("1 effect, 1 generator", their names in the tooltip; empty
   when the list does not say). **Install** downloads its file (the `.dll`, `.so` or `.py`)

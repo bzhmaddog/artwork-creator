@@ -3,6 +3,9 @@
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value};
 
+/// The largest value of a [`Param::seed`].
+pub const SEED_MAX: i32 = i32::MAX;
+
 /// A parameter of an effect. The app builds its control from it and saves its value
 /// with the project.
 ///
@@ -12,6 +15,8 @@ use serde_json::{Map, Value};
 ///   { "id": "size", "label": "Size", "type": "float", "min": 1, "max": 50,
 ///     "default": 8, "unit": "px", "decimals": 1 },
 ///   { "id": "count", "label": "Count", "type": "int", "min": 1, "max": 10, "default": 3 },
+///   { "id": "seed", "label": "Seed", "type": "int", "min": 0, "max": 9999, "default": 0,
+///     "role": "seed" },
 ///   { "id": "soft", "label": "Soft edges", "type": "bool", "default": true },
 ///   { "id": "ink", "label": "Ink", "type": "color", "default": "#000000ff" },
 ///   { "id": "shape", "label": "Shape", "type": "choice", "default": "dot",
@@ -26,6 +31,32 @@ pub struct Param {
     pub label: String,
     #[serde(flatten)]
     pub kind: ParamKind,
+    /// What it is for, which picks its control; none for the type's usual control.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<Role>,
+}
+
+/// What a parameter is for, which tells the app what control to show for it. The app
+/// ignores a role that doesn't fit the parameter's type, or that it doesn't know (from
+/// an SDK newer than the app), and shows the type's usual control.
+///
+/// Without a role, the app still guesses one as before roles existed: an int with the
+/// id "seed" is a seed, a float in "°" an angle, a float in "px" a size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Role {
+    /// An int: a random variation, which the app picks when the effect is added and
+    /// again with a button shown in place of a slider, without its label. See
+    /// [`Param::seed`].
+    Seed,
+    /// A float in degrees, counterclockwise from the right: its value and a dial.
+    Angle,
+    /// A float length in the image's pixels: a slider moving in fine steps for small
+    /// values, shown in mm on layers whose pixels have a size on the page.
+    Size,
+    /// A role this SDK doesn't know.
+    #[serde(other)]
+    Unknown,
 }
 
 /// What a parameter holds, with its range and default.
@@ -82,6 +113,7 @@ impl Param {
             id: id.into(),
             label: label.into(),
             kind,
+            role: None,
         }
     }
 
@@ -110,6 +142,13 @@ impl Param {
                 unit: String::new(),
             },
         )
+    }
+
+    /// A seed: a random variation the app picks, when the effect is added and with a
+    /// regenerate button, from 0 to [`SEED_MAX`]. Seed a random generator with it, so
+    /// the same value gives the same result on every render.
+    pub fn seed(id: &str, label: &str) -> Self {
+        Self::int(id, label, 0, SEED_MAX, 0).role(Role::Seed)
     }
 
     pub fn bool(id: &str, label: &str, default: bool) -> Self {
@@ -159,6 +198,12 @@ impl Param {
         if let ParamKind::Float { decimals, .. } = &mut self.kind {
             *decimals = n;
         }
+        self
+    }
+
+    /// Sets what it is for, which picks its control: see [`Role`].
+    pub fn role(mut self, role: Role) -> Self {
+        self.role = Some(role);
         self
     }
 }
@@ -253,6 +298,32 @@ mod tests {
         )
         .unwrap();
         assert_eq!(f, Param::float("r", "R", 0.0, 5.0, 1.0));
+    }
+
+    #[test]
+    fn roles_are_optional_and_unknown_ones_kept_apart() {
+        let p = Param::seed("seed", "Seed");
+        assert!(matches!(
+            p.kind,
+            ParamKind::Int {
+                min: 0,
+                max: SEED_MAX,
+                ..
+            }
+        ));
+        let json = serde_json::to_value(&p).unwrap();
+        assert_eq!(json["role"], "seed");
+        let p: Param = serde_json::from_value(json).unwrap();
+        assert_eq!(p.role, Some(Role::Seed));
+        // Left out when there is none.
+        let json = serde_json::to_value(Param::bool("b", "B", true)).unwrap();
+        assert!(json.get("role").is_none(), "{json}");
+        // From a newer SDK: read, not refused.
+        let p: Param = serde_json::from_str(
+            r#"{"id":"a","label":"A","type":"float","min":0,"max":5,"default":1,"role":"hologram"}"#,
+        )
+        .unwrap();
+        assert_eq!(p.role, Some(Role::Unknown));
     }
 
     #[test]

@@ -74,6 +74,14 @@ class SdkTest(unittest.TestCase):
         self.assertEqual(ap.color("#ff000080"), (255, 0, 0, 128))
         self.assertEqual(ap.color("#0000ff"), (0, 0, 255, 255))
 
+    def test_roles_are_given_only_when_asked(self):
+        self.assertEqual(ap.int_param("v", "V", 0, 99, 0, role="seed")["role"], "seed")
+        self.assertEqual(ap.float_param("a", "A", 0, 9, 0, unit="°", role="angle")["role"], "angle")
+        self.assertNotIn("role", ap.int_param("n", "N", 1, 9, 3))
+        self.assertNotIn("role", ap.float_param("r", "R", 0, 5, 1))
+        seed = ap.seed_param("s", "S")
+        self.assertEqual((seed["type"], seed["role"], seed["min"], seed["max"]), ("int", "seed", 0, 2**31 - 1))
+
     def test_describe(self):
         [(answer, _)] = exchange(PLUGIN, ({"op": "describe"}, b""))
         self.assertTrue(answer["ok"])

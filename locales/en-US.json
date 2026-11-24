@@ -637,6 +637,7 @@
   "RECOVER_LATER_HINT": "Keeps the copy: you will be asked again at the next start",
   "REDO": "Redo",
   "REFERENCE_LAYER_NAME": "Reference: {file}",
+  "REGENERATE_EFFECT_HINT": "Regenerate: gives another random result with the same settings",
   "REGENERATE_FILL_HINT": "Regenerate: draws another random picture with the same settings",
   "REMOVED_VARIABLE_USERS_ONE": "It is used by {n} field or color, which keeps its current value and shows a broken link icon.",
   "REMOVED_VARIABLE_USERS_OTHER": "It is used by {n} fields and colors, which keep their current values and show a broken link icon.",

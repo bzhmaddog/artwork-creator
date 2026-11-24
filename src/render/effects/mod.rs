@@ -120,6 +120,18 @@ pub enum ParamKind {
     },
 }
 
+/// What a parameter is for, which picks its control (see `ui::effects`), as plugins
+/// give it with `artwork_plugin_sdk::Role`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Role {
+    /// An int: a random variation, given a new random value by a regenerate button.
+    Seed,
+    /// A float in degrees, counterclockwise from the right: a value and a dial.
+    Angle,
+    /// A float length in layer pixels: a logarithmic slider, in mm when asked.
+    Size,
+}
+
 /// A parameter of an effect.
 #[derive(Clone, Debug)]
 pub struct ParamSpec {
@@ -128,6 +140,8 @@ pub struct ParamSpec {
     /// Shown next to the control.
     pub label: String,
     pub kind: ParamKind,
+    /// What it is for, as given; see [`ParamSpec::role`].
+    pub role: Option<Role>,
 }
 
 impl ParamSpec {
@@ -136,6 +150,35 @@ impl ParamSpec {
             id: id.into(),
             label: label.into(),
             kind,
+            role: None,
+        }
+    }
+
+    /// Sets what it is for.
+    pub fn with_role(mut self, role: Role) -> Self {
+        self.role = Some(role);
+        self
+    }
+
+    /// The range of a seed (see [`Role::Seed`]); `None` for another parameter.
+    pub fn seed_range(&self) -> Option<(i32, i32)> {
+        match self.kind {
+            ParamKind::Int { min, max, .. } if self.role() == Some(Role::Seed) => Some((min, max)),
+            _ => None,
+        }
+    }
+
+    /// What it is for: as given, else guessed as plugins made before roles expect (an
+    /// int with the id "seed", a float in "°" or in "px").
+    pub fn role(&self) -> Option<Role> {
+        if self.role.is_some() {
+            return self.role;
+        }
+        match &self.kind {
+            ParamKind::Int { .. } if self.id == "seed" => Some(Role::Seed),
+            ParamKind::Float { unit, .. } if unit.trim() == "°" => Some(Role::Angle),
+            ParamKind::Float { unit, .. } if unit.trim() == "px" => Some(Role::Size),
+            _ => None,
         }
     }
 
@@ -220,6 +263,28 @@ impl ParamSpec {
             ParamKind::Curve { default } => curve_value(*default),
         }
     }
+}
+
+/// The largest seed of the built-in generators, the same as the SDK's seed helpers': a
+/// seed takes any value from 0 to it.
+pub const SEED_MAX: i32 = artwork_plugin_sdk::SEED_MAX;
+
+/// A random seed in `min..=max`, different from `old` when there is room for another.
+pub fn random_seed(min: i32, max: i32, old: Option<i32>) -> i32 {
+    use std::hash::{BuildHasher, Hasher};
+    let (min, max) = (min.min(max), max.max(min));
+    // Each RandomState has new keys, so two calls in the same instant differ too.
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.as_nanos() as u64);
+    h.write_u64(nanos);
+    let span = (max as i64 - min as i64) as u64 + 1;
+    let mut v = min as i64 + (h.finish() % span) as i64;
+    if old == Some(v as i32) && span > 1 {
+        v = if v >= max as i64 { min as i64 } else { v + 1 };
+    }
+    v as i32
 }
 
 /// A curve's control points as saved.
@@ -466,6 +531,19 @@ impl EffectInstance {
             name: generator.plugin().map(|_| generator.name().to_owned()),
             ..Self::with_defaults(generator.id(), generator.params())
         }
+    }
+
+    /// The same, with a new random value for each seed (see [`Role::Seed`]), so that a
+    /// new effect or fill doesn't look like every other one.
+    pub fn with_random_seeds(mut self) -> Self {
+        let specs = registry().params_of(&self.effect).unwrap_or_default();
+        for spec in specs {
+            if let Some((min, max)) = spec.seed_range() {
+                let v = random_seed(min, max, None);
+                self.params.insert(spec.id.clone(), Value::from(v));
+            }
+        }
+        self
     }
 
     fn with_defaults(id: &str, specs: &[ParamSpec]) -> Self {
@@ -933,6 +1011,45 @@ mod tests {
     use super::*;
 
     #[test]
+    fn random_seeds_stay_in_range_and_change() {
+        for _ in 0..200 {
+            let v = random_seed(3, 7, None);
+            assert!((3..=7).contains(&v), "{v}");
+        }
+        // With two values, the other one each time.
+        for _ in 0..20 {
+            assert_eq!(random_seed(0, 1, Some(0)), 1);
+            assert_eq!(random_seed(0, 1, Some(1)), 0);
+        }
+        assert_eq!(random_seed(5, 5, Some(5)), 5);
+        // A new fill starts with a seed of its own; other settings at their defaults.
+        let noise = registry().generator("builtin.noise").unwrap();
+        let a = EffectInstance::generator(noise).with_random_seeds();
+        let b = EffectInstance::generator(noise).with_random_seeds();
+        let seed = |i: &EffectInstance| i.params["seed"].as_i64().unwrap();
+        assert!((0..=SEED_MAX as i64).contains(&seed(&a)));
+        assert_ne!(seed(&a), seed(&b));
+        let defaults = EffectInstance::generator(noise);
+        assert_eq!(a.params["color1"], defaults.params["color1"]);
+    }
+
+    #[test]
+    fn roles_are_guessed_only_when_not_given() {
+        let seed = ParamSpec::int("seed", "Seed", 0, 99, 0);
+        assert_eq!(seed.role(), Some(Role::Seed));
+        let angle = ParamSpec::float("a", "A", 0.0, 9.0, 0.0).unit("°");
+        assert_eq!(angle.role(), Some(Role::Angle));
+        let size = ParamSpec::float("s", "S", 0.0, 9.0, 0.0).unit(" px");
+        assert_eq!(size.role(), Some(Role::Size));
+        // Only an int is a seed; a given role wins over the guess.
+        assert_eq!(ParamSpec::float("seed", "S", 0.0, 9.0, 0.0).role(), None);
+        let given = ParamSpec::float("s", "S", 0.0, 9.0, 0.0)
+            .unit("px")
+            .with_role(Role::Angle);
+        assert_eq!(given.role(), Some(Role::Angle));
+    }
+
+    #[test]
     fn settings_older_than_compatible_from_are_told_and_brought_up_to_date() {
         let mut reg = Registry::builtin();
         let entry = |v: &str| PluginRef {
@@ -948,6 +1065,7 @@ mod tests {
             entry: Some(plugin::Installed {
                 entry: entry("1.0.0"),
                 compatible_from: Some("0.5.0".into()),
+                min_sdk: None,
             }),
         });
         let inst = |effect: &str, v: &str| EffectInstance {

@@ -20,6 +20,15 @@
  *   "bool":   "default"
  *   "color":  "default" as "#rrggbbaa" (straight RGBA)
  *   "choice": "options" as [{"id": ..., "label": ...}], "default" (an option id)
+ * and, of any type, an optional "role" saying what it is for, which picks its control:
+ *   "seed":   an int, a random variation the app picks when the effect is added and
+ *             with a button giving it a new one; declare it from 0 to 2147483647
+ *   "angle":  a float in degrees, counterclockwise from the right: its value and a dial
+ *   "size":   a float length in the image's pixels: a slider with fine steps for small
+ *             values, shown in mm on layers whose pixels have a size on the page
+ * The app ignores a role that doesn't fit the type, or that it doesn't know, and shows
+ * the type's usual control. Without a role it guesses one: an int with the id "seed"
+ * is a seed, a float in "°" an angle, a float in "px" a size.
  *
  * Values (the `params_json` argument of padding/apply/generate) are a JSON object with every
  * parameter id, already checked by the app: numbers within range, colors as

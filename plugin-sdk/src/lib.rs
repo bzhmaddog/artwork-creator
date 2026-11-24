@@ -38,7 +38,21 @@ mod export;
 mod params;
 
 pub use export::{Contents, Image, build_table};
-pub use params::{ChoiceOption, Param, ParamKind, Values, color_from_hex, color_to_hex};
+pub use params::{
+    ChoiceOption, Param, ParamKind, Role, SEED_MAX, Values, color_from_hex, color_to_hex,
+};
+
+/// This SDK's version, which the app ships, for Python plugins too
+/// (`artwork_plugin_sdk.__version__`): a repository's plugin version made for a newer one
+/// (its `engines.sdk`) is not offered. Versions only add to the SDK, so a plugin made for an
+/// older one keeps working.
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// The oldest SDK whose Python plugins this one runs: the app doesn't offer a plugin
+/// version whose `engines.sdk` starts before it, and doesn't load one installed for it.
+/// Raised by a release that removes or changes something Python plugins use (a library
+/// has its own check, the ABI version).
+pub const OLDEST_VERSION: &str = "0.3.0";
 
 /// An image effect.
 pub trait Effect: Send + Sync + 'static {
@@ -148,4 +162,23 @@ pub fn par_rows<T: Send>(data: &mut [T], row_len: usize, f: impl Fn(usize, &mut 
             s.spawn(move || f(i * per, chunk));
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn the_oldest_version_is_not_later() {
+        let parts = |v: &str| -> Vec<u32> { v.split('.').map(|p| p.parse().unwrap()).collect() };
+        assert!(parts(super::OLDEST_VERSION) <= parts(super::VERSION));
+    }
+
+    #[test]
+    fn the_python_sdk_has_the_same_version() {
+        let py = include_str!("../python/artwork_plugin_sdk.py");
+        let line = format!("__version__ = \"{}\"", super::VERSION);
+        assert!(
+            py.lines().any(|l| l == line),
+            "{line} not in artwork_plugin_sdk.py"
+        );
+    }
 }

@@ -208,7 +208,7 @@ pub fn inline(ui: &mut Ui, ui_key: impl std::hash::Hash + std::fmt::Debug, f: &m
                     *g = registry()
                         .generators()
                         .next()
-                        .map(EffectInstance::generator);
+                        .map(|g| EffectInstance::generator(g).with_random_seeds());
                 }
                 changed = true;
             }

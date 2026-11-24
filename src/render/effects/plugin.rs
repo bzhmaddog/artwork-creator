@@ -13,7 +13,7 @@ use artwork_plugin_sdk::{self as sdk, abi};
 use image::RgbaImage;
 use libloading::Library;
 
-use super::{Effect, Generator, ParamKind, ParamSpec, Params, color_from_hex, python};
+use super::{Effect, Generator, ParamKind, ParamSpec, Params, Role, color_from_hex, python};
 
 /// A plugin that loaded.
 #[derive(Clone, Debug)]
@@ -40,6 +40,9 @@ pub struct Installed {
     /// if `None` (see [`Version::compatible_from`](super::repository::Version)).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compatible_from: Option<String>,
+    /// For a Python plugin, the oldest SDK it works with (its `engines.sdk` starts there).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_sdk: Option<String>,
 }
 
 /// A repository plugins were installed from, as `source.json` in its origin's folder
@@ -355,6 +358,18 @@ pub fn source_of(path: &Path) -> Option<Source> {
     Some(Source::read(path.parent()?, origin))
 }
 
+/// Why the Python plugin `path` doesn't run with this app, if its install recorded an
+/// SDK older than the oldest this app runs (see [`artwork_plugin_sdk::OLDEST_VERSION`]).
+fn sdk_no_longer_run(path: &Path) -> Option<String> {
+    let min = recorded(path)?.min_sdk?;
+    (!super::repository::sdk_still_supported(Some(&min))).then(|| {
+        format!(
+            "made for plugin SDK {min}; this app runs plugins made for SDK {} and later: update it",
+            artwork_plugin_sdk::OLDEST_VERSION
+        )
+    })
+}
+
 /// Whether `name` is an origin's (see [`origin`]).
 pub fn is_origin(name: &str) -> bool {
     name.len() == ORIGIN_LEN && name.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
@@ -584,6 +599,16 @@ pub(super) fn load_dir_with(
         };
         if settings.is_disabled(&path) {
             log::info!("plugin {} disabled", path.display());
+            loaded.files.push(found);
+            continue;
+        }
+        // Installed for an SDK this app no longer runs: not started, it would fail.
+        if found.python
+            && let Some(e) = sdk_no_longer_run(&path)
+        {
+            log::warn!("plugin {} not loaded: {e}", path.display());
+            loaded.errors.push(format!("{file}: {e}"));
+            found.status = Status::Failed(e);
             loaded.files.push(found);
             continue;
         }
@@ -1058,10 +1083,18 @@ fn param_specs(json: &str) -> Result<Vec<ParamSpec>, String> {
                 }
             }
         };
+        // A role that doesn't fit the type, or unknown, is left out.
+        let role = match (p.role, &kind) {
+            (Some(sdk::Role::Seed), ParamKind::Int { .. }) => Some(Role::Seed),
+            (Some(sdk::Role::Angle), ParamKind::Float { .. }) => Some(Role::Angle),
+            (Some(sdk::Role::Size), ParamKind::Float { .. }) => Some(Role::Size),
+            _ => None,
+        };
         specs.push(ParamSpec {
             id: p.id,
             label: p.label,
             kind,
+            role,
         });
     }
     Ok(specs)
@@ -1259,6 +1292,19 @@ mod tests {
     }
 
     #[test]
+    fn param_roles_are_kept_when_they_fit() {
+        let specs = param_specs(
+            r#"[{"id":"v","label":"V","type":"int","min":0,"max":99,"default":0,"role":"seed"},
+                {"id":"t","label":"T","type":"float","min":0,"max":9,"default":0,"role":"angle"},
+                {"id":"n","label":"N","type":"int","min":0,"max":9,"default":0,"role":"angle"},
+                {"id":"h","label":"H","type":"bool","default":true,"role":"hologram"}]"#,
+        )
+        .unwrap();
+        let roles: Vec<_> = specs.iter().map(|s| s.role).collect();
+        assert_eq!(roles, [Some(Role::Seed), Some(Role::Angle), None, None]);
+    }
+
+    #[test]
     fn disabled_plugins_are_not_loaded_and_settings_are_kept() {
         let dir = std::env::temp_dir().join(format!("artwork-disabled-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -1365,6 +1411,7 @@ mod tests {
                 version: v.into(),
             },
             compatible_from: Some("1.0".into()),
+            min_sdk: None,
         };
         Source::record(&folder, "posterize.py", entry("1.0"), None).unwrap();
         Source::record(
@@ -1381,6 +1428,41 @@ mod tests {
             s.plugins.into_iter().collect::<Vec<_>>(),
             [("posterize-2.py".to_owned(), entry("2.0"))]
         );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_python_plugin_installed_for_an_sdk_no_longer_run_is_not_started() {
+        let dir = std::env::temp_dir().join(format!("artwork-old-sdk-{}", std::process::id()));
+        let folder = dir.join(origin("https://example.com/plugins.json"));
+        std::fs::create_dir_all(&folder).unwrap();
+        let entry = |id: &str, min_sdk: Option<&str>| Installed {
+            entry: super::super::PluginRef {
+                id: id.into(),
+                version: "1.0.0".into(),
+            },
+            compatible_from: None,
+            min_sdk: min_sdk.map(Into::into),
+        };
+        for (file, min_sdk) in [("old.py", Some("0.1.0")), ("fine.py", Some("0.3.0"))] {
+            std::fs::write(folder.join(file), "plugin = None\n").unwrap();
+            Source::record(&folder, file, entry(file, min_sdk), None).unwrap();
+        }
+        assert!(sdk_no_longer_run(&folder.join("old.py")).is_some_and(|e| e.contains("SDK 0.1.0")));
+        assert_eq!(sdk_no_longer_run(&folder.join("fine.py")), None);
+        // Without Python, only the one that never could run says so.
+        let settings = Settings::read_from(Some(dir.join("plugins.json")));
+        let loaded = load_dir_with(&dir, None, &settings);
+        let status = |name: &str| {
+            let f = loaded
+                .files
+                .iter()
+                .find(|f| f.path.ends_with(name))
+                .unwrap();
+            f.status.clone()
+        };
+        assert!(matches!(status("old.py"), Status::Failed(e) if e.contains("update it")));
+        assert!(matches!(status("fine.py"), Status::Failed(e) if e == python::PYTHON_MISSING));
         let _ = std::fs::remove_dir_all(dir);
     }
 }

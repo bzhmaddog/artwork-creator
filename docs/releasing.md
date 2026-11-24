@@ -27,7 +27,10 @@ make version-bump APP=2.0.0   # an exact version
 ```
 
 Patch, minor and major count from the current version. `SDK=...` sets the plugin SDK's
-version too. It asks before committing, and makes no tag and pushes nothing. See
+version too (its `Cargo.toml` and the Python SDK's `__version__`). A plugin SDK release that
+removes or changes something Python plugins use also raises `OLDEST_VERSION` in
+`plugin-sdk/src/lib.rs`: the app then stops offering and loading the plugins made for an
+older SDK. It asks before committing, and makes no tag and pushes nothing. See
 [`scripts/version.sh`](../scripts/version.sh) for the details.
 
 ## Releasing

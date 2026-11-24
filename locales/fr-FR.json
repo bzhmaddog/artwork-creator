@@ -637,6 +637,7 @@
   "RECOVER_LATER_HINT": "Garde la copie : la question sera reposée au prochain démarrage",
   "REDO": "Rétablir",
   "REFERENCE_LAYER_NAME": "Référence : {file}",
+  "REGENERATE_EFFECT_HINT": "Régénérer : donne un autre résultat aléatoire avec les mêmes réglages",
   "REGENERATE_FILL_HINT": "Régénérer : dessine une autre image aléatoire avec les mêmes réglages",
   "REMOVED_VARIABLE_USERS_ONE": "Elle est utilisée par {n} champ ou couleur, qui garde sa valeur actuelle et affiche une icône de lien rompu.",
   "REMOVED_VARIABLE_USERS_OTHER": "Elle est utilisée par {n} champs et couleurs, qui gardent leur valeur actuelle et affichent une icône de lien rompu.",

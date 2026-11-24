@@ -10,6 +10,7 @@
 //!     "homepage": "https://...", "license": "MIT", "kind": "library" | "python",
 //!     "latest": "0.1.0",
 //!     "versions": [{"version": "0.1.0", "abi": 2, "min_app": "0.16.0",
+//!         "engines": {"app": ">=0.16.0", "sdk": ">=0.4.0"},
 //!         "compatible_from": "0.1.0",
 //!         "effects": ["Halftone"], "generators": ["Dot grid"],
 //!         "files": {"linux-x86_64": {"url": "https://...", "sha256": "...", "size": 1234}}}]
@@ -19,13 +20,18 @@
 //! A library has one file per system (`linux-x86_64`, `windows-x86_64`...), a Python
 //! plugin one for all (`any`). `latest` is the newest version released (none later is
 //! offered); a version's `compatible_from`, the oldest version whose saved settings it
-//! still reads (all of them if absent). Other fields are ignored.
+//! still reads (all of them if absent). A version is offered if this app and, for a Python
+//! plugin, its SDK meet the version requirements of its `engines` (Cargo's syntax), and if
+//! it has a file for this system; a library's `abi` must be one this app loads. Lists
+//! written before `engines` give `min_app` and `sdk` instead, read as `>=` that version;
+//! `min_app` is still written for the apps that read only it. Other fields are ignored.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use artwork_plugin_sdk::abi;
+use semver::VersionReq;
 use serde::Deserialize;
 
 /// The repository of the app's own plugins, always listed.
@@ -74,9 +80,17 @@ pub struct Version {
     /// The plugin interface version of a library.
     #[serde(default)]
     pub abi: Option<u32>,
-    /// The oldest version of the app it works with.
+    /// What it needs of the app and its SDK.
+    #[serde(default)]
+    pub engines: Engines,
+    /// The oldest version of the app it works with, as lists gave it before `engines`
+    /// (and still do, for the apps that read only it).
     #[serde(default)]
     pub min_app: Option<String>,
+    /// The SDK a Python plugin was made for, as lists gave it before `engines`: that one
+    /// or later.
+    #[serde(default)]
+    pub sdk: Option<String>,
     /// The oldest version of the plugin whose saved settings it still reads; all of them
     /// if `None`.
     #[serde(default)]
@@ -92,6 +106,78 @@ pub struct Version {
     pub generators: Vec<String>,
     /// By system (`linux-x86_64`...), `any` for a Python plugin.
     pub files: BTreeMap<String, Download>,
+}
+
+/// What a plugin version needs, as version requirements in Cargo's syntax (`>=0.17.0`,
+/// `>=0.4.0, <2.0.0`). A host this app doesn't know is ignored.
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct Engines {
+    /// The app.
+    #[serde(default)]
+    pub app: Option<String>,
+    /// The plugin SDK of the app, for a Python plugin (a library's is its `abi`).
+    #[serde(default)]
+    pub sdk: Option<String>,
+}
+
+impl Version {
+    /// The versions of the app it works with: `engines.app`, else `min_app` or later.
+    fn app_req(&self) -> Result<Option<VersionReq>, String> {
+        requirement(self.engines.app.as_deref(), self.min_app.as_deref())
+    }
+
+    /// The SDK versions a Python plugin works with: `engines.sdk`, else `sdk` or later.
+    fn sdk_req(&self) -> Result<Option<VersionReq>, String> {
+        requirement(self.engines.sdk.as_deref(), self.sdk.as_deref())
+    }
+
+    /// The oldest SDK a Python plugin works with, where its SDK requirement starts; `None`
+    /// if it has none, or none with a lower bound.
+    pub fn min_sdk(&self) -> Option<String> {
+        lower_bound(&self.sdk_req().ok()??).map(|v| v.to_string())
+    }
+}
+
+/// Where `req` starts: the highest of its lower bounds (`>=1.2.0`, `=1.2.0`, `^1.2`...).
+fn lower_bound(req: &VersionReq) -> Option<semver::Version> {
+    use semver::Op;
+    req.comparators
+        .iter()
+        .filter(|c| {
+            matches!(
+                c.op,
+                Op::Exact | Op::GreaterEq | Op::Greater | Op::Tilde | Op::Caret | Op::Wildcard
+            )
+        })
+        .map(|c| semver::Version::new(c.major, c.minor.unwrap_or(0), c.patch.unwrap_or(0)))
+        .max()
+}
+
+/// Whether a plugin working with SDK `min_sdk` and later still runs with this app's:
+/// its start is not before [`artwork_plugin_sdk::OLDEST_VERSION`]. One that doesn't say
+/// does.
+pub fn sdk_still_supported(min_sdk: Option<&str>) -> bool {
+    let oldest = release(artwork_plugin_sdk::OLDEST_VERSION);
+    min_sdk.is_none_or(|m| release(m).is_none_or(|m| oldest.is_none_or(|o| m >= o)))
+}
+
+/// A version requirement, or one for `min` and later; none if neither is given.
+fn requirement(req: Option<&str>, min: Option<&str>) -> Result<Option<VersionReq>, String> {
+    let req = match (req, min) {
+        (Some(r), _) => r.to_owned(),
+        (None, Some(m)) => format!(">={m}"),
+        (None, None) => return Ok(None),
+    };
+    VersionReq::parse(&req)
+        .map(Some)
+        .map_err(|e| format!("{req:?}: {e}"))
+}
+
+/// `v` as a semantic version, a pre-release (`-beta`) counting as its release.
+fn release(v: &str) -> Option<semver::Version> {
+    let mut v = semver::Version::parse(v).ok()?;
+    v.pre = semver::Prerelease::EMPTY;
+    Some(v)
 }
 
 /// A file to download.
@@ -127,11 +213,18 @@ pub fn version_parts(v: &str) -> Option<Vec<u64>> {
 impl Entry {
     /// The latest version that works with this app on this system, and its file.
     pub fn best(&self) -> Option<(&Version, &Download)> {
-        self.best_for(env!("CARGO_PKG_VERSION"), &system())
+        self.best_for(
+            env!("CARGO_PKG_VERSION"),
+            artwork_plugin_sdk::VERSION,
+            &system(),
+        )
     }
 
-    fn best_for(&self, app: &str, system: &str) -> Option<(&Version, &Download)> {
-        let app = version_parts(app)?;
+    fn best_for(&self, app: &str, sdk: &str, system: &str) -> Option<(&Version, &Download)> {
+        let (app, sdk) = (release(app)?, release(sdk)?);
+        let meets = |req: Result<Option<VersionReq>, String>, v: &semver::Version| {
+            req.is_ok_and(|r| r.is_none_or(|r| r.matches(v)))
+        };
         let latest = self.latest.as_deref().and_then(version_parts);
         let key = match self.kind {
             Kind::Library => system,
@@ -140,9 +233,11 @@ impl Entry {
         self.versions
             .iter()
             .filter(|v| {
-                let min = v.min_app.as_deref().and_then(version_parts);
                 let abi = v.abi.unwrap_or(abi::OLDEST_ABI_VERSION);
-                min.is_none_or(|m| m <= app)
+                meets(v.app_req(), &app)
+                    && (self.kind == Kind::Library
+                        || (meets(v.sdk_req(), &sdk)
+                            && sdk_still_supported(v.min_sdk().as_deref())))
                     && latest
                         .as_ref()
                         .is_none_or(|l| version_parts(&v.version).as_ref() <= Some(l))
@@ -192,6 +287,8 @@ pub struct Update {
     pub download: Download,
     /// Its `compatible_from`.
     pub compatible_from: Option<String>,
+    /// The oldest SDK it works with, for a Python plugin (see [`Version::min_sdk`]).
+    pub min_sdk: Option<String>,
     /// It can't read the settings the installed version saved (its `compatible_from` is
     /// later).
     pub breaking: bool,
@@ -250,6 +347,7 @@ pub fn known<'a>(
                 kind: p.kind,
                 download: d.clone(),
                 compatible_from: best.compatible_from.clone(),
+                min_sdk: best.min_sdk(),
                 breaking: (best.compatible_from.as_deref())
                     .is_some_and(|c| version_parts(c) > installed),
             });
@@ -307,13 +405,14 @@ pub fn parse(json: &str) -> Result<Repository, String> {
         }
         for v in &p.versions {
             let what = format!("{what} {}", v.version);
-            let min = v.min_app.as_deref();
             let compatible = v.compatible_from.as_deref();
             if version_parts(&v.version).is_none()
-                || min.is_some_and(|m| version_parts(m).is_none())
                 || compatible.is_some_and(|c| version_parts(c).is_none())
             {
                 return Err(format!("{what}: not a version number"));
+            }
+            if let Err(e) = v.app_req().and(v.sdk_req()) {
+                return Err(format!("{what}: not a version requirement: {e}"));
             }
             if v.files.is_empty() {
                 return Err(format!("{what} has no files"));
@@ -570,7 +669,7 @@ mod tests {
         assert_eq!(repo.plugins.len(), 2);
         assert_eq!(repo.plugins[1].kind, Kind::Python);
         let (v, d) = repo.plugins[0]
-            .best_for("0.16.0", "windows-x86_64")
+            .best_for("0.16.0", "0.3.0", "windows-x86_64")
             .unwrap();
         assert_eq!(
             (v.version.as_str(), d.file_name()),
@@ -580,7 +679,9 @@ mod tests {
             (v.effects.clone(), v.generators.clone()),
             (vec!["Halftone".to_owned()], vec!["Dot grid".to_owned()])
         );
-        let (v, d) = repo.plugins[1].best_for("0.16.0", "linux-x86_64").unwrap();
+        let (v, d) = repo.plugins[1]
+            .best_for("0.16.0", "0.3.0", "linux-x86_64")
+            .unwrap();
         assert_eq!(d.file_name(), "posterize.py");
         // A list that does not say what a plugin provides is read too.
         assert!(v.effects.is_empty() && v.generators.is_empty());
@@ -600,10 +701,65 @@ mod tests {
         let mut fits = p.versions[0].clone();
         fits.version = "0.2.0".into();
         p.versions.extend([newer, other_abi, fits]);
-        let best = |app, system| p.best_for(app, system).map(|(v, _)| v.version.clone());
+        let best = |app, system| {
+            p.best_for(app, "0.3.0", system)
+                .map(|(v, _)| v.version.clone())
+        };
         assert_eq!(best("0.16.0", "linux-x86_64").as_deref(), Some("0.2.0"));
         assert_eq!(best("0.15.9", "linux-x86_64"), None);
         assert_eq!(best("0.16.0", "linux-aarch64"), None);
+    }
+
+    #[test]
+    fn a_version_says_what_it_needs_in_engines() {
+        let mut repo = parse(SAMPLE).unwrap();
+        // Before engines: min_app and sdk, each that version or later.
+        let old = &repo.plugins[1].versions[0];
+        let req = |r: Result<Option<VersionReq>, String>| r.unwrap().unwrap().to_string();
+        assert_eq!(
+            (req(old.app_req()), req(old.sdk_req())),
+            (">=0.16.0".into(), ">=0.3.0".into())
+        );
+        let p = &mut repo.plugins[1];
+        // 1.1.0 needs SDK 0.4.0 and says nothing of the app.
+        let mut newer = p.versions[0].clone();
+        newer.version = "1.1.0".into();
+        newer.min_app = None;
+        newer.engines.sdk = Some(">=0.4.0".into());
+        // 1.2.0 works with apps before 0.18 only: engines wins over min_app.
+        let mut capped = newer.clone();
+        capped.version = "1.2.0".into();
+        capped.min_app = Some("0.99.0".into());
+        capped.engines.app = Some(">=0.16.0, <0.18.0".into());
+        // 1.3.0 is made for an SDK older than the oldest this app runs: not offered.
+        let mut too_old = p.versions[0].clone();
+        too_old.version = "1.3.0".into();
+        too_old.sdk = Some("0.1.0".into());
+        assert_eq!(too_old.min_sdk().as_deref(), Some("0.1.0"));
+        assert!(!sdk_still_supported(too_old.min_sdk().as_deref()));
+        assert!(
+            sdk_still_supported(Some(artwork_plugin_sdk::OLDEST_VERSION))
+                && sdk_still_supported(None)
+        );
+        p.versions.extend([newer, capped, too_old]);
+        let best = |app, sdk| p.best_for(app, sdk, "any").map(|(v, _)| v.version.clone());
+        assert_eq!(best("0.16.0", "0.3.0").as_deref(), Some("1.0.0"));
+        assert_eq!(best("0.16.0", "0.4.0").as_deref(), Some("1.2.0"));
+        assert_eq!(best("0.18.0", "0.10.0").as_deref(), Some("1.1.0"));
+        // A pre-release of the app counts as the release.
+        assert_eq!(best("0.17.0-beta.1", "0.4.0").as_deref(), Some("1.2.0"));
+        // A library is judged by its plugin interface version instead.
+        let lib = &mut repo.plugins[0];
+        lib.versions[0].engines.sdk = Some(">=9.0.0".into());
+        assert!(lib.best_for("0.16.0", "0.3.0", "linux-x86_64").is_some());
+        // As the list gives it; a host this app doesn't know is ignored.
+        let listed = SAMPLE.replacen(
+            "\"sdk\": \"0.3.0\"",
+            r#""engines": {"sdk": ">=0.4.0", "python": ">=3.12"}"#,
+            1,
+        );
+        let v = &parse(&listed).unwrap().plugins[1].versions[0];
+        assert_eq!(req(v.sdk_req()), ">=0.4.0");
     }
 
     #[test]
@@ -629,6 +785,9 @@ mod tests {
             .contains("latest")
         );
         assert!(bad("\"min_app\": \"0.16.0\"", "\"min_app\": \"soon\"").contains("version"));
+        assert!(bad("\"sdk\": \"0.3.0\"", "\"sdk\": \"new\"").contains("version"));
+        let engines = r#""engines": {"app": "soon"}"#;
+        assert!(bad("\"sdk\": \"0.3.0\"", engines).contains("requirement"));
         assert!(bad("\"id\": \"posterize\"", "\"id\": \"halftone\"").contains("twice"));
         assert!(parse("not json").is_err());
         assert!(parse("{\"format\": 1, \"name\": \"\", \"plugins\": []}").is_err());
@@ -697,6 +856,7 @@ mod tests {
                 version: v.into(),
             },
             compatible_from: None,
+            min_sdk: None,
         };
         super::super::plugin::Source::record(&origin, "libhalftone.so", entry("0.0.9"), None)
             .unwrap();

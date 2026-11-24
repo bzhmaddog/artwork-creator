@@ -5,7 +5,7 @@
 
 use image::RgbaImage;
 
-use super::{Generator, ParamSpec, Params, par_rows};
+use super::{Generator, ParamSpec, Params, Role, SEED_MAX, par_rows};
 use crate::i18n::{tr_noop, translate};
 
 type GenerateFn = fn(&mut RgbaImage, &Params, f32) -> Result<(), String>;
@@ -68,13 +68,14 @@ fn colors(a: [u8; 4], b: [u8; 4]) -> [ParamSpec; 2] {
 }
 
 fn seed() -> ParamSpec {
-    ParamSpec::int("seed", tr_noop!("PARAM_SEED"), 0, 9999, 1)
+    ParamSpec::int("seed", tr_noop!("PARAM_SEED"), 0, SEED_MAX, 1).with_role(Role::Seed)
 }
 
 fn angle(default: f32) -> ParamSpec {
     ParamSpec::float("angle", tr_noop!("PARAM_ANGLE"), -180.0, 180.0, default)
         .unit("°")
         .decimals(0)
+        .with_role(Role::Angle)
 }
 
 /// The built-in generators, in menu order.

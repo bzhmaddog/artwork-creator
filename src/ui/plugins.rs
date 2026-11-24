@@ -748,6 +748,7 @@ impl Manager {
                 version: u.version.clone(),
             },
             compatible_from: u.compatible_from,
+            min_sdk: u.min_sdk,
         };
         let update = Some((old, u.version));
         self.start_download(name, u.download, u.kind, dir, entry, update);
@@ -1087,6 +1088,7 @@ fn installed_entry(p: &Entry) -> plugin::Installed {
             version: best.map(|v| v.version.clone()).unwrap_or_default(),
         },
         compatible_from: best.and_then(|v| v.compatible_from.clone()),
+        min_sdk: best.and_then(|v| v.min_sdk()),
     }
 }
 
@@ -1604,6 +1606,7 @@ mod tests {
             kind: Kind::Python,
             download,
             compatible_from: None,
+            min_sdk: None,
             breaking: false,
         };
         let d = repository::listed(format!("{base}new.py"), &new);
@@ -1639,6 +1642,7 @@ mod tests {
                 version: "1.0".into(),
             },
             compatible_from: None,
+            min_sdk: None,
         };
         // This run's Python is not the app's own: no pip.
         assert!(fetch_plugin(&d, Kind::Python, &dir, true, entry.clone(), None).is_err());
@@ -1943,6 +1947,7 @@ mod tests {
                     size: 1,
                 },
                 compatible_from: None,
+                min_sdk: None,
                 breaking: false,
             };
             let known = Known {

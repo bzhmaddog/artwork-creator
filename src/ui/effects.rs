@@ -8,7 +8,8 @@ use serde_json::Value;
 use crate::i18n::{tr, tr_n, translate};
 use crate::render::effects::plugin::{PluginInfo, Source};
 use crate::render::effects::{
-    Effect, EffectInstance, Generator, ParamKind, ParamSpec, Params, color_to_hex, registry,
+    Effect, EffectInstance, Generator, ParamKind, ParamSpec, Params, Role, color_to_hex,
+    random_seed, registry,
 };
 use crate::ui::layers::{self, Tool};
 
@@ -108,7 +109,7 @@ fn add_menu(ui: &mut Ui) -> Option<EffectInstance> {
                 r = r.on_hover_text(tip);
             }
             if r.clicked() {
-                added = Some(EffectInstance::new(effect));
+                added = Some(EffectInstance::new(effect).with_random_seeds());
                 ui.close();
             }
         };
@@ -220,9 +221,14 @@ fn stack_ui(
                                 && !e.params().is_empty()
                                 && ui.button(tr!("RESET_EFFECT_PARAMS")).clicked()
                             {
-                                let enabled = inst.enabled;
-                                *inst = EffectInstance::new(e);
-                                inst.enabled = enabled;
+                                let old = std::mem::replace(inst, EffectInstance::new(e));
+                                inst.enabled = old.enabled;
+                                // The variation stays: only the settings go back.
+                                for s in e.params().iter().filter(|s| s.seed_range().is_some()) {
+                                    if let Some(v) = old.params.get(&s.id) {
+                                        inst.params.insert(s.id.clone(), v.clone());
+                                    }
+                                }
                                 changed = true;
                             }
                             if ui.button(tr!("REMOVE_EFFECT")).clicked() {
@@ -338,10 +344,21 @@ fn params_grid(
         .show(ui, |ui| {
             for spec in specs
                 .iter()
-                .filter(|s| !(hide_seed && seed_range(s).is_some()))
+                .filter(|s| !(hide_seed && s.seed_range().is_some()))
             {
-                ui.label(label_text(builtin, &spec.label));
                 let params = Params::new(specs, &inst.params);
+                // An effect's "seed" is a regenerate button, without a label.
+                if let Some((min, max)) = spec.seed_range() {
+                    ui.label("");
+                    if regenerate_icon(ui, tr!("REGENERATE_EFFECT_HINT")).clicked() {
+                        let v = random_seed(min, max, Some(params.i32(&spec.id)));
+                        inst.params.insert(spec.id.clone(), Value::from(v));
+                        changed = true;
+                    }
+                    ui.end_row();
+                    continue;
+                }
+                ui.label(label_text(builtin, &spec.label));
                 if let Some(v) =
                     param_ui(ui, ui_key, spec, builtin, &params, &mut inst.links, px_mm)
                 {
@@ -402,34 +419,17 @@ pub fn generator_menu(ui: &mut Ui, key: u64, inst: &mut EffectInstance) -> bool 
     }
     match picked {
         Some(g) => {
-            *inst = EffectInstance::generator(g);
+            *inst = EffectInstance::generator(g).with_random_seeds();
             true
         }
         None => false,
     }
 }
 
-/// The range of a generator's "seed" setting, which [`regenerate_button`] sets in place
-/// of a slider.
-fn seed_range(spec: &ParamSpec) -> Option<(i32, i32)> {
-    match spec.kind {
-        ParamKind::Int { min, max, .. } if spec.id == "seed" => Some((min, max)),
-        _ => None,
-    }
-}
-
-/// A circular-arrow button giving `inst` a new random "seed" setting, for generators
-/// that have one. Returns true when clicked.
-pub fn regenerate_button(ui: &mut Ui, inst: &mut EffectInstance) -> bool {
-    let Some(g) = registry().generator(&inst.effect) else {
-        return false;
-    };
-    let Some((min, max)) = g.params().iter().find_map(seed_range) else {
-        return false;
-    };
+/// A circular-arrow icon button with tooltip `tip`.
+fn regenerate_icon(ui: &mut Ui, tip: &str) -> egui::Response {
     let size = ui.spacing().interact_size.y;
-    let tip = tr!("REGENERATE_FILL_HINT");
-    let r = layers::flat_button(ui, vec2(size, size), true, tip, |p, rect, color| {
+    layers::flat_button(ui, vec2(size, size), true, tip, |p, rect, color| {
         let (c, radius) = (rect.center(), size * 0.28);
         let stroke = Stroke::new(crate::ui::tokens::STROKE, color);
         // Most of a circle, open at the top right, with an arrowhead at its end.
@@ -443,21 +443,27 @@ pub fn regenerate_button(ui: &mut Ui, inst: &mut EffectInstance) -> bool {
         let head = radius * 0.7;
         p.line_segment([tip, tip + vec2(-head, -head * 0.15)], stroke);
         p.line_segment([tip, tip + vec2(head * 0.15, head)], stroke);
-    });
-    if !r.clicked() {
+    })
+}
+
+/// A circular-arrow button giving `inst` a new random seed, for generators that have
+/// one. Returns true when clicked.
+pub fn regenerate_button(ui: &mut Ui, inst: &mut EffectInstance) -> bool {
+    let Some(g) = registry().generator(&inst.effect) else {
+        return false;
+    };
+    let Some((spec, (min, max))) = g.params().iter().find_map(|s| Some((s, s.seed_range()?)))
+    else {
+        return false;
+    };
+    if !regenerate_icon(ui, tr!("REGENERATE_FILL_HINT")).clicked() {
         return false;
     }
-    // A new value, different from the one it has.
-    let old = Params::new(g.params(), &inst.params).i32("seed");
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.subsec_nanos() as u64 ^ d.as_secs());
-    let span = (max as i64 - min as i64).max(1) as u64;
-    let mut v = min as i64 + (nanos.wrapping_mul(0x9E37_79B9_7F4A_7C15) >> 33) as i64 % span as i64;
-    if v as i32 == old {
-        v = if v >= max as i64 { min as i64 } else { v + 1 };
-    }
-    inst.params.insert("seed".into(), Value::from(v as i32));
+    let old = Params::new(g.params(), &inst.params).i32(&spec.id);
+    inst.params.insert(
+        spec.id.clone(),
+        Value::from(random_seed(min, max, Some(old))),
+    );
     true
 }
 
@@ -495,8 +501,9 @@ fn param_ui(
     px_mm: Option<(f32, &str)>,
 ) -> Option<Value> {
     let id = spec.id.as_str();
-    // Pixel sizes shown in mm on the page, when asked.
-    let in_mm = |unit: &str| px_mm.filter(|_| unit.trim() == "px");
+    let role = spec.role();
+    // Sizes shown in mm on the page, when asked.
+    let in_mm = px_mm.filter(|_| role == Some(Role::Size));
     match &spec.kind {
         ParamKind::Float {
             min,
@@ -506,11 +513,11 @@ fn param_ui(
             decimals,
         } => {
             let mut v = p.f32(id);
-            // Sizes in pixels span a wide range where small values matter most:
-            // logarithmic, the slider moves in fine steps there.
-            let log = unit.trim() == "px";
+            // Sizes span a wide range where small values matter most: logarithmic, the
+            // slider moves in fine steps there.
+            let log = role == Some(Role::Size);
             let r = ui
-                .horizontal(|ui| match in_mm(unit) {
+                .horizontal(|ui| match in_mm {
                     Some((k, hint)) => {
                         let k = f64::from(k.max(1e-6));
                         let r = ui
@@ -528,7 +535,7 @@ fn param_ui(
                     }
                     // An angle: its value, and a dial to turn it, counterclockwise as
                     // effects take angles.
-                    None if unit.trim() == "°" => {
+                    None if role == Some(Role::Angle) => {
                         let r = ui
                             .add(
                                 egui::DragValue::new(&mut v)
@@ -537,7 +544,7 @@ fn param_ui(
                                     .fixed_decimals(*decimals),
                             )
                             .on_hover_cursor(egui::CursorIcon::Text);
-                        layers::unit(ui, unit);
+                        layers::unit(ui, if unit.is_empty() { "°" } else { unit });
                         let mut a = v;
                         let dial = crate::ui::dial::angle_dial(
                             ui,
@@ -929,6 +936,72 @@ mod tests {
                 params_ui(ui, (1, 0), effect, &mut inst.borrow_mut(), None);
             });
         });
+    }
+
+    #[test]
+    fn an_effect_seed_is_a_regenerate_button() {
+        let specs = [
+            ParamSpec::int("amount", "Amount", 0, 100, 20),
+            ParamSpec::int("variation", "Variation", 0, 9999, 0).with_role(Role::Seed),
+        ];
+        let mut inst = stack(&["plugin.grain"]).remove(0);
+        let ctx = egui::Context::default();
+        let mut time = 0.0;
+        // One frame; returns its texts, the arrow's center and whether a setting changed.
+        let mut frame = |inst: &mut EffectInstance, events: Vec<egui::Event>| {
+            time += 0.1;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    vec2(400.0, 300.0),
+                )),
+                time: Some(time),
+                events,
+                ..Default::default()
+            };
+            let mut changed = false;
+            let mut out = ctx.run_ui(input, |ui| {
+                changed = params_grid(ui, (1, 0), &specs, false, inst, None, false);
+            });
+            out.textures_delta.clear();
+            let texts: Vec<String> = out
+                .shapes
+                .iter()
+                .filter_map(|c| match &c.shape {
+                    egui::Shape::Text(t) => Some(t.galley.text().to_owned()),
+                    _ => None,
+                })
+                .collect();
+            let arrow = out.shapes.iter().find_map(|c| match &c.shape {
+                egui::Shape::Path(p) if p.points.len() == 25 => {
+                    Some(egui::Rect::from_points(&p.points).center())
+                }
+                _ => None,
+            });
+            (texts, arrow, changed)
+        };
+        let (texts, arrow, _) = frame(&mut inst, vec![]);
+        assert!(texts.iter().any(|t| t == "Amount"), "{texts:?}");
+        assert!(!texts.iter().any(|t| t == "Variation"), "{texts:?}");
+        let arrow = arrow.expect("the regenerate arrow");
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        let seed = |inst: &EffectInstance| inst.params.get("variation").cloned();
+        let mut click = |inst: &mut EffectInstance| {
+            frame(inst, vec![egui::Event::PointerMoved(arrow)]);
+            frame(inst, vec![button(arrow, true)]);
+            frame(inst, vec![button(arrow, false)]).2
+        };
+        let before = seed(&inst);
+        assert!(click(&mut inst));
+        let after = seed(&inst);
+        assert_ne!(before, after);
+        assert!(click(&mut inst));
+        assert_ne!(seed(&inst), after);
     }
 
     #[test]

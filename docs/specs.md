@@ -825,7 +825,8 @@ page (a text's follow the font size).
   random variation) shows a circular-arrow button in its place, which gives another random result
   with the same settings, as for [generated fills](#generated-fills). Such an effect
   starts with a random result when added; **Reset to defaults** keeps it. It is saved with
-  the project.
+  the project. A plugin can put settings in named groups: each group folds, open at first,
+  where its first setting is, and its controls line up with the others.
 
 ## Plugins
 

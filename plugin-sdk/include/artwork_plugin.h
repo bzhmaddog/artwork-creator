@@ -29,6 +29,9 @@
  * The app ignores a role that doesn't fit the type, or that it doesn't know, and shows
  * the type's usual control. Without a role it guesses one: an int with the id "seed"
  * is a seed, a float in "°" an angle, a float in "px" a size.
+ * Also of any type, an optional "group": a name; the parameters with the same one are
+ * shown together under it, in a section that folds, where the first of them is. Apps
+ * before plugin SDK 0.5.0 ignore it.
  *
  * Values (the `params_json` argument of padding/apply/generate) are a JSON object with every
  * parameter id, already checked by the app: numbers within range, colors as

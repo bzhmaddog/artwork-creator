@@ -1102,11 +1102,17 @@ fn param_specs(json: &str) -> Result<Vec<ParamSpec>, String> {
             (Some(sdk::Role::Size), ParamKind::Float { .. }) => Some(Role::Size),
             _ => None,
         };
+        // A blank group name is no group.
+        let group = p
+            .group
+            .map(|g| g.trim().to_owned())
+            .filter(|g| !g.is_empty());
         specs.push(ParamSpec {
             id: p.id,
             label: p.label,
             kind,
             role,
+            group,
         });
     }
     Ok(specs)
@@ -1314,6 +1320,18 @@ mod tests {
         .unwrap();
         let roles: Vec<_> = specs.iter().map(|s| s.role).collect();
         assert_eq!(roles, [Some(Role::Seed), Some(Role::Angle), None, None]);
+    }
+
+    #[test]
+    fn param_groups_are_kept_and_blank_ones_dropped() {
+        let specs = param_specs(
+            r#"[{"id":"a","label":"A","type":"bool","default":true,"group":" Grain "},
+                {"id":"b","label":"B","type":"bool","default":true,"group":""},
+                {"id":"c","label":"C","type":"bool","default":true}]"#,
+        )
+        .unwrap();
+        let groups: Vec<_> = specs.iter().map(|s| s.group.as_deref()).collect();
+        assert_eq!(groups, [Some("Grain"), None, None]);
     }
 
     #[test]

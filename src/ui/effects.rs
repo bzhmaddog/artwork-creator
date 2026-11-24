@@ -336,16 +336,91 @@ fn params_grid(
     if specs.is_empty() {
         return false;
     }
+    let shown: Vec<&ParamSpec> = specs
+        .iter()
+        .filter(|s| !(hide_seed && s.seed_range().is_some()))
+        .collect();
+    // The controls start at the same x in every grid, so they line up across groups: the
+    // labels' column is as wide as the widest label, a grouped one counting its indent.
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let indent = ui.spacing().indent;
+    let label_w = shown
+        .iter()
+        .filter(|s| s.seed_range().is_none())
+        .map(|s| {
+            let text = label_text(builtin, &s.label).to_owned();
+            let w = ui
+                .painter()
+                .layout_no_wrap(text, font.clone(), egui::Color32::PLACEHOLDER)
+                .size()
+                .x;
+            if s.group.is_some() { w + indent } else { w }
+        })
+        .fold(0.0, f32::max);
+    let mut changed = false;
+    for (b, (group, rows)) in param_blocks(&shown).into_iter().enumerate() {
+        let grid_key = (ui_key, b);
+        match group {
+            None => {
+                changed |= param_rows(ui, grid_key, specs, &rows, builtin, inst, px_mm, label_w)
+            }
+            Some(name) => {
+                let id = ui.make_persistent_id(("effect_group", ui_key, name));
+                let w = label_w - indent;
+                CollapsingState::load_with_default_open(ui.ctx(), id, true)
+                    .show_header(ui, |ui| ui.weak(label_text(builtin, name)))
+                    .body(|ui| {
+                        changed |= param_rows(ui, grid_key, specs, &rows, builtin, inst, px_mm, w);
+                    });
+            }
+        }
+    }
+    changed
+}
+
+/// The parameters `shown` in the order they come, as blocks: runs of ungrouped ones, and
+/// each group, with all its parameters, where its first one is.
+fn param_blocks<'a>(shown: &[&'a ParamSpec]) -> Vec<(Option<&'a str>, Vec<&'a ParamSpec>)> {
+    let mut blocks: Vec<(Option<&str>, Vec<&ParamSpec>)> = Vec::new();
+    for &s in shown {
+        let group = s.group.as_deref();
+        let i = match group {
+            None => blocks
+                .len()
+                .checked_sub(1)
+                .filter(|&i| blocks[i].0.is_none()),
+            Some(_) => blocks.iter().position(|(g, _)| *g == group),
+        };
+        match i {
+            Some(i) => blocks[i].1.push(s),
+            None => blocks.push((group, vec![s])),
+        }
+    }
+    blocks
+}
+
+/// A grid of the parameters `rows` of `specs`, its labels' column `label_w` wide.
+/// Returns true if one changed.
+#[allow(clippy::too_many_arguments)]
+fn param_rows(
+    ui: &mut Ui,
+    grid_key: ((u64, usize), usize),
+    specs: &[ParamSpec],
+    rows: &[&ParamSpec],
+    builtin: bool,
+    inst: &mut EffectInstance,
+    px_mm: Option<(f32, &str)>,
+    label_w: f32,
+) -> bool {
+    let ui_key = grid_key.0;
     let mut changed = false;
     // Built-in labels are translated; plugins' are shown as they give them.
-    egui::Grid::new(("effect_params", ui_key))
+    egui::Grid::new(("effect_params", grid_key))
         .num_columns(2)
         .spacing([8.0, 4.0])
+        .min_col_width(label_w.max(0.0))
         .show(ui, |ui| {
-            for spec in specs
-                .iter()
-                .filter(|s| !(hide_seed && s.seed_range().is_some()))
-            {
+            for &spec in rows {
                 let params = Params::new(specs, &inst.params);
                 // An effect's "seed" is a regenerate button, without a label.
                 if let Some((min, max)) = spec.seed_range() {
@@ -1002,6 +1077,112 @@ mod tests {
         assert_ne!(before, after);
         assert!(click(&mut inst));
         assert_ne!(seed(&inst), after);
+    }
+
+    /// `spec` in the group `name`.
+    fn grouped(spec: ParamSpec, name: &str) -> ParamSpec {
+        ParamSpec {
+            group: Some(name.into()),
+            ..spec
+        }
+    }
+
+    #[test]
+    fn grouped_params_are_together_where_the_first_is() {
+        let specs = [
+            ParamSpec::int("a", "A", 0, 9, 0),
+            grouped(ParamSpec::int("x", "X", 0, 9, 0), "G"),
+            ParamSpec::int("b", "B", 0, 9, 0),
+            grouped(ParamSpec::int("y", "Y", 0, 9, 0), "G"),
+            ParamSpec::int("c", "C", 0, 9, 0),
+            grouped(ParamSpec::int("z", "Z", 0, 9, 0), "H"),
+        ];
+        let shown: Vec<_> = specs.iter().collect();
+        let blocks: Vec<(Option<&str>, Vec<&str>)> = param_blocks(&shown)
+            .into_iter()
+            .map(|(g, rows)| (g, rows.iter().map(|s| s.id.as_str()).collect()))
+            .collect();
+        assert_eq!(
+            blocks,
+            [
+                (None, vec!["a"]),
+                (Some("G"), vec!["x", "y"]),
+                (None, vec!["b", "c"]),
+                (Some("H"), vec!["z"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_group_folds_its_params_away() {
+        let specs = [
+            ParamSpec::int("amount", "Amount", 0, 100, 20),
+            grouped(ParamSpec::int("size", "Grain size", 0, 9, 1), "Grain"),
+        ];
+        let mut inst = stack(&["plugin.grain"]).remove(0);
+        let ctx = egui::Context::default();
+        let mut time = 0.0;
+        // One frame; returns its texts and where "Grain" is.
+        let mut frame = |inst: &mut EffectInstance, events: Vec<egui::Event>| {
+            time += 0.1;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    vec2(400.0, 300.0),
+                )),
+                time: Some(time),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                params_grid(ui, (1, 0), &specs, false, inst, None, false);
+            });
+            out.textures_delta.clear();
+            let mut header = None;
+            let texts: Vec<String> = out
+                .shapes
+                .iter()
+                .filter_map(|c| match &c.shape {
+                    egui::Shape::Text(t) => {
+                        let text = t.galley.text().to_owned();
+                        if text == "Grain" {
+                            header = Some(t.visual_bounding_rect().center());
+                        }
+                        Some(text)
+                    }
+                    _ => None,
+                })
+                .collect();
+            (texts, header)
+        };
+        let (texts, header) = frame(&mut inst, vec![]);
+        assert!(
+            texts.iter().any(|t| t == "Grain size"),
+            "open at first: {texts:?}"
+        );
+        // The fold arrow is at the left of the title.
+        let arrow = header.expect("the group's title") - vec2(30.0, 0.0);
+        let arrow = egui::pos2(arrow.x.max(6.0), arrow.y);
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        frame(&mut inst, vec![egui::Event::PointerMoved(arrow)]);
+        frame(&mut inst, vec![button(arrow, true)]);
+        frame(&mut inst, vec![button(arrow, false)]);
+        // Let the folding animation end.
+        for _ in 0..10 {
+            frame(&mut inst, vec![]);
+        }
+        let (texts, _) = frame(&mut inst, vec![]);
+        assert!(texts.iter().any(|t| t == "Amount"), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "Grain"), "{texts:?}");
+        assert!(
+            !texts.iter().any(|t| t == "Grain size"),
+            "folded: {texts:?}"
+        );
     }
 
     #[test]

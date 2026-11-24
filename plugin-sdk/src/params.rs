@@ -17,7 +17,8 @@ pub const SEED_MAX: i32 = i32::MAX;
 ///   { "id": "count", "label": "Count", "type": "int", "min": 1, "max": 10, "default": 3 },
 ///   { "id": "seed", "label": "Seed", "type": "int", "min": 0, "max": 9999, "default": 0,
 ///     "role": "seed" },
-///   { "id": "soft", "label": "Soft edges", "type": "bool", "default": true },
+///   { "id": "soft", "label": "Soft edges", "type": "bool", "default": true,
+///     "group": "Edges" },
 ///   { "id": "ink", "label": "Ink", "type": "color", "default": "#000000ff" },
 ///   { "id": "shape", "label": "Shape", "type": "choice", "default": "dot",
 ///     "options": [ { "id": "dot", "label": "Dots" }, { "id": "line", "label": "Lines" } ] }
@@ -34,6 +35,11 @@ pub struct Param {
     /// What it is for, which picks its control; none for the type's usual control.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub role: Option<Role>,
+    /// Name of a folding group: the parameters with the same one are shown together,
+    /// under that name, where the first of them is. None for a row of its own. Apps
+    /// before SDK 0.5.0 ignore it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group: Option<String>,
 }
 
 /// What a parameter is for, which tells the app what control to show for it. The app
@@ -114,6 +120,7 @@ impl Param {
             label: label.into(),
             kind,
             role: None,
+            group: None,
         }
     }
 
@@ -204,6 +211,12 @@ impl Param {
     /// Sets what it is for, which picks its control: see [`Role`].
     pub fn role(mut self, role: Role) -> Self {
         self.role = Some(role);
+        self
+    }
+
+    /// Puts it in the folding group `name`: see [`Param::group`].
+    pub fn group(mut self, name: &str) -> Self {
+        self.group = Some(name.into());
         self
     }
 }
@@ -324,6 +337,16 @@ mod tests {
         )
         .unwrap();
         assert_eq!(p.role, Some(Role::Unknown));
+    }
+
+    #[test]
+    fn groups_are_optional() {
+        let json = serde_json::to_value(Param::bool("b", "B", true).group("Edges")).unwrap();
+        assert_eq!(json["group"], "Edges");
+        let p: Param = serde_json::from_value(json).unwrap();
+        assert_eq!(p.group.as_deref(), Some("Edges"));
+        let json = serde_json::to_value(Param::bool("b", "B", true)).unwrap();
+        assert!(json.get("group").is_none(), "{json}");
     }
 
     #[test]

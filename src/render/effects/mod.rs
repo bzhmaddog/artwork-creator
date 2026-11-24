@@ -146,6 +146,9 @@ pub struct ParamSpec {
     pub kind: ParamKind,
     /// What it is for, as given; see [`ParamSpec::role`].
     pub role: Option<Role>,
+    /// Name of the folding group it is shown in, with the other parameters of that name,
+    /// where the first of them is; none for a row of its own.
+    pub group: Option<String>,
 }
 
 impl ParamSpec {
@@ -155,6 +158,7 @@ impl ParamSpec {
             label: label.into(),
             kind,
             role: None,
+            group: None,
         }
     }
 

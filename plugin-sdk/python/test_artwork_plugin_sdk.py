@@ -82,6 +82,13 @@ class SdkTest(unittest.TestCase):
         seed = ap.seed_param("s", "S")
         self.assertEqual((seed["type"], seed["role"], seed["min"], seed["max"]), ("int", "seed", 0, 2**31 - 1))
 
+    def test_groups_are_given_only_when_asked(self):
+        self.assertEqual(ap.bool_param("b", "B", True, group="Edges")["group"], "Edges")
+        self.assertEqual(ap.choice_param("m", "M", [("a", "A")], "a", group="G")["group"], "G")
+        self.assertEqual(ap.seed_param("s", "S", group="G")["group"], "G")
+        self.assertNotIn("group", ap.color_param("c", "C", "#00ff00"))
+        self.assertNotIn("group", ap.float_param("r", "R", 0, 5, 1, role="size"))
+
     def test_describe(self):
         [(answer, _)] = exchange(PLUGIN, ({"op": "describe"}, b""))
         self.assertTrue(answer["ok"])

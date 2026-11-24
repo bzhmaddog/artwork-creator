@@ -80,6 +80,9 @@ the image's test (`ui_tokens` in `src/ui/gallery.rs`). Values used by only one w
   extra buttons at its right, its body not indented. Folding sections inside it (a fill's
   Settings, each effect) indent their body by `spacing.indent`, 8 pt, set app-wide in
   `app::set_interaction`.
+- A plugin's group of effect settings folds under its name in the weak text color, as a
+  fill's Settings does; its labels' column is narrower by the indent, so its controls
+  line up with the effect's other ones (`params_grid`).
 
 ## Dialogs, menus and notices
 

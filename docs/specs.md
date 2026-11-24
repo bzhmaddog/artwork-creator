@@ -894,8 +894,11 @@ look there, so `make run` finds the `plugins` folder of the repository.
   or the name of one of their effects or generators. Each plugin shows the latest version that works with this version of the
   app on this system (what its `engines` asks of the app and, for a Python plugin, of the
   plugin SDK, a library's plugin interface version, and a file for this system;
-  "Not available" otherwise) and, in its **Provides** column, how many effects and
-  generators that version adds ("1 effect, 1 generator", their names in the tooltip; empty
+  "Not available" otherwise); when several versions work, its **Version** column is a
+  drop-down of them, the latest first and picked by default ("1.2.0 (latest)"), what changed
+  in each in its tooltip, to install an earlier one instead (the version picked is kept
+  while the window is open). Its **Provides** column shows how many effects and
+  generators the version picked adds ("1 effect, 1 generator", their names in the tooltip; empty
   when the list does not say). **Install** downloads its file (the `.dll`, `.so` or `.py`)
   into the repository's folder in **your** plugins folder (named with a hash of the
   repository's address, with a `source.json` giving its name and address, written again

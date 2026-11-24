@@ -15,7 +15,9 @@ use std::thread::JoinHandle;
 use crate::app::{danger_button, dialog, dialog_button_row};
 use crate::i18n::{tr, tr_n};
 use crate::render::effects::plugin::{self, PluginFile, Settings, Status, user_plugins_dir};
-use crate::render::effects::repository::{self, Catalog, Download, Entry, Kind, Known, Repository};
+use crate::render::effects::repository::{
+    self, Catalog, Download, Entry, Kind, Known, Repository, Version,
+};
 use crate::render::effects::{PluginRef, python, registry};
 use crate::ui::callout::{Tone, callout};
 
@@ -29,6 +31,8 @@ const BODY_HEIGHT: std::ops::RangeInclusive<f32> = 320.0..=720.0;
 const URL_WIDTH: f32 = 420.0;
 /// Width of the Available tab's drop-down of repositories.
 const SOURCE_WIDTH: f32 = 260.0;
+/// Width of the Available tab's drop-downs of versions.
+const VERSION_WIDTH: f32 = 130.0;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Tab {
@@ -108,6 +112,9 @@ pub struct Manager {
     source: String,
     /// What the plugins listed must contain.
     filter: String,
+    /// The version picked to install, by repository address and plugin id; the latest
+    /// that works here if none is.
+    versions: std::collections::BTreeMap<(String, String), String>,
     /// A plugin being installed or updated.
     download: Option<Job>,
     /// Why installing this plugin failed.
@@ -179,6 +186,7 @@ impl Manager {
             add_error: None,
             source: String::new(),
             filter: String::new(),
+            versions: Default::default(),
             download: None,
             download_error: None,
             installed: Vec::new(),
@@ -612,7 +620,7 @@ impl Manager {
             list.plugins
                 .iter()
                 .filter(|p| {
-                    let provides = p.best().into_iter().flat_map(|(v, _)| {
+                    let provides = self.picked(url, p).into_iter().flat_map(|(v, _)| {
                         v.effects.iter().chain(&v.generators).map(String::as_str)
                     });
                     [&p.id, &p.name, &p.description, &p.author]
@@ -627,6 +635,7 @@ impl Manager {
             return;
         }
         let mut install = None;
+        let mut pick = None;
         egui::ScrollArea::vertical()
             .max_height(ui.available_height())
             .auto_shrink([false, true])
@@ -649,12 +658,12 @@ impl Manager {
                         description_header(ui, right);
                         ui.end_row();
                         for p in &shown {
-                            let best = p.best();
+                            let best = self.picked(url, p);
                             let name = ui.label(&p.name);
                             if !p.author.is_empty() {
                                 name.on_hover_text(&p.author);
                             }
-                            ui.label(best.map_or("-", |(v, _)| v.version.as_str()));
+                            version_choice(ui, url, p, best.map(|(v, _)| v), &mut pick);
                             ui.label(match p.kind {
                                 Kind::Python => tr!("PLUGIN_KIND_PYTHON"),
                                 Kind::Library => tr!("PLUGIN_KIND_LIBRARY"),
@@ -669,9 +678,8 @@ impl Manager {
                             );
                             let right = egui::Layout::right_to_left(egui::Align::Center);
                             ui.allocate_ui_with_layout(row, right, |ui| {
-                                let d = best.map(|(_, d)| d);
                                 let source = (repo, url, origin.as_str());
-                                self.install_cell(ui, p, source, d, &mut install);
+                                self.install_cell(ui, p, source, best, &mut install);
                                 ui.with_layout(
                                     egui::Layout::left_to_right(egui::Align::Center),
                                     |ui| {
@@ -685,22 +693,37 @@ impl Manager {
                         }
                     });
             });
+        if let Some((key, version)) = pick {
+            self.versions.insert(key, version);
+        }
         if let Some((name, d, kind, repo, url, entry)) = install {
             self.install(name, d, kind, (&repo, &url), entry);
         }
     }
 
-    /// The Install button of plugin `p` whose file for this system is `d`, or what stands
-    /// in its place; `source` is its repository's name, address and origin.
+    /// The version of the plugin `p` of the repository at `url` to install, and its file
+    /// for this system: the one picked if it still works here, else the latest that does.
+    fn picked<'a>(&self, url: &str, p: &'a Entry) -> Option<(&'a Version, &'a Download)> {
+        let compatible = p.compatible();
+        let key = (url.to_owned(), p.id.clone());
+        let picked = self.versions.get(&key);
+        (picked.and_then(|want| compatible.iter().find(|(v, _)| v.version == *want)))
+            .or(compatible.first())
+            .copied()
+    }
+
+    /// The Install button of plugin `p` at the version `picked` (with its file for this
+    /// system), or what stands in its place; `source` is its repository's name, address
+    /// and origin.
     fn install_cell(
         &self,
         ui: &mut Ui,
         p: &Entry,
         (repo, url, origin): (&str, &str, &str),
-        d: Option<&Download>,
+        picked: Option<(&Version, &Download)>,
         install: &mut Option<(String, Download, Kind, String, String, plugin::Installed)>,
     ) {
-        let Some(d) = d else {
+        let Some((v, d)) = picked else {
             ui.weak(tr!("PLUGIN_UNAVAILABLE"))
                 .on_hover_text(tr!("PLUGIN_UNAVAILABLE_HINT"));
             return;
@@ -716,7 +739,7 @@ impl Manager {
                 .on_hover_text(tr!("INSTALL_PLUGIN_HINT"));
             if button.clicked() {
                 let source = (repo.to_owned(), url.to_owned());
-                let entry = installed_entry(p);
+                let entry = installed_entry(p, v);
                 *install = Some((p.name.clone(), d.clone(), p.kind, source.0, source.1, entry));
             }
         }
@@ -1079,17 +1102,58 @@ fn breaking_warning(u: &repository::Update) -> String {
     }
 }
 
-/// What to record of the plugin `p` installed at its latest version that works here.
-fn installed_entry(p: &Entry) -> plugin::Installed {
-    let best = p.best().map(|(v, _)| v);
+/// What to record of the plugin `p` installed at its version `v`.
+fn installed_entry(p: &Entry, v: &Version) -> plugin::Installed {
     plugin::Installed {
         entry: PluginRef {
             id: p.id.clone(),
-            version: best.map(|v| v.version.clone()).unwrap_or_default(),
+            version: v.version.clone(),
         },
-        compatible_from: best.and_then(|v| v.compatible_from.clone()),
-        min_sdk: best.and_then(|v| v.min_sdk()),
+        compatible_from: v.compatible_from.clone(),
+        min_sdk: v.min_sdk(),
     }
+}
+
+/// The Version cell of the plugin `p` of the repository at `url`: a drop-down of the
+/// versions that work here when there are several (`picked` shown, what changed in each
+/// in its tooltip), the one that does otherwise, "-" if none; the version picked goes in
+/// `pick`, with its key.
+fn version_choice(
+    ui: &mut Ui,
+    url: &str,
+    p: &Entry,
+    picked: Option<&Version>,
+    pick: &mut Option<((String, String), String)>,
+) {
+    let compatible = p.compatible();
+    let Some(picked) = picked.filter(|_| compatible.len() > 1) else {
+        ui.label(picked.map_or("-", |v| v.version.as_str()));
+        return;
+    };
+    let latest = compatible.first().map(|(v, _)| v.version.as_str());
+    let name = |v: &Version| match Some(v.version.as_str()) == latest {
+        true => tr!("PLUGIN_LATEST_VERSION", version = &v.version),
+        false => v.version.clone(),
+    };
+    egui::ComboBox::from_id_salt(("plugin_version", url, &p.id))
+        .width(VERSION_WIDTH)
+        .selected_text(name(picked))
+        .show_ui(ui, |ui| {
+            for (v, _) in &compatible {
+                let on = v.version == picked.version;
+                let r = ui.selectable_label(on, name(v));
+                let r = match v.changes.is_empty() {
+                    true => r,
+                    false => r.on_hover_text(&v.changes),
+                };
+                if r.clicked() {
+                    let key = (url.to_owned(), p.id.clone());
+                    *pick = Some((key, v.version.clone()));
+                }
+            }
+        })
+        .response
+        .on_hover_text(tr!("PLUGIN_VERSION_CHOICE_HINT"));
 }
 
 /// The packages the Python plugin `path` needs; none for a library.
@@ -1172,13 +1236,19 @@ static MISSING: std::sync::Mutex<Option<Missing>> = std::sync::Mutex::new(None);
 
 /// What a repository of `repos` (address and list) offers for the missing effect
 /// `effect` (`<origin>/<id>`) of the plugin `entry`: its list's name and address, the
-/// plugin, and its file for this system, if the repository of the same origin lists
+/// plugin, and its version and file for this system, if the repository of the same origin lists
 /// that plugin at the same version or a later one that works here.
 fn offer<'a>(
     repos: impl IntoIterator<Item = (&'a str, &'a Repository)>,
     effect: &str,
     entry: &PluginRef,
-) -> Option<(&'a str, &'a Repository, &'a Entry, &'a Download)> {
+) -> Option<(
+    &'a str,
+    &'a Repository,
+    &'a Entry,
+    &'a Version,
+    &'a Download,
+)> {
     let (origin, _) = effect.split_once('/')?;
     let (url, list) = repos
         .into_iter()
@@ -1186,7 +1256,7 @@ fn offer<'a>(
     let p = list.plugins.iter().find(|p| p.id == entry.id)?;
     let (v, d) = p.best()?;
     let newer = repository::version_parts(&v.version) >= repository::version_parts(&entry.version);
-    newer.then_some((url, list, p, d))
+    newer.then_some((url, list, p, v, d))
 }
 
 /// The Install button of the missing effect `effect`, of the plugin `entry`, when a
@@ -1248,7 +1318,7 @@ pub fn install_missing(ui: &mut Ui, effect: &str, entry: &PluginRef) -> Option<(
         Fetch::Ready(list) => Some((r.url.as_str(), list)),
         _ => None,
     });
-    let Some((url, list, p, d)) = offer(lists, effect, entry) else {
+    let Some((url, list, p, v, d)) = offer(lists, effect, entry) else {
         return note;
     };
     let button = ui
@@ -1257,7 +1327,7 @@ pub fn install_missing(ui: &mut Ui, effect: &str, entry: &PluginRef) -> Option<(
     if !button.clicked() {
         return note;
     }
-    let found = installed_entry(p);
+    let found = installed_entry(p, v);
     let (d, kind, pip) = (d.clone(), p.kind, python::pip().is_some());
     let state = match origin_dir(&list.name, url) {
         Ok(dir) => MissingInstall::Running(std::thread::spawn(move || {
@@ -1667,7 +1737,10 @@ mod tests {
         };
         let effect = format!("{origin}/posterize");
         let found = offer(lists(), &effect, &entry("posterize", "1.0.0"));
-        assert_eq!(found.map(|(_, _, p, _)| p.name.as_str()), Some("Posterize"));
+        assert_eq!(
+            found.map(|(_, _, p, _, _)| p.name.as_str()),
+            Some("Posterize")
+        );
         assert!(offer(lists(), &effect, &entry("posterize", "0.9")).is_some());
         // Not an older version, another plugin, or from another repository.
         assert!(offer(lists(), &effect, &entry("posterize", "1.1.0")).is_none());
@@ -1784,6 +1857,64 @@ mod tests {
         settings.save();
         assert!(Settings::read_from(Some(saved)).repositories().is_empty());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn the_available_tab_offers_each_version_that_works_here() {
+        let ctx = egui::Context::default();
+        let mut m = Manager::with(Vec::new(), Settings::read_from(None));
+        m.tab = Tab::Available;
+        let file = |v: &str| {
+            format!(
+                r#"{{"any": {{"url": "https://example.com/{v}/posterize.py", "sha256": "{}", "size": 1}}}}"#,
+                "0".repeat(64)
+            )
+        };
+        let json = format!(
+            r#"{{"format": 1, "name": "Test plugins", "plugins": [{{
+            "id": "posterize", "name": "Posterize", "kind": "python", "versions": [
+              {{"version": "1.0.0", "effects": ["Posterize"], "files": {}}},
+              {{"version": "1.1.0", "changes": "Faster", "effects": ["Posterize", "Bands"],
+                "files": {}}},
+              {{"version": "2.0.0", "engines": {{"app": ">=99.0.0"}}, "files": {}}}
+            ]}}]}}"#,
+            file("1.0.0"),
+            file("1.1.0"),
+            file("2.0.0")
+        );
+        let url = "https://example.com/plugins.json";
+        m.repos = vec![Repo {
+            url: url.into(),
+            list: Fetch::Ready(repository::parse(&json).unwrap()),
+        }];
+        frame(&ctx, &mut m, Vec::new());
+        let (_, texts) = frame(&ctx, &mut m, Vec::new());
+        // The latest that works here by default, not one too new for this app.
+        assert!(find(&texts, "1.1.0 (latest)").is_some() && find(&texts, "2 effects").is_some());
+        let Fetch::Ready(list) = &m.repos[0].list else {
+            unreachable!()
+        };
+        let p = list.plugins[0].clone();
+        let picked = |m: &Manager| m.picked(url, &p).map(|(v, _)| v.version.clone());
+        assert_eq!(picked(&m).as_deref(), Some("1.1.0"));
+        // The drop-down lists the others; picking one shows it, and installs it.
+        click(
+            &ctx,
+            &mut m,
+            find(&texts, "1.1.0 (latest)").unwrap().center(),
+        );
+        let (_, texts) = frame(&ctx, &mut m, Vec::new());
+        assert!(find(&texts, "2.0.0").is_none());
+        click(&ctx, &mut m, find(&texts, "1.0.0").unwrap().center());
+        assert_eq!(picked(&m).as_deref(), Some("1.0.0"));
+        let (_, texts) = frame(&ctx, &mut m, Vec::new());
+        assert!(find(&texts, "1.0.0").is_some() && find(&texts, "1 effect").is_some());
+        let (v, _) = m.picked(url, &p).unwrap();
+        assert_eq!(installed_entry(&p, v).entry.version, "1.0.0");
+        // A version picked that no longer works here gives the latest again.
+        m.versions
+            .insert((url.into(), "posterize".into()), "2.0.0".into());
+        assert_eq!(picked(&m).as_deref(), Some("1.1.0"));
     }
 
     /// A repository listing `path`'s content as Posterize 1.0.0, and a version 1.1.0.

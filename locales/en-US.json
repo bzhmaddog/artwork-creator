@@ -529,6 +529,8 @@
   "PLUGIN_ENABLED": "Enabled",
   "PLUGIN_NAME": "Name",
   "PLUGIN_VERSION": "Version",
+  "PLUGIN_LATEST_VERSION": "{version} (latest)",
+  "PLUGIN_VERSION_CHOICE_HINT": "Version to install: the latest that works with this version of Artwork Creator, or an earlier one that does too",
   "PLUGIN_KIND": "Type",
   "PLUGIN_STATUS": "Status",
   "PLUGIN_KIND_PYTHON": "Python",

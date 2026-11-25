@@ -24,7 +24,7 @@ pub mod repository;
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{OnceLock, RwLock};
 
 use image::RgbaImage;
 use serde::{Deserialize, Serialize};
@@ -59,6 +59,8 @@ pub trait Effect: Send + Sync {
     /// less on screen where a smaller copy is used. Multiply distances given in source
     /// pixels (like a blur radius) by it, so every size looks the same.
     fn apply(&self, img: &mut RgbaImage, params: &Params, scale: f32) -> Result<(), String>;
+    /// Stops what runs it, its plugin uninstalled: it is not called again.
+    fn unload(&self) {}
 }
 
 /// Draws a shape's fill.
@@ -81,6 +83,8 @@ pub trait Generator: Send + Sync {
     /// the shape's box at `px_per_mm` pixels per mm: lengths in mm times `px_per_mm`
     /// are in pixels. Equal parameters must give the same picture at any resolution.
     fn generate(&self, img: &mut RgbaImage, params: &Params, px_per_mm: f32) -> Result<(), String>;
+    /// Stops what runs it, its plugin uninstalled: it is not called again.
+    fn unload(&self) {}
 }
 
 /// What a parameter holds, with its range and default.
@@ -572,6 +576,25 @@ pub struct Registry {
     /// Plugins installed from a repository since startup, loaded at once, in the order
     /// installed; past [`INSTALLED_SLOTS`], they load at the next start.
     installed: Vec<OnceLock<Part>>,
+    /// What the plugins uninstalled since startup added, left out from then on.
+    removed: RwLock<Removed>,
+}
+
+/// The plugins uninstalled since startup.
+#[derive(Default)]
+struct Removed {
+    /// Their effects, generators and [`plugin::PluginInfo`]s, by address (see [`addr`]).
+    items: std::collections::HashSet<usize>,
+    /// Their files.
+    files: Vec<PathBuf>,
+    /// How many were unloaded.
+    count: usize,
+}
+
+/// Where `r` is: what tells an effect, a generator or a plugin from another one with
+/// the same id (the same plugin installed again).
+fn addr<T: ?Sized>(r: &T) -> usize {
+    (r as *const T).cast::<()>() as usize
 }
 
 /// How many plugins installed from a repository can load without a restart.
@@ -648,6 +671,7 @@ impl Registry {
             pending: Vec::new(),
             late: Vec::new(),
             installed: (0..INSTALLED_SLOTS).map(|_| OnceLock::new()).collect(),
+            removed: Default::default(),
         }
     }
 
@@ -690,8 +714,9 @@ impl Registry {
     /// The Python plugins waiting to be allowed.
     pub fn pending(&self) -> Vec<&plugin::Pending> {
         let waiting = self.pending.iter().zip(&self.late);
+        let removed = self.removed();
         waiting
-            .filter(|(_, l)| l.get().is_none())
+            .filter(|(p, l)| l.get().is_none() && !removed.files.contains(&p.path))
             .map(|(p, _)| p)
             .collect()
     }
@@ -722,7 +747,50 @@ impl Registry {
         let Some(slot) = self.installed.iter().find(|s| s.get().is_none()) else {
             return false;
         };
+        // Installed again after it was uninstalled.
+        let mut removed = self.removed.write().unwrap_or_else(|e| e.into_inner());
+        removed.files.retain(|f| f != path);
+        drop(removed);
         slot.set(self.load(path)).is_ok()
+    }
+
+    /// Unloads the plugin file `path`, uninstalled: its effects, generators and file are
+    /// left out from then on, and a Python plugin's process stops. A library's code stays
+    /// in memory until the app quits (an effect may be running it), never called again.
+    pub fn remove(&self, path: &std::path::Path) {
+        if !self.files().iter().any(|f| f.path == path) {
+            return;
+        }
+        let plugins: Vec<&plugin::PluginInfo> = self.plugins().filter(|p| p.path == path).collect();
+        let of = |id: &str, name: Option<&str>| {
+            (plugins.iter()).any(|p| {
+                name == Some(p.name.as_str())
+                    && p.effects.iter().chain(&p.generators).any(|i| i == id)
+            })
+        };
+        let effects: Vec<&dyn Effect> = self.all().filter(|e| of(e.id(), e.plugin())).collect();
+        let generators: Vec<&dyn Generator> = self
+            .generators()
+            .filter(|g| of(g.id(), g.plugin()))
+            .collect();
+        let mut removed = self.removed.write().unwrap_or_else(|e| e.into_inner());
+        removed.items.extend(plugins.iter().map(|p| addr(*p)));
+        removed.items.extend(effects.iter().map(|e| addr(*e)));
+        removed.items.extend(generators.iter().map(|g| addr(*g)));
+        removed.files.push(path.to_owned());
+        removed.count += 1;
+        drop(removed);
+        effects.iter().for_each(|e| e.unload());
+        generators.iter().for_each(|g| g.unload());
+    }
+
+    fn removed(&self) -> std::sync::RwLockReadGuard<'_, Removed> {
+        self.removed.read().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Whether `item` is of a plugin uninstalled (see [`Registry::remove`]).
+    fn is_removed<T: ?Sized>(&self, item: &T) -> bool {
+        self.removed().items.contains(&addr(item))
     }
 
     /// The plugin file `path` loaded, checked against what is loaded already.
@@ -754,11 +822,12 @@ impl Registry {
         Part::checked(loaded, |id| self.params_of(id).is_some())
     }
 
-    /// How many plugins were allowed or installed since startup: cached pictures made
-    /// with effects or generators that were missing are made again when it changes.
+    /// How many plugins were allowed, installed or uninstalled since startup: cached
+    /// pictures made with effects or generators that were missing, or that are gone, are
+    /// made again when it changes.
     pub fn generation(&self) -> usize {
         let late = self.late.iter().chain(&self.installed);
-        late.filter(|l| l.get().is_some()).count()
+        late.filter(|l| l.get().is_some()).count() + self.removed().count
     }
 
     /// Every plugin file found, in loading order, with what became of it (since it was
@@ -777,12 +846,15 @@ impl Registry {
                 None => files.push(late.clone()),
             }
         }
+        let removed = self.removed();
+        files.retain(|f| !removed.files.contains(&f.path));
         files
     }
 
     /// Plugins that loaded.
     pub fn plugins(&self) -> impl Iterator<Item = &plugin::PluginInfo> {
-        self.parts().flat_map(|p| &p.plugins)
+        let plugins = self.parts().flat_map(|p| &p.plugins);
+        plugins.filter(|p| !self.is_removed(*p))
     }
 
     /// Why some plugins, or some of their effects, are not available.
@@ -831,6 +903,7 @@ impl Registry {
     pub fn all(&self) -> impl Iterator<Item = &dyn Effect> {
         self.parts()
             .flat_map(|p| p.effects.iter().map(|e| e.as_ref()))
+            .filter(|e| !self.is_removed(*e))
     }
 
     pub fn generator(&self, id: &str) -> Option<&dyn Generator> {
@@ -841,6 +914,7 @@ impl Registry {
     pub fn generators(&self) -> impl Iterator<Item = &dyn Generator> {
         self.parts()
             .flat_map(|p| p.generators.iter().map(|g| g.as_ref()))
+            .filter(|g| !self.is_removed(*g))
     }
 
     /// The parameters of the effect or generator `id`.
@@ -1061,6 +1135,7 @@ mod tests {
             version: "1.0.0".into(),
             effects: vec!["o/halftone".into()],
             generators: vec!["o/dots".into()],
+            path: PathBuf::new(),
             source: None,
             entry: Some(plugin::Installed {
                 entry: entry("1.0.0"),

@@ -1062,7 +1062,12 @@ fn menu_button(ui: &mut Ui) -> Response {
 
 /// The button hiding a floating panel: a cross.
 fn close_button(ui: &mut Ui) -> Response {
-    icon_button(ui, tr!("HIDE_PANEL"), |p, r, c| {
+    cross_button(ui, tr!("HIDE_PANEL"))
+}
+
+/// A cross, to close what it is in, with `tip` as its tooltip.
+pub(crate) fn cross_button(ui: &mut Ui, tip: &str) -> Response {
+    icon_button(ui, tip, |p, r, c| {
         let stroke = Stroke::new(crate::ui::tokens::STROKE, c);
         p.line_segment([r.left_top(), r.right_bottom()], stroke);
         p.line_segment([r.right_top(), r.left_bottom()], stroke);

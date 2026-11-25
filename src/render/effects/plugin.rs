@@ -3,7 +3,8 @@
 //! plugins (`.py`) in the same folder, run in processes of their own (see [`python`]).
 //!
 //! Plugins run in the app's process with its full rights: a crash in one takes the app
-//! down. They are loaded once at startup and never unloaded.
+//! down. They are loaded at startup, or when installed or allowed; one uninstalled is
+//! unloaded (see [`Registry::remove`](super::Registry::remove)).
 
 use std::ffi::{CStr, CString, c_char};
 use std::path::{Path, PathBuf};
@@ -24,6 +25,8 @@ pub struct PluginInfo {
     pub effects: Vec<String>,
     /// Ids of its generators.
     pub generators: Vec<String>,
+    /// Its file.
+    pub path: PathBuf,
     /// The repository it was installed from; `None` for one put in a plugins folder by
     /// hand.
     pub source: Option<Source>,
@@ -733,6 +736,10 @@ impl Effect for FromOrigin<dyn Effect> {
     fn apply(&self, img: &mut RgbaImage, params: &Params, scale: f32) -> Result<(), String> {
         self.inner.apply(img, params, scale)
     }
+
+    fn unload(&self) {
+        self.inner.unload();
+    }
 }
 
 impl Generator for FromOrigin<dyn Generator> {
@@ -758,6 +765,10 @@ impl Generator for FromOrigin<dyn Generator> {
 
     fn generate(&self, img: &mut RgbaImage, params: &Params, px_per_mm: f32) -> Result<(), String> {
         self.inner.generate(img, params, px_per_mm)
+    }
+
+    fn unload(&self) {
+        self.inner.unload();
     }
 }
 
@@ -923,6 +934,7 @@ pub unsafe fn from_table(
         version: plugin_version,
         effects: effects.iter().map(|e| e.id.clone()).collect(),
         generators: generators.iter().map(|g| g.id.clone()).collect(),
+        path: path.to_owned(),
         source: None,
         entry: None,
     };

@@ -66,7 +66,7 @@ older SDK. It asks before committing, and makes no tag and pushes nothing. See
    **Publish release**.
 
 5. Publishing runs the **Pages** workflow, which puts the Windows installer at
-   `https://bzhmaddog.github.io/artwork-creator/download/vX.Y.Z/artwork-creator-windows-setup.exe`:
+   `https://bzhmaddog.github.io/artwork-creator-app/download/vX.Y.Z/artwork-creator-windows-setup.exe`:
    the link for the download page. The Microsoft Store gets the MSIX package instead:
    download the **store-msix** artifact of the Release workflow run (Actions > the run >
    Artifacts) and upload the `.msix` in Partner Center (the app's submission > Packages).

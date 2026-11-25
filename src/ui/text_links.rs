@@ -8,11 +8,13 @@ use crate::ui::variables as variables_ui;
 use crate::ui::variables::LinkAction;
 use egui::Ui;
 
-/// Unlinks a text typed in (`link` being its text's link), with a notice in the status
-/// bar saying so.
+/// Unlinks a text typed in (`link` being its text's link), with a toast saying so.
 pub fn typed_in(ctx: &egui::Context, link: &mut Option<String>) {
+    use crate::ui::toast::{self, Intent, Toast};
     if let Some(name) = link.take() {
-        crate::app::notify(ctx, tr!("TEXT_UNLINKED_BY_TYPING", name = name));
+        let text = tr!("TEXT_UNLINKED_BY_TYPING", name = name);
+        let title = tr!("TEXT_UNLINKED_TITLE");
+        toast::push(ctx, Toast::new("text_unlinked", Intent::Info, title, &text));
     }
 }
 
@@ -47,30 +49,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn typing_in_a_linked_text_unlinks_it_with_a_notice() {
+    fn typing_in_a_linked_text_unlinks_it_with_a_toast() {
         let ctx = egui::Context::default();
-        let frame = |time: f64| {
-            let input = egui::RawInput {
-                time: Some(time),
-                ..Default::default()
-            };
-            let mut shown = None;
-            let mut out = ctx.run_ui(input, |ui| shown = crate::app::notice(ui.ctx()));
-            out.textures_delta.clear();
-            shown
-        };
-        frame(1.0);
         let mut link = None;
         typed_in(&ctx, &mut link);
-        assert_eq!(frame(1.1), None, "not linked: nothing to say");
+        assert!(
+            crate::ui::toast::queued(&ctx).is_empty(),
+            "not linked: nothing to say"
+        );
         let mut link = Some("title".to_owned());
         typed_in(&ctx, &mut link);
         assert_eq!(link, None);
-        let shown = frame(1.2).expect("a notice");
-        assert!(shown.contains("title"), "{shown}");
+        let queued = crate::ui::toast::queued(&ctx);
         assert!(
-            frame(1.0 + crate::app::NOTICE_SECONDS + 0.1).is_none(),
-            "then gone"
+            queued.len() == 1 && queued[0].text.contains("title"),
+            "{queued:?}"
         );
     }
 }

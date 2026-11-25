@@ -1,16 +1,19 @@
 #!/usr/bin/env python3
 """Fills in the download page (pages/download.html) from the project's GitHub releases.
 
-Usage: download-page.py < RELEASES_JSON > download.html
+Usage: download-page.py [--version-file version.json] < RELEASES_JSON > download.html
 
 Reads the GitHub API's list of releases on stdin (gh api --paginate --slurp
 repos/OWNER/REPO/releases | jq 'add', or curl .../releases?per_page=100) and writes the
 page to stdout. The template is the repository's pages/download.html. The newest published
 release goes in the template's <!-- LATEST --> marker, one card per platform; the others
 in <!-- OLDER -->, one row each. Drafts are left out, as are files the page doesn't know.
-Run by .github/workflows/pages.yml.
+With --version-file, also writes that release's version there, as {"version": "1.2.0"}:
+what the app reads to tell about a new version (src/app/version_check.rs). Run by
+.github/workflows/pages.yml.
 """
 
+import argparse
 import json
 import sys
 from html import escape
@@ -102,12 +105,21 @@ def older_html(releases):
     return "\n".join(out)
 
 
-def main():
+def version_json(r):
+    return json.dumps({"version": r["tag_name"].lstrip("v")}) + "\n"
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Fills in the download page from the releases.")
+    parser.add_argument("--version-file", type=Path, help="where to write the latest version")
+    args = parser.parse_args(argv)
     releases = [r for r in json.load(sys.stdin) if not r.get("draft") and files(r)]
     releases.sort(key=lambda r: r.get("published_at") or "", reverse=True)
     page = TEMPLATE.read_text(encoding="utf-8")
     if releases:
         latest = latest_html(releases[0])
+        if args.version_file:
+            args.version_file.write_text(version_json(releases[0]), encoding="utf-8")
     else:
         latest = '<p class="muted">No release yet.</p>'
     page = page.replace("<!-- LATEST -->", latest).replace("<!-- OLDER -->", older_html(releases[1:]))

@@ -320,9 +320,12 @@ impl ArtworkApp {
         };
         // A reference whose file couldn't be read: said, and shown crossed out.
         if let Some(l) = crate::template::edit::reference(&doc).filter(|l| l.broken) {
-            self.messages.push(tr!(
-                "TEMPLATE_REFERENCE_NOT_LOADED",
-                path = l.source.display()
+            let text = tr!("TEMPLATE_REFERENCE_NOT_LOADED", path = l.source.display());
+            self.toasts.push(Toast::new(
+                "reference_not_loaded",
+                Intent::Warning,
+                tr!("TEMPLATE_REFERENCE_NOT_LOADED_TITLE"),
+                &text,
             ));
         }
         let from = self.doc.template.clone();

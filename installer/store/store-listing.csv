@@ -58,7 +58,7 @@ SearchTerms4,Text,illustration,artwork
 SearchTerms5,Text,impression,print design
 SearchTerms6,Text,panneau,panel
 SearchTerms7,Text,hitbox,hitbox
-Applicable license terms,Text,"Licence PolyForm Noncommercial 1.0.0 : gratuit pour un usage non commercial. Créer des illustrations, panneaux ou manettes destinés à la vente nécessite l'autorisation de l'auteur. https://github.com/bzhmaddog/artwork-creator/blob/main/LICENSE","PolyForm Noncommercial License 1.0.0: free for non-commercial use. Making artwork, panels or controllers for sale needs the author's permission. https://github.com/bzhmaddog/artwork-creator/blob/main/LICENSE"
+Applicable license terms,Text,"Licence PolyForm Noncommercial 1.0.0 : gratuit pour un usage non commercial. Créer des illustrations, panneaux ou manettes destinés à la vente nécessite l'autorisation de l'auteur. https://github.com/bzhmaddog/artwork-creator-app/blob/main/LICENSE","PolyForm Noncommercial License 1.0.0: free for non-commercial use. Making artwork, panels or controllers for sale needs the author's permission. https://github.com/bzhmaddog/artwork-creator-app/blob/main/LICENSE"
 Copyright,Text,Copyright 2026 bzhmaddog,Copyright 2026 bzhmaddog
 DevelopedBy,Text,bzhmaddog,bzhmaddog
 RequirementsMinimum1,Text,,

@@ -1,7 +1,7 @@
 # Artwork Creator
 
-[![Test](https://github.com/bzhmaddog/artwork-creator/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/bzhmaddog/artwork-creator/actions/workflows/test.yml)
-[![CodeQL](https://github.com/bzhmaddog/artwork-creator/actions/workflows/github-code-scanning/codeql/badge.svg)](https://github.com/bzhmaddog/artwork-creator/actions/workflows/github-code-scanning/codeql)
+[![Test](https://github.com/bzhmaddog/artwork-creator-app/actions/workflows/test.yml/badge.svg?branch=main)](https://github.com/bzhmaddog/artwork-creator-app/actions/workflows/test.yml)
+[![CodeQL](https://github.com/bzhmaddog/artwork-creator-app/actions/workflows/github-code-scanning/codeql/badge.svg)](https://github.com/bzhmaddog/artwork-creator-app/actions/workflows/github-code-scanning/codeql)
 [![Quality Gate Status](https://sonarcloud.io/api/project_badges/measure?project=bzhmaddog_artwork-creator&metric=alert_status)](https://sonarcloud.io/summary/new_code?id=bzhmaddog_artwork-creator)
 [![Coverage](https://sonarcloud.io/api/project_badges/measure?project=bzhmaddog_artwork-creator&metric=coverage)](https://sonarcloud.io/component_measures?id=bzhmaddog_artwork-creator&metric=coverage)
 
@@ -103,7 +103,7 @@ its `Exec` line set to where the executable is.
 After cloning, install the tools the quality checks need and the git hooks once:
 
 ```sh
-git clone https://github.com/bzhmaddog/artwork-creator.git
+git clone https://github.com/bzhmaddog/artwork-creator-app.git
 cd artwork-creator
 
 # Install rustfmt, clippy, the Windows target, cargo-llvm-cov, rust-analyzer, a .venv with

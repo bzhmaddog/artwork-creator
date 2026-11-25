@@ -375,10 +375,6 @@ impl ArtworkApp {
                 ui.spinner();
                 ui.label(tr!("EXPORT_IN_PROGRESS"));
             }
-            if let Some(text) = notice(ui.ctx()) {
-                ui.separator();
-                ui.colored_label(ui.visuals().warn_fg_color, text);
-            }
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 self.save_status(ui)
             });

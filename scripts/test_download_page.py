@@ -96,7 +96,7 @@ class Older(unittest.TestCase):
 
 
 class Main(unittest.TestCase):
-    def run_main(self, releases):
+    def run_main(self, releases, argv=()):
         with tempfile.TemporaryDirectory() as tmp:
             template = Path(tmp) / "download.html"
             template.write_text("<main><!-- LATEST --><hr><!-- OLDER --></main>", encoding="utf-8")
@@ -104,7 +104,9 @@ class Main(unittest.TestCase):
             with mock.patch.object(dp, "TEMPLATE", template), \
                     mock.patch("sys.stdin", io.StringIO(json.dumps(releases))), \
                     mock.patch("sys.stdout", out):
-                dp.main()
+                dp.main([a.replace("TMP", tmp) for a in argv])
+            version = Path(tmp) / "version.json"
+            self.version = version.read_text(encoding="utf-8") if version.exists() else None
         return out.getvalue()
 
     def test_no_release(self):
@@ -126,6 +128,16 @@ class Main(unittest.TestCase):
         self.assertIn("v0.13.0", older)
         self.assertNotIn("v0.15.0", page)
         self.assertNotIn("v0.12.0", page)
+
+    def test_version_file(self):
+        releases = [release("v0.13.0", "2026-09-01", ALL), release("v0.14.0", "2026-10-01", ALL)]
+        self.run_main(releases, ["--version-file", "TMP/version.json"])
+        self.assertEqual(json.loads(self.version), {"version": "0.14.0"})
+        # None without a release, nor without the option.
+        self.run_main([], ["--version-file", "TMP/version.json"])
+        self.assertIsNone(self.version)
+        self.run_main(releases)
+        self.assertIsNone(self.version)
 
     def test_real_template_has_markers(self):
         text = dp.TEMPLATE.read_text(encoding="utf-8")

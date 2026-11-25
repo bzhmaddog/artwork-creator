@@ -1,4 +1,4 @@
-//! Dialogs, notices and menu entries shared by the whole app.
+//! Dialogs and menu entries shared by the whole app.
 
 use super::*;
 
@@ -40,32 +40,6 @@ pub fn set_interaction(ctx: &egui::Context) {
         // content less than egui's 18 px, so the narrow panels keep room for it.
         s.spacing.indent = crate::ui::tokens::INDENT;
     });
-}
-
-/// How long a notice stays in the status bar, in seconds.
-pub(crate) const NOTICE_SECONDS: f64 = 6.0;
-
-pub(super) fn notice_id() -> egui::Id {
-    egui::Id::unique("status_notice")
-}
-
-/// Shows `text` as a warning in the status bar for a few seconds, without stopping
-/// what the user is doing (unlike a message, which waits for OK).
-pub(crate) fn notify(ctx: &egui::Context, text: String) {
-    let now = ctx.input(|i| i.time);
-    ctx.data_mut(|d| d.insert_temp(notice_id(), (text, now)));
-}
-
-/// The notice shown in the status bar, if one is still up.
-pub(crate) fn notice(ctx: &egui::Context) -> Option<String> {
-    let (text, at) = ctx.data(|d| d.get_temp::<(String, f64)>(notice_id()))?;
-    let left = at + NOTICE_SECONDS - ctx.input(|i| i.time);
-    if left <= 0.0 {
-        ctx.data_mut(|d| d.remove::<(String, f64)>(notice_id()));
-        return None;
-    }
-    ctx.request_repaint_after(std::time::Duration::from_secs_f64(left));
-    Some(text)
 }
 
 /// Room between a window's or dialog's border and what it holds, in points (egui's is 6).

@@ -10,6 +10,7 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use image::RgbaImage;
@@ -270,9 +271,17 @@ struct Script {
     path: PathBuf,
     python: &'static Python,
     process: Mutex<Option<Process>>,
+    /// Uninstalled: its process stopped, never started again.
+    unloaded: AtomicBool,
 }
 
 impl Script {
+    /// Stops its process for good.
+    fn unload(&self) {
+        self.unloaded.store(true, Ordering::Relaxed);
+        *self.process.lock().unwrap_or_else(|e| e.into_inner()) = None;
+    }
+
     fn start(&self) -> Result<Process, String> {
         // With -c, Python imports from the working directory first, which may be any
         // folder: a json.py there would run. The plugin's own folder is the working
@@ -327,6 +336,9 @@ impl Script {
         answer_len: usize,
     ) -> Result<(Value, Vec<u8>), String> {
         let mut process = self.process.lock().unwrap_or_else(|e| e.into_inner());
+        if self.unloaded.load(Ordering::Relaxed) {
+            return Err("the plugin was uninstalled".into());
+        }
         if process.is_none() {
             *process = Some(self.start()?);
         }
@@ -388,6 +400,7 @@ pub fn load_script(path: &Path, python: &'static Python) -> Result<Contents, Str
         path: path.to_owned(),
         python,
         process: Mutex::new(None),
+        unloaded: AtomicBool::new(false),
     });
     let (d, _) = script.call(&json!({"op": "describe"}), &[], 0)?;
     let text = |v: &Value, key: &str| v.get(key).and_then(Value::as_str).unwrap_or("").to_owned();
@@ -442,6 +455,7 @@ pub fn load_script(path: &Path, python: &'static Python) -> Result<Contents, Str
         version: text(&d, "version"),
         effects: effects.iter().map(|e| e.id().to_owned()).collect(),
         generators: generators.iter().map(|g| g.id().to_owned()).collect(),
+        path: path.to_owned(),
         source: None,
         entry: None,
     };
@@ -530,6 +544,10 @@ impl Effect for PythonEffect {
     fn apply(&self, img: &mut RgbaImage, params: &Params, scale: f32) -> Result<(), String> {
         self.part.draw("apply", img, params, ("scale", scale), true)
     }
+
+    fn unload(&self) {
+        self.part.script.unload();
+    }
 }
 
 struct PythonGenerator(Part);
@@ -558,6 +576,10 @@ impl Generator for PythonGenerator {
     fn generate(&self, img: &mut RgbaImage, params: &Params, px_per_mm: f32) -> Result<(), String> {
         self.0
             .draw("generate", img, params, ("px_per_mm", px_per_mm), false)
+    }
+
+    fn unload(&self) {
+        self.0.script.unload();
     }
 }
 
@@ -817,6 +839,41 @@ plugin = Plugin("", "3", effects=[Grow()])
         let reg = Registry::with_plugins(&dirs, &saved);
         assert_eq!(reg.pending().len(), 2);
         assert!(pending(&dir.join("missing.py")).is_err());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn an_uninstalled_plugin_is_unloaded() {
+        let Some(_) = python() else {
+            return;
+        };
+        let dir = folder("unload", &[("sample.py", SAMPLE), ("test.py", TEST)]);
+        let dirs = [dir.canonicalize().unwrap()];
+        let path = dirs[0].join("sample.py");
+        let reg = Registry::with_plugins(&dirs, &allow_all(&dirs[0]));
+        let halve = reg.get("sample.halve").unwrap();
+        reg.remove(&path);
+        assert!(reg.get("sample.halve").is_none() && reg.generator("sample.solid").is_none());
+        assert!(reg.get("test.grow").is_some());
+        assert_eq!(reg.plugins().count(), 1);
+        assert!(reg.files().iter().all(|f| f.path != path));
+        assert_eq!(reg.generation(), 1);
+        // Its process stopped, not started again.
+        let inst = EffectInstance::new(halve);
+        let mut img = RgbaImage::new(1, 1);
+        let err = halve.apply(&mut img, &Params::new(halve.params(), &inst.params), 1.0);
+        assert!(err.unwrap_err().contains("uninstalled"));
+        // Removing it again, or a file not loaded, changes nothing.
+        reg.remove(&path);
+        reg.remove(&dirs[0].join("nope.py"));
+        assert_eq!(reg.generation(), 1);
+        // Installed again: loaded anew.
+        assert!(reg.add_installed(&path));
+        let halve = reg.get("sample.halve").unwrap();
+        halve
+            .apply(&mut img, &Params::new(halve.params(), &inst.params), 1.0)
+            .unwrap();
+        assert!(reg.files().iter().any(|f| f.path == path));
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -260,7 +260,11 @@ impl Entry {
             })
             .filter_map(|v| v.files.get(key).map(|d| (v, d)))
             .collect::<Vec<_>>();
-        found.sort_by_key(|(v, _)| std::cmp::Reverse(version_parts(&v.version)));
+        // A release before its pre-releases, which `version_parts` doesn't tell apart.
+        found.sort_by_key(|(v, _)| {
+            let release = !v.version.contains('-');
+            std::cmp::Reverse((version_parts(&v.version), release))
+        });
         found
     }
 }
@@ -283,6 +287,8 @@ pub fn fetch_all(urls: &[String]) -> Catalog {
 /// What a repository says about a plugin file installed, found by its content.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Known {
+    /// The plugin's id in the repository.
+    pub id: String,
     pub description: String,
     /// The version of the file installed.
     pub version: String,
@@ -370,6 +376,7 @@ pub fn known<'a>(
         found.insert(
             path.clone(),
             Known {
+                id: p.id.clone(),
                 description: p.description.clone(),
                 version,
                 effects: v.map(|v| v.effects.clone()).unwrap_or_default(),

@@ -111,11 +111,13 @@ impl ArtworkApp {
         match result {
             // Success is silent: the progress window closing is enough.
             Some(Ok(Ok(paths))) => log::info!("exported {paths:?}"),
-            Some(Ok(Err(e))) if e == render::CANCELED => self.messages.push(if self.job_prints {
-                tr!("PRINT_CANCELED").into()
-            } else {
-                tr!("EXPORT_CANCELED").into()
-            }),
+            Some(Ok(Err(e))) if e == render::CANCELED => {
+                let title = match self.job_prints {
+                    true => tr!("PRINT_CANCELED"),
+                    false => tr!("EXPORT_CANCELED"),
+                };
+                (self.toasts).push(Toast::new("output_canceled", Intent::Info, title, ""));
+            }
             Some(Ok(Err(e))) if self.job_prints => self.messages.push(tr!("PRINT_FAILED", e = e)),
             Some(Ok(Err(e))) => self.messages.push(tr!("EXPORT_FAILED", e = e)),
             Some(Err(_)) => self.messages.push(tr!("EXPORT_FAILED_UNEXPECTEDLY").into()),

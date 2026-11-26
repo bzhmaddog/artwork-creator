@@ -1,5 +1,6 @@
 """Tests of download-page.py. Run with: python3 -m unittest discover -s scripts"""
 
+import contextlib
 import importlib.util
 import io
 import json
@@ -103,7 +104,8 @@ class Main(unittest.TestCase):
             out = io.StringIO()
             with mock.patch.object(dp, "TEMPLATE", template), \
                     mock.patch("sys.stdin", io.StringIO(json.dumps(releases))), \
-                    mock.patch("sys.stdout", out):
+                    mock.patch("sys.stdout", out), \
+                    contextlib.chdir(tmp):
                 dp.main([a.replace("TMP", tmp) for a in argv])
             version = Path(tmp) / "version.json"
             self.version = version.read_text(encoding="utf-8") if version.exists() else None
@@ -138,6 +140,12 @@ class Main(unittest.TestCase):
         self.assertIsNone(self.version)
         self.run_main(releases)
         self.assertIsNone(self.version)
+
+    def test_version_file_outside_current_directory(self):
+        releases = [release("v0.14.0", "2026-10-01", ALL)]
+        for path in ["../version.json", "/tmp/version.json"]:
+            with self.assertRaises(SystemExit), mock.patch("sys.stderr", io.StringIO()):
+                self.run_main(releases, ["--version-file", path])
 
     def test_real_template_has_markers(self):
         text = dp.TEMPLATE.read_text(encoding="utf-8")

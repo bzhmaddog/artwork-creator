@@ -1659,8 +1659,17 @@ mod tests {
 
     #[test]
     fn a_new_window_shows_this_run_s_plugins() {
-        // This run's registry has only the built-in effects: no plugin files.
-        assert!(Manager::new(Some(Vec::new())).files.is_empty());
+        // This run's registry has only the built-in effects: no plugin files, but those
+        // that tests running alongside install for a moment, in the temp folder.
+        let temp = std::env::temp_dir();
+        let temp = [temp.canonicalize().unwrap_or_else(|_| temp.clone()), temp];
+        let files = Manager::new(Some(Vec::new())).files;
+        assert!(
+            files
+                .iter()
+                .all(|f| temp.iter().any(|t| f.path.starts_with(t))),
+            "only plugins installed by tests: {files:?}"
+        );
     }
 
     #[test]
@@ -2191,6 +2200,8 @@ mod tests {
         let settings = Settings::read_from(Some(dir.join("plugins.json")));
         assert!(!settings.is_disabled(&path));
         assert!(settings.is_allowed(&plugin::pending(&path).unwrap()));
+        // Unloaded from the registry that every test shares.
+        registry().remove(&path);
         let _ = std::fs::remove_dir_all(dir);
     }
 

@@ -183,7 +183,9 @@ controls. A parameter's optional role says what it is for, which picks its contr
 `seed` (an int: a random variation the app picks when the effect is added and with a
 button; declare it with `Param::seed`, or `seed_param` in Python), `angle` (a float in degrees:
 a value and a dial) or `size` (a float length in pixels: fine steps for small values,
-shown in mm on text and shape layers); see `Role` in the crate. Export them with
+shown in mm on text and shape layers); see `Role` in the crate. Parameters given the same
+optional group name (`Param::group`) are shown together under it, in a section that
+folds, where the first of them is. Export them with
 `export_plugin!`. The crate must be a `cdylib`. The
 [artwork-creator-plugins](https://github.com/bzhmaddog/artwork-creator-plugins)
 repository has complete examples, in Rust and Python.
@@ -197,7 +199,7 @@ version 1 of this interface, which had effects only.
 In Python, write one `.py` file defining `plugin = Plugin(name, version, effects=[...],
 generators=[...])` with subclasses of `Effect` (`apply(image, values, scale)`) and
 `Generator` (`generate(image, values, px_per_mm)`), their parameters made with
-`int_param`, `float_param`... (with `role=` as above), from the
+`int_param`, `float_param`... (with `role=` and `group=` as above), from the
 [`artwork_plugin_sdk`](plugin-sdk/python/artwork_plugin_sdk.py) module, which the app provides
 when it runs the file. Pixels are a `bytearray` (a writable numpy view works too, if
 numpy is installed); values are a dict. List the packages it needs, if any, in a PEP 723

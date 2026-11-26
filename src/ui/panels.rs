@@ -787,6 +787,13 @@ impl Layout {
     /// scroll when taller.
     fn contents(&mut self, ui: &mut Ui, app: &mut dyn Contents, id: PanelId, height: Option<f32>) {
         let height = height.unwrap_or_else(|| ui.available_height());
+        // The scroll bars, the panel's or the layer list's, take room beside the contents
+        // while shown, instead of floating over their right edge (egui's default), where
+        // they would cover the buttons at the right of the sections' and rows' headers.
+        let floating = std::mem::replace(
+            &mut ui.spacing_mut().scroll,
+            egui::style::ScrollStyle::solid(),
+        );
         let natural = if id.scrolls_itself() {
             let size = vec2(ui.available_width(), height);
             ui.allocate_ui_with_layout(size, egui::Layout::top_down(egui::Align::Min), |ui| {
@@ -806,6 +813,7 @@ impl Layout {
                 .content_size
                 .y
         };
+        ui.spacing_mut().scroll = floating;
         self.set_natural(ui.ctx(), id, natural);
     }
 
@@ -1377,6 +1385,51 @@ mod tests {
             }
             Labels.contents(ui, id)
         }
+    }
+
+    /// Properties `rows` labels high, keeping the width its contents had.
+    struct Rows {
+        rows: usize,
+        width: f32,
+    }
+
+    impl Contents for Rows {
+        fn contents(&mut self, ui: &mut Ui, id: PanelId) -> Option<f32> {
+            if id == PanelId::Properties {
+                self.width = ui.max_rect().width();
+                for _ in 0..self.rows {
+                    ui.label("row");
+                }
+            }
+            None
+        }
+    }
+
+    #[test]
+    fn scroll_bar_takes_room_beside_the_contents() {
+        // The contents' width, with `rows` rows in Properties.
+        let width = |rows| {
+            let ctx = egui::Context::default();
+            let mut layout = Layout::default();
+            let mut app = Rows { rows, width: 0.0 };
+            for k in 0..3 {
+                let input = egui::RawInput {
+                    screen_rect: Some(Rect::from_min_size(Pos2::ZERO, vec2(1000.0, 700.0))),
+                    time: Some(k as f64 * 0.02),
+                    ..Default::default()
+                };
+                let mut out = ctx.run_ui(input, |ui| {
+                    layout.begin_frame(ui.available_rect_before_wrap());
+                    layout.show_dock(ui, Side::Right, &mut app);
+                });
+                out.textures_delta.clear();
+            }
+            app.width
+        };
+        let bar = egui::style::ScrollStyle::solid().bar_width;
+        // Narrower by the bar (at least) when it scrolls, so the bar covers nothing.
+        let (short, tall) = (width(1), width(200));
+        assert!(short - tall >= bar, "{short} {tall} {bar}");
     }
 
     #[test]

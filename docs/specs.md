@@ -690,7 +690,7 @@ that folds them away.
 | Checkerboard | square size, color 1, color 2, angle |
 | Stripes | width, color 1, color 2, angle |
 
-- The circular-arrow button next to the generator menu (Noise, Clouds, and a plugin's
+- The magic wand button next to the generator menu (Noise, Clouds, and a plugin's
   generator with a seed setting) draws another random picture with the same
   settings. A new generated fill, or one switched to another generator, starts with a
   random picture too. The picture is saved with the project.
@@ -795,8 +795,9 @@ opacity and effects included.
 ## Effects
 
 Each image, text and shape layer has a stack of effects, in the **Effects** section of its
-Properties: **Add effect** adds one; each can be toggled, reset to its defaults, removed,
-and dragged to reorder (applied top to bottom). They are applied to the export at full
+Properties: **Add effect** adds one; each can be toggled, reset to its defaults, removed
+(after confirming), and dragged to reorder. As layers are, they are applied from the bottom of the list
+up, a new one added at the top. They are applied to the export at full
 resolution and never change the image file. Sizes of a text's or shape's effects are on the
 page (a text's follow the font size).
 
@@ -822,10 +823,11 @@ page (a text's follow the font size).
   Ease out, Ease in-out, or your own by dragging the two handles of its graph.
 - Angles have an angle dial; colors a color picker; numbers can be linked to variables.
 - More effects come from [plugins](#plugins). A plugin's effect with a seed setting (a
-  random variation) shows a circular-arrow button in its place, which gives another random result
-  with the same settings, as for [generated fills](#generated-fills). Such an effect
+  random variation) shows a magic wand button in its header, next to the trash, instead of
+  a setting; it gives another random result with the same settings, as for [generated fills](#generated-fills). Such an effect
   starts with a random result when added; **Reset to defaults** keeps it. It is saved with
-  the project.
+  the project. A plugin can put settings in named groups: each group folds, open at first,
+  where its first setting is, and its controls line up with the others.
 
 ## Plugins
 

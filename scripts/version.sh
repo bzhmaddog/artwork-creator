@@ -1,7 +1,7 @@
 #!/bin/sh
 # Suggests the next version from the commits since the last release and bumps the
 # version. Run with `make version-check` and `make version-bump-*`. A release is a vX.Y.Z
-# tag, made by hand (see doc/releasing.md).
+# tag, made by hand (see docs/releasing.md).
 #
 # Usage:
 #   version.sh [check]
@@ -230,7 +230,7 @@ cmd_check() {
         if [ "$next" = "$current" ] && [ -n "$sdk_next" ]; then
             echo "Cargo.toml is at it, the plugin SDK isn't: make version-bump APP=$next SDK=$sdk_next"
         elif [ "$next" = "$current" ]; then
-            echo "Cargo.toml is at it: tag v$next to release it (see doc/releasing.md)"
+            echo "Cargo.toml is at it: tag v$next to release it (see docs/releasing.md)"
         else
             echo "Set it with: make version-bump APP=$next${sdk_next:+ SDK=$sdk_next}"
         fi
@@ -303,7 +303,7 @@ cmd_bump() {
     echo "  git tag v$new"
     echo "  git push origin v$new"
     echo "GitHub Actions then builds the packages into a draft release to publish by hand;"
-    echo "don't create the release on GitHub (see doc/releasing.md)."
+    echo "don't create the release on GitHub (see docs/releasing.md)."
 }
 
 case "${1:-check}" in

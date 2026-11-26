@@ -1,6 +1,6 @@
 [package]
 name = "artwork-plugin-sdk"
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 description = "Write image effect plugins for Artwork Creator"
 license-file = "../LICENSE"

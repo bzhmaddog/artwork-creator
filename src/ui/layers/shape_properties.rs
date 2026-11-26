@@ -56,7 +56,7 @@ pub(super) fn shape_section(
     section(
         ui,
         "shape_props",
-        RichText::new(tr!("SHAPE_SECTION")),
+        RichText::new(tr!("SHAPE_SECTION")).strong(),
         |_| false,
         |ui| {
             let Some(s) = layer.shape.as_deref_mut() else {

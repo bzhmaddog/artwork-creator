@@ -351,7 +351,7 @@ pub(super) fn image_section(ui: &mut Ui, layer: &Layer, min_dpi: f32) {
     section(
         ui,
         "image_props",
-        RichText::new(tr!("IMAGE_SECTION")),
+        RichText::new(tr!("IMAGE_SECTION")).strong(),
         |_| false,
         |ui| {
             // Print resolution of this layer, from its pixel count and printed size.
@@ -617,12 +617,11 @@ pub(super) fn properties(
         }
         Some(Node::Layer(layer)) => {
             // Common properties first, then what only this kind of layer has.
-            let open = state.show_text;
             section(
                 ui,
                 "layer_props",
                 RichText::new(tr!("LAYER_GENERAL_SECTION")).strong(),
-                move |_| open,
+                |_| false,
                 |ui| {
                     prop_grid(ui, "layer_props").show(ui, |ui| {
                         ui.label(tr!("LAYER_NAME"));
@@ -888,30 +887,30 @@ pub(super) fn properties(
                             }
                         });
                     });
-
-                    if layer.text.is_some() {
-                        out.changed |= text_section(ui, layer, state, fonts, &shapes);
-                    } else if layer.shape.is_some() {
-                        // Without a shortcut, the command's name.
-                        let delete = state
-                            .keys
-                            .get(&Command::Delete)
-                            .cloned()
-                            .unwrap_or_else(|| tr!("DELETE_LAYER").to_owned());
-                        out.changed |= shape_section(
-                            ui,
-                            layer,
-                            locked,
-                            &mut state.edit_points,
-                            &mut state.pick_pattern,
-                            &delete,
-                            plain,
-                        );
-                    } else {
-                        image_section(ui, layer, state.min_dpi);
-                    }
                 },
             );
+            // What only this kind of layer has, in its own section after General.
+            if layer.text.is_some() {
+                out.changed |= text_section(ui, layer, state, fonts, &shapes);
+            } else if layer.shape.is_some() {
+                // Without a shortcut, the command's name.
+                let delete = state
+                    .keys
+                    .get(&Command::Delete)
+                    .cloned()
+                    .unwrap_or_else(|| tr!("DELETE_LAYER").to_owned());
+                out.changed |= shape_section(
+                    ui,
+                    layer,
+                    locked,
+                    &mut state.edit_points,
+                    &mut state.pick_pattern,
+                    &delete,
+                    plain,
+                );
+            } else {
+                image_section(ui, layer, state.min_dpi);
+            }
             // Effect sizes of drawn layers are shown in mm: a text's follow its font
             // size, a shape's stay the same when it is resized.
             let px_mm = if layer.text.is_some() {

@@ -155,16 +155,22 @@ fn stack_ui(
         return changed;
     }
     if stack.len() > 1 {
-        crate::ui::callout::callout(ui, crate::ui::callout::Tone::Tip, tr!("EFFECTS_ORDER_HINT"));
+        crate::ui::callout::callout(
+            ui,
+            crate::ui::callout::Tone::Info,
+            tr!("EFFECTS_ORDER_HINT"),
+        );
     }
 
     let mut remove = None;
     let mut drop = None;
     let dragged = DragAndDrop::payload::<DraggedEffect>(ui.ctx()).filter(|d| d.layer == layer_id);
     let full = ui.max_rect().x_range();
-    // Area of each effect, header and controls, to find where a dragged one drops.
+    // Area of each effect, header and controls, to find where a dragged one drops; in
+    // the order shown.
     let mut blocks = Vec::with_capacity(stack.len());
-    for (i, inst) in stack.iter_mut().enumerate() {
+    // As layers are: the last applied (the last of the stack) at the top.
+    for (i, inst) in stack.iter_mut().enumerate().rev() {
         let effect = registry().get(&inst.effect);
         let id = ui.make_persistent_id(("effect", layer_id, i));
         let being_dragged = dragged.as_ref().is_some_and(|d| d.index == i);
@@ -239,6 +245,13 @@ fn stack_ui(
                             if layers::tool_button(ui, Tool::Delete, true, tr!("REMOVE_EFFECT")) {
                                 remove = Some(i);
                             }
+                            // A new random variation acts on the whole effect, so it
+                            // goes with the effect's name, next to the trash.
+                            if let Some(e) = effect {
+                                let enabled = inst.enabled;
+                                let tip = tr!("REGENERATE_EFFECT_HINT");
+                                changed |= regenerate(ui, e.params(), inst, enabled, tip);
+                            }
                         });
                     })
                     .body(|ui| {
@@ -276,10 +289,12 @@ fn stack_ui(
         && full.contains(p.x)
         && (first.top() - DROP_MARGIN..=last.bottom() + DROP_MARGIN).contains(&p.y)
     {
-        let to = blocks.iter().filter(|r| r.center().y < p.y).count();
+        // The gap in the list shown, and where it is in the stack, shown reversed.
+        let gap = blocks.iter().filter(|r| r.center().y < p.y).count();
+        let to = blocks.len() - gap;
         // Next to itself nothing moves: no line.
         if to != d.index && to != d.index + 1 {
-            let y = match to {
+            let y = match gap {
                 0 => first.top(),
                 t if t == blocks.len() => last.bottom(),
                 t => (blocks[t - 1].bottom() + blocks[t].top()) / 2.0,
@@ -293,14 +308,54 @@ fn stack_ui(
         }
     }
 
+    // A removal waits for confirmation (a misclick on the trash is quick): the effect's
+    // index and id are kept here meanwhile, per layer.
+    let confirm_id = egui::Id::unique(("confirm_remove_effect", layer_id));
     if let Some(i) = remove {
-        stack.remove(i);
-        changed = true;
+        let pending = (i, stack[i].effect.clone());
+        ui.data_mut(|d| d.insert_temp(confirm_id, pending));
+    }
+    if let Some((i, effect_id)) = ui.data(|d| d.get_temp::<(usize, String)>(confirm_id)) {
+        match stack.get(i).filter(|inst| inst.effect == effect_id) {
+            Some(inst) => {
+                let name = registry()
+                    .get(&inst.effect)
+                    .map_or_else(|| missing_name(inst).to_owned(), |e| e.name().to_owned());
+                let (ok, cancel, close) = confirm_remove_dialog(ui.ctx(), &name);
+                if ok || cancel || close {
+                    ui.data_mut(|d| d.remove::<(usize, String)>(confirm_id));
+                }
+                if ok {
+                    stack.remove(i);
+                    changed = true;
+                }
+            }
+            // The stack changed meanwhile (undo, another layer shown): nothing to ask.
+            None => ui.data_mut(|d| d.remove::<(usize, String)>(confirm_id)),
+        }
     }
     if let Some((from, to)) = drop {
         changed |= move_effect(stack, from, to);
     }
     changed
+}
+
+/// Asks whether to remove the effect `name`. Returns (remove, cancel, closed otherwise).
+fn confirm_remove_dialog(ctx: &egui::Context, name: &str) -> (bool, bool, bool) {
+    let mut answer = (false, false);
+    let response = crate::app::dialog(ctx, "confirm_remove_effect").show(ctx, |ui| {
+        ui.set_max_width(420.0);
+        ui.strong(tr!("CONFIRM_REMOVE_EFFECT", name = name));
+        ui.add_space(8.0);
+        answer = crate::app::dialog_button_row(ui, |ui| {
+            let ok = ui
+                .add(crate::app::danger_button(tr!("REMOVE_EFFECT_OK")))
+                .clicked();
+            let cancel = ui.button(tr!("CANCEL")).clicked();
+            (ok, cancel)
+        });
+    });
+    (answer.0, answer.1, response.should_close())
 }
 
 /// Controls for an effect's parameters. Returns true if one changed.
@@ -318,12 +373,12 @@ fn params_ui(
         effect.plugin().is_none(),
         inst,
         px_mm,
-        false,
     )
 }
 
 /// Controls for the parameters `specs` of an effect or generator, `builtin` or from a
-/// plugin. Returns true if one changed.
+/// plugin, but for the seeds: their regenerate button is in the effect's header or next
+/// to the generator menu (`regenerate`). Returns true if one changed.
 fn params_grid(
     ui: &mut Ui,
     ui_key: (u64, usize),
@@ -331,33 +386,92 @@ fn params_grid(
     builtin: bool,
     inst: &mut EffectInstance,
     px_mm: Option<(f32, &str)>,
-    hide_seed: bool,
 ) -> bool {
     if specs.is_empty() {
         return false;
     }
+    let shown: Vec<&ParamSpec> = specs.iter().filter(|s| s.seed_range().is_none()).collect();
+    // The controls start at the same x in every grid, so they line up across groups: the
+    // labels' column is as wide as the widest label, a grouped one counting its indent.
+    let font = egui::TextStyle::Body.resolve(ui.style());
+    let indent = ui.spacing().indent;
+    let label_w = shown
+        .iter()
+        .map(|s| {
+            let text = label_text(builtin, &s.label).to_owned();
+            let w = ui
+                .painter()
+                .layout_no_wrap(text, font.clone(), egui::Color32::PLACEHOLDER)
+                .size()
+                .x;
+            if s.group.is_some() { w + indent } else { w }
+        })
+        .fold(0.0, f32::max);
+    let mut changed = false;
+    for (b, (group, rows)) in param_blocks(&shown).into_iter().enumerate() {
+        let grid_key = (ui_key, b);
+        match group {
+            None => {
+                changed |= param_rows(ui, grid_key, specs, &rows, builtin, inst, px_mm, label_w)
+            }
+            Some(name) => {
+                let id = ui.make_persistent_id(("effect_group", ui_key, name));
+                let w = label_w - indent;
+                CollapsingState::load_with_default_open(ui.ctx(), id, true)
+                    .show_header(ui, |ui| ui.weak(label_text(builtin, name)))
+                    .body(|ui| {
+                        changed |= param_rows(ui, grid_key, specs, &rows, builtin, inst, px_mm, w);
+                    });
+            }
+        }
+    }
+    changed
+}
+
+/// The parameters `shown` in the order they come, as blocks: runs of ungrouped ones, and
+/// each group, with all its parameters, where its first one is.
+fn param_blocks<'a>(shown: &[&'a ParamSpec]) -> Vec<(Option<&'a str>, Vec<&'a ParamSpec>)> {
+    let mut blocks: Vec<(Option<&str>, Vec<&ParamSpec>)> = Vec::new();
+    for &s in shown {
+        let group = s.group.as_deref();
+        let i = match group {
+            None => blocks
+                .len()
+                .checked_sub(1)
+                .filter(|&i| blocks[i].0.is_none()),
+            Some(_) => blocks.iter().position(|(g, _)| *g == group),
+        };
+        match i {
+            Some(i) => blocks[i].1.push(s),
+            None => blocks.push((group, vec![s])),
+        }
+    }
+    blocks
+}
+
+/// A grid of the parameters `rows` of `specs`, its labels' column `label_w` wide.
+/// Returns true if one changed.
+#[allow(clippy::too_many_arguments)]
+fn param_rows(
+    ui: &mut Ui,
+    grid_key: ((u64, usize), usize),
+    specs: &[ParamSpec],
+    rows: &[&ParamSpec],
+    builtin: bool,
+    inst: &mut EffectInstance,
+    px_mm: Option<(f32, &str)>,
+    label_w: f32,
+) -> bool {
+    let ui_key = grid_key.0;
     let mut changed = false;
     // Built-in labels are translated; plugins' are shown as they give them.
-    egui::Grid::new(("effect_params", ui_key))
+    egui::Grid::new(("effect_params", grid_key))
         .num_columns(2)
         .spacing([8.0, 4.0])
+        .min_col_width(label_w.max(0.0))
         .show(ui, |ui| {
-            for spec in specs
-                .iter()
-                .filter(|s| !(hide_seed && s.seed_range().is_some()))
-            {
+            for &spec in rows {
                 let params = Params::new(specs, &inst.params);
-                // An effect's "seed" is a regenerate button, without a label.
-                if let Some((min, max)) = spec.seed_range() {
-                    ui.label("");
-                    if regenerate_icon(ui, tr!("REGENERATE_EFFECT_HINT")).clicked() {
-                        let v = random_seed(min, max, Some(params.i32(&spec.id)));
-                        inst.params.insert(spec.id.clone(), Value::from(v));
-                        changed = true;
-                    }
-                    ui.end_row();
-                    continue;
-                }
                 ui.label(label_text(builtin, &spec.label));
                 if let Some(v) =
                     param_ui(ui, ui_key, spec, builtin, &params, &mut inst.links, px_mm)
@@ -426,44 +540,71 @@ pub fn generator_menu(ui: &mut Ui, key: u64, inst: &mut EffectInstance) -> bool 
     }
 }
 
-/// A circular-arrow icon button with tooltip `tip`.
-fn regenerate_icon(ui: &mut Ui, tip: &str) -> egui::Response {
+/// A magic wand icon button with tooltip `tip`: a new random result, with the same
+/// settings.
+fn regenerate_icon(ui: &mut Ui, enabled: bool, tip: &str) -> egui::Response {
     let size = ui.spacing().interact_size.y;
-    layers::flat_button(ui, vec2(size, size), true, tip, |p, rect, color| {
-        let (c, radius) = (rect.center(), size * 0.28);
+    layers::flat_button(ui, vec2(size, size), enabled, tip, |p, rect, color| {
+        let c = rect.center();
+        let at = |x: f32, y: f32| c + size * vec2(x, y);
         let stroke = Stroke::new(crate::ui::tokens::STROKE, color);
-        // Most of a circle, open at the top right, with an arrowhead at its end.
-        let at = |a: f32| c + radius * vec2(a.cos(), a.sin());
-        let (start, end) = (-0.25 * std::f32::consts::PI, 1.45 * std::f32::consts::PI);
-        let points: Vec<_> = (0..=24)
-            .map(|i| at(start + (end - start) * i as f32 / 24.0))
+        // The wand, from the bottom left, with a lighter tip under the star.
+        p.line_segment([at(-0.3, 0.3), at(0.02, -0.02)], Stroke::new(2.4, color));
+        p.line_segment([at(0.02, -0.02), at(0.1, -0.1)], stroke);
+        // A four-pointed star at its tip...
+        let star = at(0.2, -0.2);
+        let (outer, inner) = (size * 0.15, size * 0.04);
+        let points = (0..WAND_STAR_POINTS)
+            .map(|i| {
+                let a = i as f32 * std::f32::consts::TAU / WAND_STAR_POINTS as f32;
+                let r = if i % 2 == 0 { outer } else { inner };
+                star + r * vec2(a.sin(), -a.cos())
+            })
             .collect();
-        p.add(egui::Shape::line(points, stroke));
-        let tip = at(end);
-        let head = radius * 0.7;
-        p.line_segment([tip, tip + vec2(-head, -head * 0.15)], stroke);
-        p.line_segment([tip, tip + vec2(head * 0.15, head)], stroke);
+        p.add(egui::Shape::closed_line(points, stroke));
+        // ...and two sparkles.
+        for (x, y, r) in [(-0.12, -0.28, 0.06), (0.3, 0.1, 0.05)] {
+            let (s, r) = (at(x, y), size * r);
+            p.line_segment([s - vec2(r, 0.0), s + vec2(r, 0.0)], stroke);
+            p.line_segment([s - vec2(0.0, r), s + vec2(0.0, r)], stroke);
+        }
     })
 }
 
-/// A circular-arrow button giving `inst` a new random seed, for generators that have
+/// The points of the wand's star, around it: its tips and the corners between them.
+pub(crate) const WAND_STAR_POINTS: usize = 8;
+
+/// A magic wand button giving `inst` a new random seed, for generators that have
 /// one. Returns true when clicked.
 pub fn regenerate_button(ui: &mut Ui, inst: &mut EffectInstance) -> bool {
     let Some(g) = registry().generator(&inst.effect) else {
         return false;
     };
-    let Some((spec, (min, max))) = g.params().iter().find_map(|s| Some((s, s.seed_range()?)))
-    else {
-        return false;
-    };
-    if !regenerate_icon(ui, tr!("REGENERATE_FILL_HINT")).clicked() {
+    regenerate(ui, g.params(), inst, true, tr!("REGENERATE_FILL_HINT"))
+}
+
+/// A magic wand button giving each seed of `specs` (see [`ParamSpec::seed_range`])
+/// a new random value in `inst`, with tooltip `tip`; nothing when there is none.
+/// Returns true when clicked.
+fn regenerate(
+    ui: &mut Ui,
+    specs: &[ParamSpec],
+    inst: &mut EffectInstance,
+    enabled: bool,
+    tip: &str,
+) -> bool {
+    let seeds: Vec<_> = specs
+        .iter()
+        .filter_map(|s| Some((s, s.seed_range()?)))
+        .collect();
+    if seeds.is_empty() || !regenerate_icon(ui, enabled, tip).clicked() {
         return false;
     }
-    let old = Params::new(g.params(), &inst.params).i32(&spec.id);
-    inst.params.insert(
-        spec.id.clone(),
-        Value::from(random_seed(min, max, Some(old))),
-    );
+    for (spec, (min, max)) in seeds {
+        let old = Params::new(specs, &inst.params).i32(&spec.id);
+        let new = random_seed(min, max, Some(old));
+        inst.params.insert(spec.id.clone(), Value::from(new));
+    }
     true
 }
 
@@ -480,7 +621,6 @@ pub fn generator_params(ui: &mut Ui, key: u64, inst: &mut EffectInstance) -> boo
         g.plugin().is_none(),
         inst,
         None,
-        true,
     )
 }
 
@@ -939,7 +1079,7 @@ mod tests {
     }
 
     #[test]
-    fn an_effect_seed_is_a_regenerate_button() {
+    fn an_effect_seed_is_a_regenerate_button_not_a_setting() {
         let specs = [
             ParamSpec::int("amount", "Amount", 0, 100, 20),
             ParamSpec::int("variation", "Variation", 0, 9999, 0).with_role(Role::Seed),
@@ -961,7 +1101,8 @@ mod tests {
             };
             let mut changed = false;
             let mut out = ctx.run_ui(input, |ui| {
-                changed = params_grid(ui, (1, 0), &specs, false, inst, None, false);
+                changed = params_grid(ui, (1, 0), &specs, false, inst, None);
+                changed |= regenerate(ui, &specs, inst, true, "");
             });
             out.textures_delta.clear();
             let texts: Vec<String> = out
@@ -973,7 +1114,7 @@ mod tests {
                 })
                 .collect();
             let arrow = out.shapes.iter().find_map(|c| match &c.shape {
-                egui::Shape::Path(p) if p.points.len() == 25 => {
+                egui::Shape::Path(p) if p.closed && p.points.len() == WAND_STAR_POINTS => {
                     Some(egui::Rect::from_points(&p.points).center())
                 }
                 _ => None,
@@ -983,7 +1124,7 @@ mod tests {
         let (texts, arrow, _) = frame(&mut inst, vec![]);
         assert!(texts.iter().any(|t| t == "Amount"), "{texts:?}");
         assert!(!texts.iter().any(|t| t == "Variation"), "{texts:?}");
-        let arrow = arrow.expect("the regenerate arrow");
+        let arrow = arrow.expect("the magic wand");
         let button = |pos, pressed| egui::Event::PointerButton {
             pos,
             button: egui::PointerButton::Primary,
@@ -1002,6 +1143,112 @@ mod tests {
         assert_ne!(before, after);
         assert!(click(&mut inst));
         assert_ne!(seed(&inst), after);
+    }
+
+    /// `spec` in the group `name`.
+    fn grouped(spec: ParamSpec, name: &str) -> ParamSpec {
+        ParamSpec {
+            group: Some(name.into()),
+            ..spec
+        }
+    }
+
+    #[test]
+    fn grouped_params_are_together_where_the_first_is() {
+        let specs = [
+            ParamSpec::int("a", "A", 0, 9, 0),
+            grouped(ParamSpec::int("x", "X", 0, 9, 0), "G"),
+            ParamSpec::int("b", "B", 0, 9, 0),
+            grouped(ParamSpec::int("y", "Y", 0, 9, 0), "G"),
+            ParamSpec::int("c", "C", 0, 9, 0),
+            grouped(ParamSpec::int("z", "Z", 0, 9, 0), "H"),
+        ];
+        let shown: Vec<_> = specs.iter().collect();
+        let blocks: Vec<(Option<&str>, Vec<&str>)> = param_blocks(&shown)
+            .into_iter()
+            .map(|(g, rows)| (g, rows.iter().map(|s| s.id.as_str()).collect()))
+            .collect();
+        assert_eq!(
+            blocks,
+            [
+                (None, vec!["a"]),
+                (Some("G"), vec!["x", "y"]),
+                (None, vec!["b", "c"]),
+                (Some("H"), vec!["z"]),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_group_folds_its_params_away() {
+        let specs = [
+            ParamSpec::int("amount", "Amount", 0, 100, 20),
+            grouped(ParamSpec::int("size", "Grain size", 0, 9, 1), "Grain"),
+        ];
+        let mut inst = stack(&["plugin.grain"]).remove(0);
+        let ctx = egui::Context::default();
+        let mut time = 0.0;
+        // One frame; returns its texts and where "Grain" is.
+        let mut frame = |inst: &mut EffectInstance, events: Vec<egui::Event>| {
+            time += 0.1;
+            let input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    vec2(400.0, 300.0),
+                )),
+                time: Some(time),
+                events,
+                ..Default::default()
+            };
+            let mut out = ctx.run_ui(input, |ui| {
+                params_grid(ui, (1, 0), &specs, false, inst, None);
+            });
+            out.textures_delta.clear();
+            let mut header = None;
+            let texts: Vec<String> = out
+                .shapes
+                .iter()
+                .filter_map(|c| match &c.shape {
+                    egui::Shape::Text(t) => {
+                        let text = t.galley.text().to_owned();
+                        if text == "Grain" {
+                            header = Some(t.visual_bounding_rect().center());
+                        }
+                        Some(text)
+                    }
+                    _ => None,
+                })
+                .collect();
+            (texts, header)
+        };
+        let (texts, header) = frame(&mut inst, vec![]);
+        assert!(
+            texts.iter().any(|t| t == "Grain size"),
+            "open at first: {texts:?}"
+        );
+        // The fold arrow is at the left of the title.
+        let arrow = header.expect("the group's title") - vec2(30.0, 0.0);
+        let arrow = egui::pos2(arrow.x.max(6.0), arrow.y);
+        let button = |pos, pressed| egui::Event::PointerButton {
+            pos,
+            button: egui::PointerButton::Primary,
+            pressed,
+            modifiers: Default::default(),
+        };
+        frame(&mut inst, vec![egui::Event::PointerMoved(arrow)]);
+        frame(&mut inst, vec![button(arrow, true)]);
+        frame(&mut inst, vec![button(arrow, false)]);
+        // Let the folding animation end.
+        for _ in 0..10 {
+            frame(&mut inst, vec![]);
+        }
+        let (texts, _) = frame(&mut inst, vec![]);
+        assert!(texts.iter().any(|t| t == "Amount"), "{texts:?}");
+        assert!(texts.iter().any(|t| t == "Grain"), "{texts:?}");
+        assert!(
+            !texts.iter().any(|t| t == "Grain size"),
+            "folded: {texts:?}"
+        );
     }
 
     #[test]

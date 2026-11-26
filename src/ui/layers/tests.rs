@@ -246,6 +246,13 @@ fn properties_and_effects_fold_from_their_titles() {
         h.frame(vec![]);
     }
     assert!(!shown(&mut h, "Opacity"), "General folded");
+    // The image's own section comes after General, not inside it.
+    let res = |h: &mut Harness| {
+        h.frame(vec![])
+            .iter()
+            .any(|(t, _)| t.starts_with("Print resolution"))
+    };
+    assert!(res(&mut h), "Image still open");
     assert!(
         shown(
             &mut h,
@@ -436,22 +443,45 @@ fn panel_adds_and_removes_effects() {
     h.drag(from, to);
     assert_eq!(ids(&h), ["builtin.invert", "builtin.blur"]);
 
-    // Drag Invert's handle onto the lower half of the blur (its Radius row).
-    let from = h.handle("Invert");
-    let to = h.label("Radius");
-    h.drag(from, to);
-    assert_eq!(ids(&h), ["builtin.blur", "builtin.invert"]);
-    // And back, released in the space just above the list.
+    // Shown as layers are, the last applied at the top: the blur, added last, is above.
+    assert!(h.handle("Gaussian blur").y < h.handle("Invert").y);
+    // Drag Invert's handle into the space just above the list: applied last.
     let from = h.handle("Invert");
     let to = h.handle("Gaussian blur") - vec2(0.0, 14.0);
     h.drag(from, to);
+    assert_eq!(ids(&h), ["builtin.blur", "builtin.invert"]);
+    assert!(h.handle("Invert").y < h.handle("Gaussian blur").y);
+    // And back, onto the lower half of the blur (its Radius row): applied first.
+    let from = h.handle("Invert");
+    let to = h.label("Radius");
+    h.drag(from, to);
     assert_eq!(ids(&h), ["builtin.invert", "builtin.blur"]);
 
-    // Remove from the right-click menu; the blur stays.
+    // Remove from the right-click menu, after confirming; Cancel keeps it.
     let p = h.label("Invert");
     h.secondary_click(p);
     let p = h.label("Remove");
     h.click(p);
+    let p = h.label("Cancel");
+    assert!(
+        h.frame(vec![])
+            .iter()
+            .any(|(t, _)| t == "Remove the effect Invert?")
+    );
+    h.click(p);
+    assert_eq!(ids(&h), ["builtin.invert", "builtin.blur"]);
+    let p = h.label("Invert");
+    h.secondary_click(p);
+    let p = h.label("Remove");
+    h.click(p);
+    assert_eq!(
+        ids(&h),
+        ["builtin.invert", "builtin.blur"],
+        "not before confirming"
+    );
+    let p = h.label("Remove");
+    h.click(p);
+    // The blur stays.
     assert_eq!(ids(&h), ["builtin.blur"]);
 }
 

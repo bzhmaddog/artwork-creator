@@ -903,8 +903,9 @@ look there, so `make run` finds the `plugins` folder of the repository.
   [artwork-creator-plugins](https://github.com/bzhmaddog/artwork-creator-plugins), is
   there to begin with, its list read from that repository's GitHub Pages site
   (`https://bzhmaddog.github.io/artwork-creator-plugins/plugins.json`). Earlier versions
-  read it from the repository's main branch: that address, if saved, is read as the new
-  one, and the plugins installed from it stay where they are, under the same ids; **Add repository** adds another by the address of its list, which
+  read it from the repository's main branch: that address, if saved or typed, is read as
+  the new one, and the plugins installed from it stay where they are, under the same ids.
+  **Add repository** adds another by the address of its list, which
   is downloaded and checked first (a list that can't be read or is not valid is not
   added, and the window says why). **Remove** takes a repository out, the official one
   too (add its address again to get it back); the plugins installed from it stay

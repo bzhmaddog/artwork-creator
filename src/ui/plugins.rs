@@ -455,7 +455,9 @@ impl Manager {
 
     /// Adds the repository typed in, once its list is read.
     fn add_repository(&mut self) {
-        let url = self.new_repo.trim().to_owned();
+        // The official repository's former address is read as its current one, so that it
+        // can't be listed twice.
+        let url = repository::current(self.new_repo.trim()).to_owned();
         self.add_error = None;
         if url.is_empty() {
             return;

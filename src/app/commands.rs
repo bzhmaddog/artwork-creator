@@ -175,6 +175,10 @@ impl ArtworkApp {
                 if ui.add(entry).clicked() {
                     self.about = true;
                 }
+                // A change of channel looks again right away.
+                if version_check::help_menu(ui, &mut self.update_channel) {
+                    self.version_check = version_check::start(self.update_channel);
+                }
             });
         });
     }

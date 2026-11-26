@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
 """Fills in the download page (pages/download.html) from the project's GitHub releases.
 
-Usage: download-page.py [--version] < RELEASES_JSON > download.html (or version.json)
+Usage: download-page.py [--version-files DIR] < RELEASES_JSON > download.html
 
 Reads the GitHub API's list of releases on stdin (gh api --paginate --slurp
 repos/OWNER/REPO/releases | jq 'add', or curl .../releases?per_page=100) and writes the
 page to stdout. The template is the repository's pages/download.html. The newest published
 release goes in the template's <!-- LATEST --> marker, one card per platform; the others
 in <!-- OLDER -->, one row each. Drafts are left out, as are files the page doesn't know.
-With --version, writes instead the version of the newest release that isn't a pre-release,
-as {"version": "1.2.0"} (nothing when there is none): what the app reads to tell about a
-new version (src/app/version_check.rs). It writes no file of its own, the output going
-where the caller redirects it. Run by .github/workflows/pages.yml.
+With --version-files, also writes into DIR the version files the app reads to tell about a
+new version (src/app/version_check.rs), as {"version": "1.2.0"}: version.json, of the
+newest release that isn't a pre-release (the stable update channel), and version-dev.json,
+of the newest release (the dev channel); each only when there is such a release, the app
+saying nothing without it. Run by .github/workflows/pages.yml.
 """
 
 import argparse
@@ -110,20 +111,35 @@ def version_json(r):
     return json.dumps({"version": r["tag_name"].lstrip("v")}) + "\n"
 
 
+# The version files, by name, and whether their update channel tells about pre-releases.
+VERSION_FILES = {"version.json": False, "version-dev.json": True}
+
+
+def newest(releases, prereleases):
+    """The first of `releases` (newest first) that its channel tells about, or None."""
+    return next((r for r in releases if prereleases or not r.get("prerelease")), None)
+
+
+def write_version_files(releases, folder):
+    for name, prereleases in VERSION_FILES.items():
+        r = newest(releases, prereleases)
+        if r:
+            (folder / name).write_text(version_json(r), encoding="utf-8")
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Fills in the download page from the releases.")
     parser.add_argument(
-        "--version", action="store_true", help="print version.json, of the latest stable release, instead"
+        "--version-files",
+        type=Path,
+        metavar="DIR",
+        help="also write version.json (latest stable release) and version-dev.json (latest release) into DIR",
     )
     args = parser.parse_args(argv)
     releases = [r for r in json.load(sys.stdin) if not r.get("draft") and files(r)]
     releases.sort(key=lambda r: r.get("published_at") or "", reverse=True)
-    if args.version:
-        # The app's update check is for the stable version: never a pre-release.
-        stable = [r for r in releases if not r.get("prerelease")]
-        if stable:
-            sys.stdout.write(version_json(stable[0]))
-        return
+    if args.version_files:
+        write_version_files(releases, args.version_files)
     page = TEMPLATE.read_text(encoding="utf-8")
     if releases:
         latest = latest_html(releases[0])

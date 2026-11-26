@@ -181,9 +181,12 @@ pub struct ArtworkApp {
     /// The plugin manager was opened at the start for Python plugins waiting to be
     /// allowed (once).
     plugins_offered: bool,
-    /// Looking for new plugin versions, from the start until it's done.
-    /// Looking for a newer version of the app, from the start until it's done.
+    /// Which new versions of the app to tell about (Help > Update channel).
+    update_channel: version_check::Channel,
+    /// Looking for a newer version of the app, from the start (or a change of channel)
+    /// until it's done.
     version_check: Option<JoinHandle<Option<String>>>,
+    /// Looking for new plugin versions, from the start until it's done.
     plugin_check:
         Option<std::thread::JoinHandle<(crate::render::effects::repository::Catalog, usize)>>,
     /// New plugin versions found at startup, to ask about: the repositories' lists, and
@@ -305,6 +308,7 @@ impl ArtworkApp {
         set_interaction(&cc.egui_ctx);
         crate::ui::theme::detect_in_background(&cc.egui_ctx);
         let language = i18n::Preference::load(cc.storage);
+        let update_channel = version_check::Channel::load(cc.storage);
         i18n::set(language.language());
         let templates_dir = template::templates_dir();
         let user_templates_dir = template::user_templates_dir();
@@ -378,7 +382,8 @@ impl ArtworkApp {
             shortcuts_editor: None,
             plugin_manager: None,
             plugins_offered: false,
-            version_check: version_check::start(),
+            update_channel,
+            version_check: version_check::start(update_channel),
             plugin_check: crate::ui::plugins::check_updates(),
             plugin_updates: None,
             toasts,
@@ -604,6 +609,7 @@ impl eframe::App for ArtworkApp {
     fn save(&mut self, storage: &mut dyn eframe::Storage) {
         self.recent.save(storage);
         self.language.save(storage);
+        self.update_channel.save(storage);
         self.panels.save(storage);
         self.shortcuts.save(storage);
         self.save_settings(storage);

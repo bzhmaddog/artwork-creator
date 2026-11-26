@@ -744,13 +744,14 @@ impl Registry {
         if self.files().iter().any(|f| f.path == path) {
             return false;
         }
-        let Some(slot) = self.installed.iter().find(|s| s.get().is_none()) else {
-            return false;
-        };
-        // Installed again after it was uninstalled.
+        // Installed again after it was uninstalled: listed again, even when it is only
+        // loaded at the next start.
         let mut removed = self.removed.write().unwrap_or_else(|e| e.into_inner());
         removed.files.retain(|f| f != path);
         drop(removed);
+        let Some(slot) = self.installed.iter().find(|s| s.get().is_none()) else {
+            return false;
+        };
         slot.set(self.load(path)).is_ok()
     }
 

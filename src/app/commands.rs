@@ -438,12 +438,12 @@ impl ArtworkApp {
 
     /// New plugin versions found at startup: a toast says so, its Review opening the
     /// plugin manager on its Installed tab, the new versions highlighted. A plugin manager
-    /// already open just shows them.
+    /// already open just shows them. Waits for `offer_plugins`, which may open one.
     pub(super) fn plugin_updates(&mut self, ctx: &egui::Context) {
         let Some(check) = &self.plugin_check else {
             return;
         };
-        if !check.is_finished() {
+        if !check.is_finished() || !self.plugins_offered {
             ctx.request_repaint_after(std::time::Duration::from_millis(500));
             return;
         }
@@ -495,10 +495,21 @@ impl ArtworkApp {
             if key == PLUGIN_UPDATES_TOAST
                 && let Some((catalog, _)) = self.plugin_updates.take()
             {
-                self.plugin_manager = Some(crate::ui::plugins::Manager::new(Some(catalog)));
+                // One opened since keeps what it is doing.
+                match &mut self.plugin_manager {
+                    Some(manager) => manager.set_catalog(catalog),
+                    None => {
+                        let manager = crate::ui::plugins::Manager::new(Some(catalog));
+                        self.plugin_manager = Some(manager);
+                    }
+                }
             }
+            // Still the open project's template (another may have been opened since),
+            // still not installed.
             if key == project_template::TEMPLATE_INSTALL_TOAST
                 && let Some(id) = self.install_toast.take()
+                && self.doc.template.as_ref() == Some(&id)
+                && self.installed(&id).is_none()
             {
                 self.install_project_template(&id);
             }

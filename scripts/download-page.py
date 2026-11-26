@@ -1,16 +1,17 @@
 #!/usr/bin/env python3
 """Fills in the download page (pages/download.html) from the project's GitHub releases.
 
-Usage: download-page.py [--version-file version.json] < RELEASES_JSON > download.html
+Usage: download-page.py [--version] < RELEASES_JSON > download.html (or version.json)
 
 Reads the GitHub API's list of releases on stdin (gh api --paginate --slurp
 repos/OWNER/REPO/releases | jq 'add', or curl .../releases?per_page=100) and writes the
 page to stdout. The template is the repository's pages/download.html. The newest published
 release goes in the template's <!-- LATEST --> marker, one card per platform; the others
 in <!-- OLDER -->, one row each. Drafts are left out, as are files the page doesn't know.
-With --version-file (a path under the current directory), also writes that release's version there, as {"version": "1.2.0"}:
-what the app reads to tell about a new version (src/app/version_check.rs). Run by
-.github/workflows/pages.yml.
+With --version, writes instead the version of the newest release that isn't a pre-release,
+as {"version": "1.2.0"} (nothing when there is none): what the app reads to tell about a
+new version (src/app/version_check.rs). It writes no file of its own, the output going
+where the caller redirects it. Run by .github/workflows/pages.yml.
 """
 
 import argparse
@@ -111,26 +112,25 @@ def version_json(r):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Fills in the download page from the releases.")
-    parser.add_argument("--version-file", type=Path, help="where to write the latest version")
+    parser.add_argument(
+        "--version", action="store_true", help="print version.json, of the latest stable release, instead"
+    )
     args = parser.parse_args(argv)
-    if args.version_file:
-        # Only under the current directory: the path comes from the command line.
-        here = Path.cwd().resolve()
-        args.version_file = (here / args.version_file).resolve()
-        if not args.version_file.is_relative_to(here):
-            parser.error("--version-file must be under the current directory")
     releases = [r for r in json.load(sys.stdin) if not r.get("draft") and files(r)]
     releases.sort(key=lambda r: r.get("published_at") or "", reverse=True)
+    if args.version:
+        # The app's update check is for the stable version: never a pre-release.
+        stable = [r for r in releases if not r.get("prerelease")]
+        if stable:
+            sys.stdout.write(version_json(stable[0]))
+        return
     page = TEMPLATE.read_text(encoding="utf-8")
     if releases:
         latest = latest_html(releases[0])
-        if args.version_file:
-            args.version_file.write_text(version_json(releases[0]), encoding="utf-8")
     else:
         latest = '<p class="muted">No release yet.</p>'
     page = page.replace("<!-- LATEST -->", latest).replace("<!-- OLDER -->", older_html(releases[1:]))
     sys.stdout.write(page)
-
 
 if __name__ == "__main__":
     main()

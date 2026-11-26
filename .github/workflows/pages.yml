@@ -57,8 +57,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh api --paginate --slurp "repos/${{ github.repository }}/releases" | jq 'add // []' \
-            | python3 -I scripts/download-page.py --version-file _site/version.json > _site/download.html
+          releases="$RUNNER_TEMP/releases.json"
+          gh api --paginate --slurp "repos/${{ github.repository }}/releases" | jq 'add // []' > "$releases"
+          python3 -I scripts/download-page.py < "$releases" > _site/download.html
+          # version.json only when there is a stable release: the app says nothing without it.
+          version=$(python3 -I scripts/download-page.py --version < "$releases")
+          if [ -n "$version" ]; then printf '%s\n' "$version" > _site/version.json; fi
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site

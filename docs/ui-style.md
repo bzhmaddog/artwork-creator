@@ -107,7 +107,10 @@ the image's test (`ui_tokens` in `src/ui/gallery.rs`). Values used by only one w
   the status bar, newest at the bottom, with its intent's color bar and icon (Info blue,
   Success green, Warning amber, Error red), a bold title, its text, and its buttons at
   the bottom right. It goes away after 8 s (`toast::SECONDS`) or when one of its buttons
-  is clicked; the pointer over it keeps it up. No "Not now" button: letting it go is that.
+  or its close button (a cross at the right of its title) is clicked; the pointer over it
+  keeps it up. An Error toast (`Intent::lasts`) doesn't go away by itself: only its close
+  button or one of its buttons takes it away. No "Not now" button: letting it go, or
+  closing it, is that.
 
 ## Checking the look
 

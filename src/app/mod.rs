@@ -839,7 +839,8 @@ impl eframe::App for ArtworkApp {
             && let Some(e) = self.autosave.tick(&ctx, project, !finished)
         {
             let title = tr!("AUTOSAVE_FAILED");
-            (self.toasts).push(Toast::new("autosave_failed", Intent::Warning, title, &e));
+            let toast = Toast::new("autosave_failed", Intent::Error, title, &e);
+            self.toasts.push(toast);
         }
     }
 }

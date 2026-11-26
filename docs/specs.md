@@ -108,7 +108,8 @@ with unsaved changes, when their recovery copy was made ("Recovery copy just now
 Notices that don't need an answer appear as toasts at the bottom right of the window,
 above the status bar: a card with a title, a text and sometimes a button, colored by what
 it says (info, success, warning, error). A toast goes away after a few seconds, unless
-the pointer is over it, or when its button is clicked. Toasts say: a new version of the app
+the pointer is over it, or when its button or its close button (✕) is clicked. An error
+(a failed autosave) stays up until it is closed. Toasts say: a new version of the app
 (Download, which opens the download page), new plugin versions (Review), a project's template not installed (Install), an export or a printing
 canceled, a failed autosave, a project saved with image files missing, plugin settings
 saved by an older version, a template reference that couldn't be read, no templates

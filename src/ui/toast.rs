@@ -1,10 +1,12 @@
 //! Toasts: short notices in a card at the bottom right of the main window, above the
 //! status bar, newest at the bottom. Each has an intent (its color and icon), a title, a
 //! text and maybe buttons (its calls to action). One goes away after [`SECONDS`], or when
-//! one of its buttons is clicked; the pointer over it keeps it up.
+//! one of its buttons or its close button is clicked; the pointer over it keeps it up. An
+//! error stays up until it is closed.
 
 use egui::{Color32, Frame, Margin, Pos2, Rect, Sense, Stroke, Ui, vec2};
 
+use crate::i18n::tr;
 use crate::ui::callout::{self, Tone};
 
 /// How long a toast stays up, in seconds, from when it was shown or the pointer left it.
@@ -18,7 +20,7 @@ const BAR: f32 = 3.0;
 
 /// What a toast says, which sets its color and icon.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-#[cfg_attr(not(test), allow(dead_code))] // Success and Error not used yet; the gallery shows all.
+#[cfg_attr(not(test), allow(dead_code))] // Success not used yet; the gallery shows all.
 pub enum Intent {
     /// Something to know: blue, an "i" in a circle.
     Info,
@@ -26,11 +28,16 @@ pub enum Intent {
     Success,
     /// Something to look out for: amber, a triangle with "!".
     Warning,
-    /// Something that failed: red, a triangle with "!".
+    /// Something that failed: red, a triangle with "!". Stays up until closed.
     Error,
 }
 
 impl Intent {
+    /// Whether its toasts stay up until closed, instead of going away after [`SECONDS`].
+    pub fn lasts(self) -> bool {
+        self == Intent::Error
+    }
+
     pub fn color(self, visuals: &egui::Visuals) -> Color32 {
         match self {
             Intent::Info => visuals.hyperlink_color,
@@ -122,6 +129,7 @@ impl Toasts {
         }
         let now = ctx.input(|i| i.time);
         let mut clicked = Vec::new();
+        let mut closed = Vec::new();
         let area = egui::Area::new(egui::Id::unique("toasts"))
             .order(egui::Order::Foreground)
             .pivot(egui::Align2::RIGHT_BOTTOM)
@@ -132,17 +140,22 @@ impl Toasts {
             // Top down, the area's bottom at the corner: the newest at the bottom. A
             // bottom-up layout would stretch the cards to the window's height.
             for (toast, until) in &mut self.up {
-                let (r, action) = card(ui, toast);
+                let (r, action, close) = card(ui, toast);
                 if let Some(i) = action {
                     clicked.push((toast.key, i));
                 }
-                if r.contains_pointer() || until.is_none() {
+                if close {
+                    closed.push(toast.key);
+                }
+                if !toast.intent.lasts() && (r.contains_pointer() || until.is_none()) {
                     *until = Some(now + SECONDS);
                 }
             }
         });
         self.up.retain(|(t, until)| {
-            !clicked.iter().any(|(k, _)| *k == t.key) && until.is_none_or(|u| u > now)
+            !clicked.iter().any(|(k, _)| *k == t.key)
+                && !closed.contains(&t.key)
+                && until.is_none_or(|u| u > now)
         });
         if let Some(next) = self.up.iter().filter_map(|(_, u)| *u).reduce(f64::min) {
             ctx.request_repaint_after(std::time::Duration::from_secs_f64((next - now).max(0.0)));
@@ -152,10 +165,11 @@ impl Toasts {
 }
 
 /// A toast's card: the accent bar and icon of its intent, its title and text, and its
-/// buttons at the bottom right; which one was clicked.
-pub fn card(ui: &mut Ui, toast: &Toast) -> (egui::Response, Option<usize>) {
+/// buttons at the bottom right, its close button at the top right; which button was
+/// clicked, and whether the close button was.
+pub fn card(ui: &mut Ui, toast: &Toast) -> (egui::Response, Option<usize>, bool) {
     let color = toast.intent.color(ui.visuals());
-    let mut action = None;
+    let (mut action, mut close) = (None, false);
     let frame = Frame::popup(ui.style()).inner_margin(Margin {
         left: BAR as i8 + 12,
         right: 12,
@@ -171,7 +185,13 @@ pub fn card(ui: &mut Ui, toast: &Toast) -> (egui::Response, Option<usize>) {
             let rect = Rect::from_center_size(rect.center(), vec2(16.0, 16.0));
             paint_icon(ui, rect, toast.intent, color);
             ui.vertical(|ui| {
-                ui.strong(&toast.title);
+                ui.horizontal(|ui| {
+                    ui.strong(&toast.title);
+                    let right = egui::Layout::right_to_left(egui::Align::Center);
+                    ui.with_layout(right, |ui| {
+                        close = crate::ui::panels::cross_button(ui, tr!("CLOSE")).clicked();
+                    });
+                });
                 if !toast.text.is_empty() {
                     ui.add(egui::Label::new(&toast.text).wrap());
                 }
@@ -200,7 +220,7 @@ pub fn card(ui: &mut Ui, toast: &Toast) -> (egui::Response, Option<usize>) {
     };
     let bar = Rect::from_min_max(r.min, egui::pos2(r.left() + BAR, r.bottom()));
     ui.painter().rect_filled(bar, round, color);
-    (inner.response.interact(Sense::hover()), action)
+    (inner.response.interact(Sense::hover()), action, close)
 }
 
 /// The icon of `intent` in `rect`, in `color`.
@@ -349,6 +369,50 @@ mod tests {
         let visuals = egui::Visuals::dark();
         let colors: std::collections::HashSet<_> = intents.map(|i| i.color(&visuals)).into();
         assert_eq!(colors.len(), 4, "one color each");
+    }
+
+    /// Where the close button of the toast whose title is at `title` is.
+    fn cross(title: Rect) -> Pos2 {
+        // The text column is the card's width less the icon's (16) and the gap (10).
+        egui::pos2(title.left() + WIDTH - 26.0 - 6.0, title.center().y)
+    }
+
+    #[test]
+    fn any_toast_closes_with_its_close_button() {
+        let ctx = egui::Context::default();
+        let mut toasts = Toasts::default();
+        toasts.push(toast("a"));
+        let away = egui::pos2(10.0, 10.0);
+        frame(&ctx, &mut toasts, 0.0, away, false);
+        let (_, texts) = frame(&ctx, &mut toasts, 0.1, away, false);
+        let title = texts.iter().find(|(t, _)| t == "Title").unwrap().1;
+        frame(&ctx, &mut toasts, 0.2, cross(title), false);
+        let (clicked, _) = frame(&ctx, &mut toasts, 0.3, cross(title), true);
+        assert!(clicked.is_empty(), "closing is not a call to action");
+        assert!(!toasts.is_up("a"));
+    }
+
+    #[test]
+    fn an_error_toast_stays_until_closed() {
+        assert!(Intent::Error.lasts());
+        assert!(
+            ![Intent::Info, Intent::Success, Intent::Warning]
+                .iter()
+                .any(|i| i.lasts())
+        );
+        let ctx = egui::Context::default();
+        let mut toasts = Toasts::default();
+        toasts.push(Toast::new("a", Intent::Error, "Title", "Text"));
+        let away = egui::pos2(10.0, 10.0);
+        frame(&ctx, &mut toasts, 0.0, away, false);
+        frame(&ctx, &mut toasts, 0.1, away, false);
+        frame(&ctx, &mut toasts, 10.0 * SECONDS, away, false);
+        let (_, texts) = frame(&ctx, &mut toasts, 10.0 * SECONDS, away, false);
+        assert!(toasts.is_up("a"));
+        let title = texts.iter().find(|(t, _)| t == "Title").unwrap().1;
+        frame(&ctx, &mut toasts, 10.0 * SECONDS + 0.1, cross(title), false);
+        frame(&ctx, &mut toasts, 10.0 * SECONDS + 0.2, cross(title), true);
+        assert!(!toasts.is_up("a"));
     }
 
     #[test]

@@ -18,7 +18,7 @@ pub(super) fn text_section(
     section(
         ui,
         "text_props",
-        RichText::new(tr!("TEXT_SECTION")),
+        RichText::new(tr!("TEXT_SECTION")).strong(),
         move |_| open,
         |ui| {
             let Some(t) = layer.text.as_deref_mut() else {

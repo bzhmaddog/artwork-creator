@@ -855,7 +855,7 @@ mod tests {
         click_text(&mut h, "Clouds");
         assert_eq!(generator(&h).effect, "builtin.clouds");
 
-        // The circular arrow: a new variation each click, the slider gone.
+        // The magic wand: a new variation each click, the slider gone.
         let (texts, _) = h.frame(vec![]);
         assert!(!texts.iter().any(|(t, _)| t == "Variation"), "{texts:?}");
         let seed = |h: &Harness| generator(h).params.get("seed").cloned();
@@ -880,12 +880,14 @@ mod tests {
             out.shapes
                 .iter()
                 .find_map(|c| match &c.shape {
-                    egui::Shape::Path(p) if p.points.len() == 25 => {
+                    egui::Shape::Path(p)
+                        if p.closed && p.points.len() == crate::ui::effects::WAND_STAR_POINTS =>
+                    {
                         Some(Rect::from_points(&p.points).center())
                     }
                     _ => None,
                 })
-                .expect("the regenerate arrow")
+                .expect("the magic wand")
         };
         let before = seed(&h);
         assert!(h.click(arrow, egui::PointerButton::Primary));

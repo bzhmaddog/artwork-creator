@@ -44,8 +44,8 @@ the image's test (`ui_tokens` in `src/ui/gallery.rs`). Values used by only one w
 - Every icon button has a tooltip (`on_hover_text`) saying what it does; a command with
   a shortcut shows it there or in its menu entry.
 - A toggle that is off is drawn at 35 % (`layers::icon_color`).
-- A button that deletes or discards something (Delete guide, Delete template, Don't
-  save, Clear guides, Discard a recovery copy) is `app::danger_button`: white text on
+- A button that deletes or discards something (Delete guide, Delete template, Remove
+  effect, Don't save, Clear guides, Discard a recovery copy) is `app::danger_button`: white text on
   red. Menu entries that do so (Remove effect, Clear recent list) stay plain.
 - A square toggle (bold, italic, alignment) is `interact_size.y` high, highlighted with
   `interact_selectable` when on (`properties::style_toggle`).
@@ -80,9 +80,14 @@ the image's test (`ui_tokens` in `src/ui/gallery.rs`). Values used by only one w
   extra buttons at its right, its body not indented. Folding sections inside it (a fill's
   Settings, each effect) indent their body by `spacing.indent`, 8 pt, set app-wide in
   `app::set_interaction`.
+- A scroll bar in a panel (its contents, the layer list) takes room beside what scrolls,
+  only while it is shown, rather than floating over its right edge, where the buttons at
+  the right of the headers and rows are (set for every panel in `Layout::contents`).
 - A plugin's group of effect settings folds under its name in the weak text color, as a
   fill's Settings does; its labels' column is narrower by the indent, so its controls
   line up with the effect's other ones (`params_grid`).
+- A button acting on a whole effect (a plugin effect's magic wand, for a new random result) goes in the
+  effect's header, at the right, left of its trash, not among its settings.
 
 ## Dialogs, menus and notices
 

@@ -1588,7 +1588,13 @@ mod tests {
         let none = texts
             .iter()
             .any(|(t, _)| t.starts_with("No plugins found."));
-        assert_eq!(m.files.len(), registry().files().len());
+        // Not compared with registry() again: tests running alongside install into it.
+        assert!(
+            !m.files
+                .iter()
+                .any(|f| files.iter().any(|s| s.path == f.path)),
+            "the sample's plugins are gone"
+        );
         assert_eq!(none, m.files.is_empty());
         let restart = find(&texts, "Restart").unwrap();
         assert!(matches!(

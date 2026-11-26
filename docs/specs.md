@@ -58,7 +58,9 @@ artwork is clipped to the panel outline and left blank in the holes.
   template…, Open template folder, Check template, Reference…, Compare with source, and
   **Rescan templates** (looks again for templates added, changed or removed on disk);
   **Plugins** submenu: Manage plugins… (see [Plugins](#plugins)).
-- **Help**: About Artwork Creator (version and build date).
+- **Help**: About Artwork Creator (version and build date); Update channel, which new
+  versions of the app to tell about (Stable or Development, see "At startup" below; not in
+  the Microsoft Store package).
 
 Menu entries show their current keyboard shortcut.
 
@@ -949,9 +951,13 @@ look there, so `make run` finds the `plugins` folder of the repository.
   the old one's enabled or disabled state, and is used from the next start (the row shows a
   check mark, "Updated to x.y.z" in its tooltip, and the window offers the restart).
 - **At startup**, the app also looks for a newer version of itself: the latest release's version,
-  which the project's web page publishes in
-  https://bzhmaddog.github.io/artwork-creator-app/version.json with the download page. If
-  it is newer, a toast says so; its **Download** button opens the download page
+  which the project's web page publishes with the download page. **Help > Update channel**
+  chooses which: **Stable** (the default), the latest release that isn't a pre-release, in
+  https://bzhmaddog.github.io/artwork-creator-app/version.json; or **Development
+  (pre-releases too)**, the latest release, in
+  https://bzhmaddog.github.io/artwork-creator-app/version-dev.json. The channel is kept
+  with the app's preferences; changing it looks again right away. If the version is newer,
+  a toast says so; its **Download** button opens the download page
   (https://bzhmaddog.github.io/artwork-creator-app/download.html). Nothing is said when the
   file can't be read. The Microsoft Store package doesn't look: the Store updates it.
 - **At startup**, if plugins are installed, the app downloads the repositories' lists in

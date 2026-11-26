@@ -4,9 +4,11 @@
 # in one place. The Windows installer of every published release is added under
 # download/vX.Y.Z/, a direct link without redirects (unlike release assets) for the
 # Microsoft Store. The download page (pages/download.html) is filled in with the latest
-# release's files and the older releases (scripts/download-page.py), and version.json with
-# that release's version, which the app reads to tell about a new version. Runs on every push to main that touches them, when a release is
-# published, or by hand (Actions > Pages > Run workflow).
+# release's files and the older releases (scripts/download-page.py); version.json with the
+# latest stable release's version and version-dev.json with the latest release's, pre-release
+# or not, which the app reads to tell about a new version (its stable and dev update
+# channels). Deployed by scripts/pages-deploy.py. Runs on every push to main that touches them, when a release is published, or
+# by hand (Actions > Pages > Run workflow).
 #
 # Needs Settings > Pages > Source set to "GitHub Actions" once.
 name: Pages
@@ -17,6 +19,7 @@ on:
     paths:
       - "pages/**"
       - "scripts/download-page.py"
+      - "scripts/pages-deploy.py"
       - "assets/icon/artwork-creator.svg"
       - "docs/capture.png"
       - ".github/workflows/pages.yml"
@@ -35,6 +38,8 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
+    outputs:
+      artifact_id: ${{ steps.upload.outputs.artifact_id }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/configure-pages@v5
@@ -59,11 +64,9 @@ jobs:
         run: |
           releases="$RUNNER_TEMP/releases.json"
           gh api --paginate --slurp "repos/${{ github.repository }}/releases" | jq 'add // []' > "$releases"
-          python3 -I scripts/download-page.py < "$releases" > _site/download.html
-          # version.json only when there is a stable release: the app says nothing without it.
-          version=$(python3 -I scripts/download-page.py --version < "$releases")
-          if [ -n "$version" ]; then printf '%s\n' "$version" > _site/version.json; fi
-      - uses: actions/upload-pages-artifact@v3
+          python3 -I scripts/download-page.py --version-files _site < "$releases" > _site/download.html
+      - id: upload
+        uses: actions/upload-pages-artifact@v3
         with:
           path: _site
 
@@ -77,5 +80,16 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts/pages-deploy.py
+          sparse-checkout-cone-mode: false
+      # Not actions/deploy-pages, which names each deployment after the commit: a release
+      # published on the commit main was just deployed from changed nothing (see the script).
       - id: deployment
-        uses: actions/deploy-pages@v4
+        name: Deploy to GitHub Pages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ needs.build.outputs.artifact_id }}
+          BUILD_VERSION: ${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+        run: python3 -I scripts/pages-deploy.py

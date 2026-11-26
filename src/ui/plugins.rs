@@ -924,13 +924,12 @@ impl Manager {
                     let updated = self.updated.iter().find(|(p, _)| *p == f.path);
                     ui.horizontal(|ui| {
                         // Not known until the plugin has run, unless a repository lists it.
-                        match (&f.status, known) {
-                            (Status::Loaded { version, .. }, _) if !version.is_empty() => {
-                                ui.label(version)
-                            }
-                            (_, Some(k)) => ui.label(&k.version),
-                            _ => ui.label("?"),
+                        let loaded = match &f.status {
+                            Status::Loaded { version, .. } => Some(version.as_str()),
+                            _ => None,
                         };
+                        let recorded = known.map(|k| k.version.as_str());
+                        ui.label(shown_version(loaded, recorded));
                         if let Some((_, version)) = updated {
                             updated_mark(ui)
                                 .on_hover_text(tr!("PLUGIN_UPDATED", version = version));
@@ -1112,6 +1111,18 @@ fn provides(ui: &mut Ui, effects: &[String], generators: &[String]) {
     if !names.is_empty() {
         r.on_hover_text(names.join("\n"));
     }
+}
+
+/// The version shown for an installed plugin: the one it gives itself once loaded, else the
+/// one recorded when installed from a repository, else "?".
+///
+/// TEMPORARY (see TODO.md): the recorded one also replaces a loaded version that isn't
+/// X.Y.Z, as the Python plugins released before the plugin repository checked it give
+/// "1.0" for 1.0.0 and 1.0.1.
+fn shown_version<'a>(loaded: Option<&'a str>, recorded: Option<&'a str>) -> &'a str {
+    let loaded = loaded.filter(|v| !v.is_empty());
+    let valid = loaded.filter(|v| semver::Version::parse(v).is_ok());
+    valid.or(recorded).or(loaded).unwrap_or("?")
 }
 
 /// A check mark: the plugin was updated, the new version used from the next start.
@@ -2134,6 +2145,18 @@ mod tests {
         m.refresh_known();
         assert!(m.known.is_empty() && m.files.len() == 1);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn shown_version_prefers_a_valid_one() {
+        assert_eq!(shown_version(Some("1.2.0"), Some("1.0.0")), "1.2.0");
+        // Not X.Y.Z (a Python plugin's "1.0"): the recorded one, if any (temporary, TODO.md).
+        assert_eq!(shown_version(Some("1.0"), Some("1.0.1")), "1.0.1");
+        assert_eq!(shown_version(Some("1.0"), None), "1.0");
+        assert_eq!(shown_version(Some(""), Some("1.0.1")), "1.0.1");
+        assert_eq!(shown_version(None, Some("1.0.1")), "1.0.1");
+        assert_eq!(shown_version(None, None), "?");
+        assert_eq!(shown_version(Some(""), None), "?");
     }
 
     #[test]

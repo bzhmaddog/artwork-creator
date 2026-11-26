@@ -127,20 +127,42 @@ class Main(unittest.TestCase):
         self.assertNotIn("v0.15.0", page)
         self.assertNotIn("v0.12.0", page)
 
-    def test_version(self):
-        releases = [release("v0.13.0", "2026-09-01", ALL), release("v0.14.0", "2026-10-01", ALL)]
-        self.assertEqual(json.loads(self.run_main(releases, ["--version"])), {"version": "0.14.0"})
-        # Nothing without a release.
-        self.assertEqual(self.run_main([], ["--version"]), "")
+    def version_files(self, releases):
+        """The version files main writes with --version-files, by name, read back."""
+        with tempfile.TemporaryDirectory() as tmp:
+            page = self.run_main(releases, ["--version-files", tmp])
+            found = {p.name: json.loads(p.read_text(encoding="utf-8")) for p in Path(tmp).iterdir()}
+        # The page is still written.
+        self.assertIn("<main>", page)
+        return found
 
-    def test_version_skips_prereleases(self):
+    def test_version_files(self):
+        releases = [release("v0.13.0", "2026-09-01", ALL), release("v0.14.0", "2026-10-01", ALL)]
+        self.assertEqual(
+            self.version_files(releases),
+            {"version.json": {"version": "0.14.0"}, "version-dev.json": {"version": "0.14.0"}},
+        )
+        # Nothing without a release.
+        self.assertEqual(self.version_files([]), {})
+
+    def test_only_the_dev_channel_tells_about_prereleases(self):
         releases = [
             release("v0.14.0", "2026-10-01", ALL),
             release("v0.15.0-beta.1", "2026-11-01", ALL, prerelease=True),
+            release("v0.16.0", "2026-12-01", ALL, draft=True),
         ]
-        self.assertEqual(json.loads(self.run_main(releases, ["--version"])), {"version": "0.14.0"})
-        # Only pre-releases: nothing.
-        self.assertEqual(self.run_main(releases[1:], ["--version"]), "")
+        self.assertEqual(
+            self.version_files(releases),
+            {"version.json": {"version": "0.14.0"}, "version-dev.json": {"version": "0.15.0-beta.1"}},
+        )
+        # Only pre-releases: no stable version file.
+        self.assertEqual(self.version_files(releases[1:]), {"version-dev.json": {"version": "0.15.0-beta.1"}})
+
+    def test_newest(self):
+        releases = [release("v2", "2026-02-01", ALL, prerelease=True), release("v1", "2026-01-01", ALL)]
+        self.assertEqual(dp.newest(releases, True)["tag_name"], "v2")
+        self.assertEqual(dp.newest(releases, False)["tag_name"], "v1")
+        self.assertIsNone(dp.newest(releases[:1], False))
 
     def test_real_template_has_markers(self):
         text = dp.TEMPLATE.read_text(encoding="utf-8")

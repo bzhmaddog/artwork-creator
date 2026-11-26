@@ -7,23 +7,21 @@
 # release's files and the older releases (scripts/download-page.py); version.json with the
 # latest stable release's version and version-dev.json with the latest release's, pre-release
 # or not, which the app reads to tell about a new version (its stable and dev update
-# channels). Deployed by scripts/pages-deploy.py. Runs on every push to main that touches them, when a release is published, or
-# by hand (Actions > Pages > Run workflow).
+# channels).
+#
+# Runs only when a release is published, a pre-release or not (the "published" event is
+# both), or by hand (Actions > Pages > Run workflow). Not on pushes to main: Pages keeps the
+# files of the first deployment of a commit and ignores a later one of the same commit,
+# though it reports success, and a release is tagged on the commit main was just merged to.
+# Deploying on that push left the release's own deployment without effect. A change to the
+# page goes live with the next release, or a run by hand.
 #
 # Needs Settings > Pages > Source set to "GitHub Actions" once.
 name: Pages
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - "pages/**"
-      - "scripts/download-page.py"
-      - "scripts/pages-deploy.py"
-      - "assets/icon/artwork-creator.svg"
-      - "docs/capture.png"
-      - ".github/workflows/pages.yml"
   release:
+    # Pre-releases too: "published" is the event of both ("released" would leave them out).
     types: [published]
   workflow_dispatch:
 
@@ -38,8 +36,6 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-latest
-    outputs:
-      artifact_id: ${{ steps.upload.outputs.artifact_id }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/configure-pages@v5
@@ -65,8 +61,7 @@ jobs:
           releases="$RUNNER_TEMP/releases.json"
           gh api --paginate --slurp "repos/${{ github.repository }}/releases" | jq 'add // []' > "$releases"
           python3 -I scripts/download-page.py --version-files _site < "$releases" > _site/download.html
-      - id: upload
-        uses: actions/upload-pages-artifact@v3
+      - uses: actions/upload-pages-artifact@v3
         with:
           path: _site
 
@@ -80,16 +75,5 @@ jobs:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
-      - uses: actions/checkout@v4
-        with:
-          sparse-checkout: scripts/pages-deploy.py
-          sparse-checkout-cone-mode: false
-      # Not actions/deploy-pages, which names each deployment after the commit: a release
-      # published on the commit main was just deployed from changed nothing (see the script).
       - id: deployment
-        name: Deploy to GitHub Pages
-        env:
-          GH_TOKEN: ${{ github.token }}
-          ARTIFACT_ID: ${{ needs.build.outputs.artifact_id }}
-          BUILD_VERSION: ${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-        run: python3 -I scripts/pages-deploy.py
+        uses: actions/deploy-pages@v4

@@ -1,6 +1,6 @@
 # Privacy Policy
 
-Last updated: November 20, 2026
+Last updated: November 25, 2026
 
 Artwork Creator is a desktop application made by bzhmaddog. This policy explains
 what the application does with your data.
@@ -12,7 +12,21 @@ Artwork Creator does not collect, store, transmit or share any personal data.
 - No account or sign-in is required.
 - No telemetry, analytics, crash reports or usage statistics are sent.
 - No advertising and no third-party tracking.
-- The application does not connect to the internet.
+
+## Internet connections
+
+The application connects to the internet only to:
+
+- check for a new version of itself at startup, by reading a small file giving the
+  latest version on the project's web page (bzhmaddog.github.io, hosted by GitHub); not
+  the Microsoft Store version, which the Store updates;
+- check for new plugin versions at startup, when plugins are installed, by reading the
+  plugin repositories' lists (the official one on GitHub, and any you add);
+- download the plugins you choose to install or update.
+
+These requests send no personal data and nothing about your projects. As with any web
+request, the server sees your IP address; GitHub's own privacy statement covers what it
+keeps.
 
 ## Data stored on your computer
 
@@ -43,4 +57,4 @@ with an updated date.
 ## Contact
 
 Questions about this policy: open an issue at
-https://github.com/bzhmaddog/artwork-creator/issues
+https://github.com/bzhmaddog/artwork-creator-app/issues

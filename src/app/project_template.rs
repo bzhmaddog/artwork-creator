@@ -3,6 +3,9 @@
 
 use super::*;
 
+/// The key of the toast offering to install a project's template.
+pub(super) const TEMPLATE_INSTALL_TOAST: &str = "template_install";
+
 /// The field picking a template, showing `current`: a list of `templates` by vendor, only
 /// as wide as its longest choice. Returns the folder of the one picked, or `chosen` as it
 /// was, and the field.
@@ -569,46 +572,29 @@ impl ArtworkApp {
         }
     }
 
-    /// The popup offering to install the template of the project just opened, which is
-    /// not installed, from the project's copy of it: Install, or Not now (Esc too).
-    pub(super) fn template_install_modal(&mut self, ctx: &egui::Context) {
-        let Some(id) = self.offer_install.clone() else {
+    /// The toast offering to install the template of the project just opened, which is
+    /// not installed, from the project's copy of it: its Install button does (see
+    /// `toasts`); letting it go leaves it for the next time the project is opened.
+    pub(super) fn template_install_offer(&mut self) {
+        if self.editing.is_some() {
+            return;
+        }
+        let Some(id) = self.offer_install.take() else {
             return;
         };
         // Still the project's template, still not installed.
         if self.doc.template.as_ref() != Some(&id) || self.installed(&id).is_some() {
-            self.offer_install = None;
-            return;
-        }
-        if self.editing.is_some()
-            || !self.messages.is_empty()
-            || !self.orphans.is_empty()
-            || self.confirm_leave.is_some()
-        {
             return;
         }
         let name = self
             .current_entry()
             .map(TemplateEntry::full_name)
             .unwrap_or_else(|| id.clone());
-        let (mut install, mut later) = (false, false);
-        let response = dialog(ctx, "install_template").show(ctx, |ui| {
-            ui.set_width(420.0);
-            ui.strong(tr!("TEMPLATE_NOT_INSTALLED_TITLE"));
-            ui.add_space(4.0);
-            ui.label(tr!("INSTALL_PROJECT_TEMPLATE_TEXT", name = name));
-            ui.add_space(8.0);
-            dialog_button_row(ui, |ui| {
-                install = ui.button(tr!("INSTALL_TEMPLATE")).clicked();
-                later = ui.button(tr!("NOT_NOW")).clicked();
-            });
-        });
-        if install {
-            self.install_project_template(&id);
-        }
-        if install || later || response.should_close() {
-            self.offer_install = None;
-        }
+        let text = tr!("INSTALL_PROJECT_TEMPLATE_TEXT", name = name);
+        let title = tr!("TEMPLATE_NOT_INSTALLED_TITLE");
+        let toast = Toast::new(TEMPLATE_INSTALL_TOAST, Intent::Info, title, &text);
+        self.toasts.push(toast.action(tr!("INSTALL_TEMPLATE")));
+        self.install_toast = Some(id);
     }
 
     /// Writes the project's copy of its template, of folder `id`, into the user's

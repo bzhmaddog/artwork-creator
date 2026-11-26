@@ -117,7 +117,13 @@ fn show(ui: &mut Ui, tone: Tone, text: RichText, compact: bool, right: Right) ->
 }
 
 /// Draws `tone`'s icon in `rect`, in `color`, its marks cut out in the panel color.
-fn paint_icon(painter: &Painter, rect: Rect, tone: Tone, color: Color32, visuals: &Visuals) {
+pub(crate) fn paint_icon(
+    painter: &Painter,
+    rect: Rect,
+    tone: Tone,
+    color: Color32,
+    visuals: &Visuals,
+) {
     let c = rect.center();
     let s = rect.width();
     let cut = visuals.panel_fill;

@@ -191,7 +191,7 @@ fn ui_tokens() {
 #[ignore = "draws docs/widgets.png"]
 fn widget_gallery() {
     let path = concat!(env!("CARGO_MANIFEST_DIR"), "/docs/widgets.png");
-    crate::ui::preview::render(path, vec2(640.0, 1200.0), |ui| {
+    crate::ui::preview::render(path, vec2(640.0, 1480.0), |ui| {
         layers::field_frames(ui);
 
         section(ui, "egui widgets, as the app uses them");
@@ -362,6 +362,34 @@ fn widget_gallery() {
         });
 
         section(ui, "Messages");
+        row(ui, "Toasts", |ui| {
+            use crate::ui::toast::{Intent, Toast, card};
+            for (intent, title, text, actions) in [
+                (
+                    Intent::Info,
+                    "Plugin updates",
+                    "A new version of 1 plugin is available. Review it in the plugin manager?",
+                    vec!["Review".to_owned()],
+                ),
+                (Intent::Success, "Success", "Something done.", vec![]),
+                (
+                    Intent::Warning,
+                    "Warning",
+                    "Something to look out for.",
+                    vec![],
+                ),
+                (Intent::Error, "Error", "Something that failed.", vec![]),
+            ] {
+                let toast = Toast {
+                    key: "gallery",
+                    intent,
+                    title: title.into(),
+                    text: text.into(),
+                    actions,
+                };
+                card(ui, &toast);
+            }
+        });
         row(ui, "Callouts", |ui| {
             ui.set_max_width(440.0);
             callout::callout(ui, Tone::Info, "Info: an explanation or an empty state.");

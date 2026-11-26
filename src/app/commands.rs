@@ -2,6 +2,11 @@
 
 use super::*;
 
+/// The key of the toast saying new plugin versions were found.
+const PLUGIN_UPDATES_TOAST: &str = "plugin_updates";
+/// The key of the toast saying a newer version of the app is out.
+const APP_UPDATE_TOAST: &str = "app_update";
+
 impl ArtworkApp {
     /// File, Edit and View menus.
     pub(super) fn menu_bar(&mut self, ui: &mut egui::Ui) {
@@ -431,53 +436,89 @@ impl ArtworkApp {
         }
     }
 
-    /// The question asked once new plugin versions are found at startup: Review opens the
-    /// plugin manager on its Installed tab, the new versions highlighted; Not now (Esc
-    /// too) leaves them for another time. A plugin manager already open just shows them.
-    pub(super) fn plugin_updates_modal(&mut self, ctx: &egui::Context) {
-        if let Some(check) = &self.plugin_check {
-            if !check.is_finished() {
-                ctx.request_repaint_after(std::time::Duration::from_millis(500));
-                return;
-            }
-            let check = self.plugin_check.take().unwrap();
-            let (catalog, n) = check.join().unwrap_or_default();
-            if n > 0 {
-                self.plugin_updates = Some((catalog, n));
-            }
+    /// New plugin versions found at startup: a toast says so, its Review opening the
+    /// plugin manager on its Installed tab, the new versions highlighted. A plugin manager
+    /// already open just shows them. Waits for `offer_plugins`, which may open one.
+    pub(super) fn plugin_updates(&mut self, ctx: &egui::Context) {
+        let Some(check) = &self.plugin_check else {
+            return;
+        };
+        if !check.is_finished() || !self.plugins_offered {
+            ctx.request_repaint_after(std::time::Duration::from_millis(500));
+            return;
         }
-        if self.plugin_updates.is_none()
-            || !self.plugins_offered
-            || !self.orphans.is_empty()
-            || !self.messages.is_empty()
-            || self.confirm_leave.is_some()
-            || self.leave_after_save.is_some()
-        {
+        let check = self.plugin_check.take().unwrap();
+        let (catalog, n) = check.join().unwrap_or_default();
+        if n == 0 {
             return;
         }
         if let Some(manager) = &mut self.plugin_manager {
-            let (catalog, _) = self.plugin_updates.take().unwrap();
             manager.set_catalog(catalog);
             return;
         }
-        let n = self.plugin_updates.as_ref().map_or(0, |(_, n)| *n);
-        let (mut review, mut later) = (false, false);
-        let response = dialog(ctx, "plugin_updates").show(ctx, |ui| {
-            ui.set_width(420.0);
-            ui.strong(tr!("PLUGIN_UPDATES_TITLE"));
-            ui.add_space(4.0);
-            ui.label(tr_n!("PLUGIN_UPDATES_TEXT", n));
-            ui.add_space(8.0);
-            dialog_button_row(ui, |ui| {
-                review = ui.button(tr!("REVIEW_PLUGIN_UPDATES")).clicked();
-                later = ui.button(tr!("NOT_NOW")).clicked();
-            });
-        });
-        if review {
-            let (catalog, _) = self.plugin_updates.take().unwrap();
-            self.plugin_manager = Some(crate::ui::plugins::Manager::new(Some(catalog)));
-        } else if later || response.should_close() {
+        self.plugin_updates = Some((catalog, n));
+        let text = tr_n!("PLUGIN_UPDATES_TEXT", n);
+        let title = tr!("PLUGIN_UPDATES_TITLE");
+        let toast = Toast::new(PLUGIN_UPDATES_TOAST, Intent::Info, title, &text);
+        self.toasts.push(toast.action(tr!("REVIEW_PLUGIN_UPDATES")));
+    }
+
+    /// A newer version of the app found at startup: a toast says so, its Download button
+    /// opening the download page.
+    pub(super) fn app_update(&mut self, ctx: &egui::Context) {
+        let Some(check) = &self.version_check else {
+            return;
+        };
+        if !check.is_finished() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(500));
+            return;
+        }
+        let check = self.version_check.take().unwrap();
+        if let Some(version) = check.join().ok().flatten() {
+            let text = tr!("APP_UPDATE_TEXT", version = version);
+            let toast = Toast::new(
+                APP_UPDATE_TOAST,
+                Intent::Info,
+                tr!("APP_UPDATE_TITLE"),
+                &text,
+            );
+            self.toasts.push(toast.action(tr!("DOWNLOAD_APP_UPDATE")));
+        }
+    }
+
+    /// The toasts, their bottom right corner at `corner`, and what their buttons do.
+    pub(super) fn toasts(&mut self, ctx: &egui::Context, corner: egui::Pos2) {
+        for (key, _) in self.toasts.show(ctx, corner) {
+            if key == APP_UPDATE_TOAST {
+                ctx.open_url(egui::OpenUrl::new_tab(version_check::DOWNLOAD_PAGE));
+            }
+            if key == PLUGIN_UPDATES_TOAST
+                && let Some((catalog, _)) = self.plugin_updates.take()
+            {
+                // One opened since keeps what it is doing.
+                match &mut self.plugin_manager {
+                    Some(manager) => manager.set_catalog(catalog),
+                    None => {
+                        let manager = crate::ui::plugins::Manager::new(Some(catalog));
+                        self.plugin_manager = Some(manager);
+                    }
+                }
+            }
+            // Still the open project's template (another may have been opened since),
+            // still not installed.
+            if key == project_template::TEMPLATE_INSTALL_TOAST
+                && let Some(id) = self.install_toast.take()
+                && self.doc.template.as_ref() == Some(&id)
+                && self.installed(&id).is_none()
+            {
+                self.install_project_template(&id);
+            }
+        }
+        if !self.toasts.is_up(PLUGIN_UPDATES_TOAST) {
             self.plugin_updates = None;
+        }
+        if !self.toasts.is_up(project_template::TEMPLATE_INSTALL_TOAST) {
+            self.install_toast = None;
         }
     }
 

@@ -376,9 +376,12 @@ impl ArtworkApp {
                     }
                 });
                 if !outdated.is_empty() {
-                    self.messages.push(tr!(
-                        "PLUGIN_SETTINGS_OUTDATED",
-                        layers = outdated.join("\n")
+                    let text = tr!("PLUGIN_SETTINGS_OUTDATED", layers = outdated.join("\n"));
+                    self.toasts.push(Toast::new(
+                        "plugin_settings_outdated",
+                        Intent::Warning,
+                        tr!("PLUGIN_SETTINGS_OUTDATED_TITLE"),
+                        &text,
                     ));
                 }
                 // Its own copy of its template, placed as that says.
@@ -432,9 +435,12 @@ impl ArtworkApp {
         match project::save(&self.doc, &self.export_settings, &path) {
             Ok(missing) => {
                 if !missing.is_empty() {
-                    self.messages.push(tr!(
-                        "SAVED_WITH_MISSING_IMAGES",
-                        layers = missing.join("\n")
+                    let text = tr!("SAVED_WITH_MISSING_IMAGES", layers = missing.join("\n"));
+                    self.toasts.push(Toast::new(
+                        "saved_with_missing_images",
+                        Intent::Warning,
+                        tr!("IMAGES_MISSING_TITLE"),
+                        &text,
                     ));
                 }
                 self.recent.add(&path);

@@ -6,10 +6,9 @@ mod output;
 mod panels;
 mod project_template;
 mod template_edit;
+mod version_check;
 pub use dialogs::set_interaction;
-pub(crate) use dialogs::{
-    at_left_edge, danger_button, dialog, dialog_button_row, dialog_buttons, notice, notify,
-};
+pub(crate) use dialogs::{at_left_edge, danger_button, dialog, dialog_button_row, dialog_buttons};
 use dialogs::{menu_entry, padded, panel_grid};
 use file::modified_time;
 use project_template::problem_list;
@@ -44,6 +43,7 @@ use crate::ui::file_dialog::{self, FileBrowser, Filter, Purpose, Request};
 use crate::ui::layers::{self, Edit, LayersPanel};
 use crate::ui::panels::{PanelId, Side};
 use crate::ui::shortcuts::{Command, Shortcuts};
+use crate::ui::toast::{Intent, Toast};
 use crate::ui::variables as variables_ui;
 
 /// Longest side of the on-screen texture. Exports always use the full-resolution image.
@@ -104,6 +104,8 @@ pub struct ArtworkApp {
     /// The template of the project just opened, which is not installed: the user is
     /// asked whether to install the project's copy of it.
     offer_install: Option<String>,
+    /// The template the toast offering to install it is up for.
+    install_toast: Option<String>,
     /// The installed template, loaded to compare it with the project's copy on the canvas.
     comparing: Option<(TemplateEntry, Template)>,
     canvas: CanvasState,
@@ -180,11 +182,15 @@ pub struct ArtworkApp {
     /// allowed (once).
     plugins_offered: bool,
     /// Looking for new plugin versions, from the start until it's done.
+    /// Looking for a newer version of the app, from the start until it's done.
+    version_check: Option<JoinHandle<Option<String>>>,
     plugin_check:
         Option<std::thread::JoinHandle<(crate::render::effects::repository::Catalog, usize)>>,
     /// New plugin versions found at startup, to ask about: the repositories' lists, and
     /// how many plugins have one.
     plugin_updates: Option<(crate::render::effects::repository::Catalog, usize)>,
+    /// The toasts up, at the bottom right of the window.
+    toasts: crate::ui::toast::Toasts,
     /// Closing to start again (the plugin manager's Restart); canceled with the close.
     restarting: bool,
     /// The project is about to be closed or replaced with unsaved changes: ask whether
@@ -303,9 +309,14 @@ impl ArtworkApp {
         let templates_dir = template::templates_dir();
         let user_templates_dir = template::user_templates_dir();
         let templates = template::scan_all(templates_dir.as_deref(), user_templates_dir.as_deref());
-        let mut messages = Vec::new();
+        let mut toasts = crate::ui::toast::Toasts::default();
         if templates.is_empty() {
-            messages.push(tr!("NO_TEMPLATES_FOUND").to_owned());
+            toasts.push(Toast::new(
+                "no_templates",
+                Intent::Warning,
+                tr!("NO_TEMPLATES_FOUND_TITLE"),
+                tr!("NO_TEMPLATES_FOUND"),
+            ));
         }
         let mut app = Self {
             doc: Document::default(),
@@ -321,6 +332,7 @@ impl ArtworkApp {
             kept_fingerprint: None,
             postponed_fingerprint: None,
             offer_install: None,
+            install_toast: None,
             comparing: None,
             canvas: CanvasState::load(cc.storage),
             layers_panel: LayersPanel::default(),
@@ -353,7 +365,7 @@ impl ArtworkApp {
             effect_cache: EffectCache::default(),
             fonts: FontLibrary::new(),
             background_rings: (0, None),
-            messages,
+            messages: Vec::new(),
             title: String::new(),
             native_dialogs: file_dialog::native_available(),
             browser: FileBrowser::default(),
@@ -366,8 +378,10 @@ impl ArtworkApp {
             shortcuts_editor: None,
             plugin_manager: None,
             plugins_offered: false,
+            version_check: version_check::start(),
             plugin_check: crate::ui::plugins::check_updates(),
             plugin_updates: None,
+            toasts,
             restarting: false,
             confirm_leave: None,
             about: false,
@@ -668,7 +682,10 @@ impl eframe::App for ArtworkApp {
                 .frame(egui::Frame::NONE)
                 .show(ui, |ui| self.template_bar(ui));
         }
-        egui::Panel::bottom("status").show(ui, |ui| self.status_bar(ui, &elements));
+        let status = egui::Panel::bottom("status")
+            .show(ui, |ui| self.status_bar(ui, &elements))
+            .response
+            .rect;
         // Taken out while drawn, as it draws the panels with the app's contents.
         let mut panels = std::mem::take(&mut self.panels);
         // Set here, not when editing starts: a panel's button may start it while the
@@ -765,7 +782,7 @@ impl eframe::App for ArtworkApp {
         self.message_modal(&ctx);
         self.about_modal(&ctx);
         self.template_differs_modal(&ctx);
-        self.template_install_modal(&ctx);
+        self.template_install_offer();
         self.template_dialog_modal(&ctx);
         self.link_position_modal(&ctx);
         self.compare_bar(&ctx);
@@ -774,9 +791,11 @@ impl eframe::App for ArtworkApp {
         self.template_end_modal(&ctx);
         self.recovery_modal(&ctx);
         self.offer_plugins();
-        self.plugin_updates_modal(&ctx);
+        self.plugin_updates(&ctx);
+        self.app_update(&ctx);
         self.shortcuts_window(&ctx);
         self.plugins_window(&ctx);
+        self.toasts(&ctx, status.right_top());
 
         // Record a step once the edit is over: no button held, no text being typed. A
         // shape scaled by a drag that just ended takes its new size first, so the drag
@@ -819,12 +838,12 @@ impl eframe::App for ArtworkApp {
         if self.editing.is_none()
             && let Some(e) = self.autosave.tick(&ctx, project, !finished)
         {
-            self.messages.push(e);
+            let title = tr!("AUTOSAVE_FAILED");
+            let toast = Toast::new("autosave_failed", Intent::Error, title, &e);
+            self.toasts.push(toast);
         }
     }
 }
 
-#[cfg(test)]
-pub(crate) use dialogs::NOTICE_SECONDS;
 #[cfg(test)]
 mod tests;

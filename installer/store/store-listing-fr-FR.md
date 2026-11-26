@@ -57,15 +57,15 @@ hitbox
 
 ## License terms
 
-Licence PolyForm Noncommercial 1.0.0 : gratuit pour un usage non commercial. Créer des illustrations, panneaux ou manettes destinés à la vente nécessite l'autorisation de l'auteur. https://github.com/bzhmaddog/artwork-creator/blob/main/LICENSE
+Licence PolyForm Noncommercial 1.0.0 : gratuit pour un usage non commercial. Créer des illustrations, panneaux ou manettes destinés à la vente nécessite l'autorisation de l'auteur. https://github.com/bzhmaddog/artwork-creator-app/blob/main/LICENSE
 
 ## Infos communes
 
 - Copyright and trademark info: Copyright 2026 bzhmaddog
-- Additional license terms: https://github.com/bzhmaddog/artwork-creator/blob/main/LICENSE
-- Privacy policy URL: https://github.com/bzhmaddog/artwork-creator/blob/main/PRIVACY.md
-- Website: https://bzhmaddog.github.io/artwork-creator/
-- Support contact: https://github.com/bzhmaddog/artwork-creator/issues
+- Additional license terms: https://github.com/bzhmaddog/artwork-creator-app/blob/main/LICENSE
+- Privacy policy URL: https://github.com/bzhmaddog/artwork-creator-app/blob/main/PRIVACY.md
+- Website: https://bzhmaddog.github.io/artwork-creator-app/
+- Support contact: https://github.com/bzhmaddog/artwork-creator-app/issues
 - Developed by: bzhmaddog
 - Store logo: store-logo.png
 - Screenshot: docs/capture.png

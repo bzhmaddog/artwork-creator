@@ -1,16 +1,20 @@
 #!/usr/bin/env python3
 """Fills in the download page (pages/download.html) from the project's GitHub releases.
 
-Usage: download-page.py < RELEASES_JSON > download.html
+Usage: download-page.py [--version] < RELEASES_JSON > download.html (or version.json)
 
 Reads the GitHub API's list of releases on stdin (gh api --paginate --slurp
 repos/OWNER/REPO/releases | jq 'add', or curl .../releases?per_page=100) and writes the
 page to stdout. The template is the repository's pages/download.html. The newest published
 release goes in the template's <!-- LATEST --> marker, one card per platform; the others
 in <!-- OLDER -->, one row each. Drafts are left out, as are files the page doesn't know.
-Run by .github/workflows/pages.yml.
+With --version, writes instead the version of the newest release that isn't a pre-release,
+as {"version": "1.2.0"} (nothing when there is none): what the app reads to tell about a
+new version (src/app/version_check.rs). It writes no file of its own, the output going
+where the caller redirects it. Run by .github/workflows/pages.yml.
 """
 
+import argparse
 import json
 import sys
 from html import escape
@@ -102,9 +106,24 @@ def older_html(releases):
     return "\n".join(out)
 
 
-def main():
+def version_json(r):
+    return json.dumps({"version": r["tag_name"].lstrip("v")}) + "\n"
+
+
+def main(argv=None):
+    parser = argparse.ArgumentParser(description="Fills in the download page from the releases.")
+    parser.add_argument(
+        "--version", action="store_true", help="print version.json, of the latest stable release, instead"
+    )
+    args = parser.parse_args(argv)
     releases = [r for r in json.load(sys.stdin) if not r.get("draft") and files(r)]
     releases.sort(key=lambda r: r.get("published_at") or "", reverse=True)
+    if args.version:
+        # The app's update check is for the stable version: never a pre-release.
+        stable = [r for r in releases if not r.get("prerelease")]
+        if stable:
+            sys.stdout.write(version_json(stable[0]))
+        return
     page = TEMPLATE.read_text(encoding="utf-8")
     if releases:
         latest = latest_html(releases[0])
@@ -112,7 +131,6 @@ def main():
         latest = '<p class="muted">No release yet.</p>'
     page = page.replace("<!-- LATEST -->", latest).replace("<!-- OLDER -->", older_html(releases[1:]))
     sys.stdout.write(page)
-
 
 if __name__ == "__main__":
     main()

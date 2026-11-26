@@ -4,7 +4,8 @@
 # in one place. The Windows installer of every published release is added under
 # download/vX.Y.Z/, a direct link without redirects (unlike release assets) for the
 # Microsoft Store. The download page (pages/download.html) is filled in with the latest
-# release's files and the older releases (scripts/download-page.py). Runs on every push to main that touches them, when a release is
+# release's files and the older releases (scripts/download-page.py), and version.json with
+# that release's version, which the app reads to tell about a new version. Runs on every push to main that touches them, when a release is
 # published, or by hand (Actions > Pages > Run workflow).
 #
 # Needs Settings > Pages > Source set to "GitHub Actions" once.
@@ -56,8 +57,12 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh api --paginate --slurp "repos/${{ github.repository }}/releases" | jq 'add // []' \
-            | python3 -I scripts/download-page.py > _site/download.html
+          releases="$RUNNER_TEMP/releases.json"
+          gh api --paginate --slurp "repos/${{ github.repository }}/releases" | jq 'add // []' > "$releases"
+          python3 -I scripts/download-page.py < "$releases" > _site/download.html
+          # version.json only when there is a stable release: the app says nothing without it.
+          version=$(python3 -I scripts/download-page.py --version < "$releases")
+          if [ -n "$version" ]; then printf '%s\n' "$version" > _site/version.json; fi
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site

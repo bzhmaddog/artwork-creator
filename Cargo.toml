@@ -1,10 +1,10 @@
 [package]
 name = "artwork-creator"
-version = "0.17.0"
+version = "0.18.0"
 edition = "2024"
 description = "Design printable artwork for arcade controllers on DXF templates, with print-ready PNG/PDF export"
 license-file = "LICENSE"
-homepage = "https://github.com/bzhmaddog/artwork-creator"
+homepage = "https://github.com/bzhmaddog/artwork-creator-app"
 publish = false
 
 # The plugin SDK lives in the same workspace; see "Plugins" in README.md.
@@ -71,6 +71,7 @@ raw-window-handle = "0.6"
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
+    "Win32_Storage_Packaging_Appx",
     "Win32_Storage_Xps",
     "Win32_System_Memory",
     "Win32_UI_Controls_Dialogs",

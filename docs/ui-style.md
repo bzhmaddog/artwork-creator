@@ -90,6 +90,8 @@ the image's test (`ui_tokens` in `src/ui/gallery.rs`). Values used by only one w
   saving", Unlink) goes apart at the left edge (`at_left_edge`).
 - A dialog with tabs (the plugin manager) shows them as a row of `selectable_value`
   buttons under its title, a separator below; the dialog keeps one width for all tabs.
+  It closes with a cross at the right end of its title's row (`panels::cross_button`),
+  not a Close button.
 - A popup with text fields has a fixed width: a field with `desired_width(f32::INFINITY)`
   would stretch it across the screen.
 - A button or menu entry that runs a command (`ui::shortcuts::Command`) shows its
@@ -97,8 +99,18 @@ the image's test (`ui_tokens` in `src/ui/gallery.rs`). Values used by only one w
   (`shortcuts::with_key`). A command gets a default key when its siblings have one.
 - A menu entry with an icon is `layers::icon_entry`, as wide as the other entries of its
   menu.
-- Something that must not stop the user is a status bar notice (`app::notify`, 6 s), not
-  a message box.
+- Something that must not stop the user is a toast (`ui::toast`), not a message box: a
+  warning about something that still worked, a canceled job, an offer (a call to action,
+  such as Review or Install). App code pushes it to `App::toasts`, other code with
+  `toast::push(ctx, ...)`. Errors that stop what the user asked for, and questions, stay
+  dialogs. A toast is a card at the bottom right of the window, above
+  the status bar, newest at the bottom, with its intent's color bar and icon (Info blue,
+  Success green, Warning amber, Error red), a bold title, its text, and its buttons at
+  the bottom right. It goes away after 8 s (`toast::SECONDS`) or when one of its buttons
+  or its close button (a cross at the right of its title) is clicked; the pointer over it
+  keeps it up. An Error toast (`Intent::lasts`) doesn't go away by itself: only its close
+  button or one of its buttons takes it away. No "Not now" button: letting it go, or
+  closing it, is that.
 
 ## Checking the look
 

@@ -213,15 +213,28 @@ pub fn version_parts(v: &str) -> Option<Vec<u64>> {
 impl Entry {
     /// The latest version that works with this app on this system, and its file.
     pub fn best(&self) -> Option<(&Version, &Download)> {
-        self.best_for(
+        self.compatible().into_iter().next()
+    }
+
+    /// The versions that work with this app on this system, with their files, the latest
+    /// first.
+    pub fn compatible(&self) -> Vec<(&Version, &Download)> {
+        self.compatible_for(
             env!("CARGO_PKG_VERSION"),
             artwork_plugin_sdk::VERSION,
             &system(),
         )
     }
 
+    #[cfg(test)]
     fn best_for(&self, app: &str, sdk: &str, system: &str) -> Option<(&Version, &Download)> {
-        let (app, sdk) = (release(app)?, release(sdk)?);
+        self.compatible_for(app, sdk, system).into_iter().next()
+    }
+
+    fn compatible_for(&self, app: &str, sdk: &str, system: &str) -> Vec<(&Version, &Download)> {
+        let (Some(app), Some(sdk)) = (release(app), release(sdk)) else {
+            return Vec::new();
+        };
         let meets = |req: Result<Option<VersionReq>, String>, v: &semver::Version| {
             req.is_ok_and(|r| r.is_none_or(|r| r.matches(v)))
         };
@@ -230,7 +243,8 @@ impl Entry {
             Kind::Library => system,
             Kind::Python => "any",
         };
-        self.versions
+        let mut found = self
+            .versions
             .iter()
             .filter(|v| {
                 let abi = v.abi.unwrap_or(abi::OLDEST_ABI_VERSION);
@@ -245,7 +259,13 @@ impl Entry {
                         || (abi::OLDEST_ABI_VERSION..=abi::ABI_VERSION).contains(&abi))
             })
             .filter_map(|v| v.files.get(key).map(|d| (v, d)))
-            .max_by_key(|(v, _)| version_parts(&v.version))
+            .collect::<Vec<_>>();
+        // A release before its pre-releases, which `version_parts` doesn't tell apart.
+        found.sort_by_key(|(v, _)| {
+            let release = !v.version.contains('-');
+            std::cmp::Reverse((version_parts(&v.version), release))
+        });
+        found
     }
 }
 
@@ -267,6 +287,8 @@ pub fn fetch_all(urls: &[String]) -> Catalog {
 /// What a repository says about a plugin file installed, found by its content.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Known {
+    /// The plugin's id in the repository.
+    pub id: String,
     pub description: String,
     /// The version of the file installed.
     pub version: String,
@@ -354,6 +376,7 @@ pub fn known<'a>(
         found.insert(
             path.clone(),
             Known {
+                id: p.id.clone(),
                 description: p.description.clone(),
                 version,
                 effects: v.map(|v| v.effects.clone()).unwrap_or_default(),
@@ -708,6 +731,10 @@ mod tests {
         assert_eq!(best("0.16.0", "linux-x86_64").as_deref(), Some("0.2.0"));
         assert_eq!(best("0.15.9", "linux-x86_64"), None);
         assert_eq!(best("0.16.0", "linux-aarch64"), None);
+        // Every version that fits can be picked, the latest first.
+        let all = p.compatible_for("0.16.0", "0.3.0", "linux-x86_64");
+        let all: Vec<_> = all.iter().map(|(v, _)| v.version.as_str()).collect();
+        assert_eq!(all, ["0.2.0", "0.1.0"]);
     }
 
     #[test]

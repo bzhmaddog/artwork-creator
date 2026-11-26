@@ -17,7 +17,6 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crate::document::Document;
 use crate::export::ExportSettings;
 use crate::files::project;
-use crate::i18n::tr;
 
 /// The project copy in a session folder: an archive, images included.
 const COPY: &str = "project.artwork";
@@ -246,7 +245,7 @@ impl Autosave {
                     // Written again at the next change.
                     self.copied = None;
                     if !std::mem::replace(&mut self.failed, true) {
-                        error = Some(tr!("AUTOSAVE_FAILED", e = e));
+                        error = Some(e.to_string());
                     }
                 }
             }
@@ -295,7 +294,7 @@ impl Autosave {
                     // Tried again at the next change.
                     self.copied = Some((p.key.to_owned(), p.export.clone()));
                     if !std::mem::replace(&mut self.failed, true) {
-                        error = Some(tr!("AUTOSAVE_FAILED", e = e));
+                        error = Some(e.to_string());
                     }
                     return error;
                 }

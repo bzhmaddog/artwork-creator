@@ -99,9 +99,22 @@ then GNOME's settings.
 
 ### Status bar
 
-Shows messages and warnings (failed loads, unlinked texts…), and at its right end when the
-project was last saved ("Last saved 5 minutes ago") and, with unsaved changes, when their
-recovery copy was made ("Recovery copy just now").
+Shows the project's state (a template that doesn't fit the page, an export in progress),
+and at its right end when the project was last saved ("Last saved 5 minutes ago") and,
+with unsaved changes, when their recovery copy was made ("Recovery copy just now").
+
+### Toasts
+
+Notices that don't need an answer appear as toasts at the bottom right of the window,
+above the status bar: a card with a title, a text and sometimes a button, colored by what
+it says (info, success, warning, error). A toast goes away after a few seconds, unless
+the pointer is over it, or when its button or its close button (✕) is clicked. An error
+(a failed autosave) stays up until it is closed. Toasts say: a new version of the app
+(Download, which opens the download page), new plugin versions (Review), a project's template not installed (Install), an export or a printing
+canceled, a failed autosave, a project saved with image files missing, plugin settings
+saved by an older version, a template reference that couldn't be read, no templates
+found at startup, and a text unlinked by typing. Errors that stop something (a project
+that can't be opened or saved, a failed export) and questions stay in a dialog.
 
 ### File dialogs
 
@@ -193,9 +206,9 @@ does not fit on the page is flagged.
   for that installed version). Esc decides later: the Template panel then has a
   **Review...** button that brings the popup back.
 - When the project's template isn't installed at all (deleted, or the project comes from
-  another computer), opening the project asks whether to **Install** the copy it keeps into
-  your templates, where it is listed and can be edited from then on; **Not now** (or Esc)
-  opens the project with its copy. The Template panel's list then shows that template
+  another computer), opening the project offers in a toast to **Install** the copy it keeps into
+  your templates, where it is listed and can be edited from then on; otherwise the project
+  goes on with its copy, and the offer comes again the next time it is opened. The Template panel's list then shows that template
   among the others, marked with a sheet as the project's own.
 
 ### Template check
@@ -863,15 +876,15 @@ look there, so `make run` finds the `plugins` folder of the repository.
   version, type (Python or Library) and what became of it: Loaded, Disabled, Waiting to
   be allowed, or Failed to load (why in its tooltip). Its check box
   enables or disables it; a disabled plugin is not loaded at all, nor asked about.
-  **Edit**, on a Python plugin's row, opens its file in your text editor (never runs it:
-  on Windows, its "edit" action, or Notepad). Enabling and disabling apply at the next
-  start (the window says so; its **Restart** button closes the app and starts it again
+  Enabling and disabling apply at the next
+  start (the window says so, with a **Restart** button, shown only then, that closes the app and starts it again
   with the same project, asking first to save unsaved changes): until then, the effects
   of a plugin disabled stay available. The choices are kept in `plugins.json`.
   **Uninstall**, on the row of a plugin in **your** plugins folder (not one that comes with
   the app), removes its file (set aside as `.<name>.old` beside it, never loaded, as
-  Update does) and what `plugins.json` says of it; the plugin leaves the list, and its
-  effects stay available until the next start (the window offers the restart). The
+  updating does) and what `plugins.json` says of it, and unloads it at once: the plugin
+  leaves the list, its effects and generators leave the menus (layers using them draw
+  without them, as with any missing effect), and a Python plugin's process stops. The
   packages a Python plugin needed stay installed.
   These are on its **Installed** tab, where the plugins are grouped by the repository
   they were installed from (its name above them, its address in the tooltip; by name),
@@ -894,8 +907,12 @@ look there, so `make run` finds the `plugins` folder of the repository.
   or the name of one of their effects or generators. Each plugin shows the latest version that works with this version of the
   app on this system (what its `engines` asks of the app and, for a Python plugin, of the
   plugin SDK, a library's plugin interface version, and a file for this system;
-  "Not available" otherwise) and, in its **Provides** column, how many effects and
-  generators that version adds ("1 effect, 1 generator", their names in the tooltip; empty
+  "Not available" otherwise); its **Version** column is a drop-down of the versions that
+  work (disabled when there is only one), the latest first and picked by default ("1.2.0 (latest)"), what changed
+  in each in its tooltip, to install an earlier one instead (the version picked is kept
+  while the window is open; when another version of the plugin is installed, **Install**
+  puts the one picked in its place, as an update does). Its **Provides** column shows how many effects and
+  generators the version picked adds ("1 effect, 1 generator", their names in the tooltip; empty
   when the list does not say). **Install** downloads its file (the `.dll`, `.so` or `.py`)
   into the repository's folder in **your** plugins folder (named with a hash of the
   repository's address, with a `source.json` giving its name and address, written again
@@ -914,27 +931,35 @@ look there, so `make run` finds the `plugins` folder of the repository.
   Installed tab shows the
   repository's description in its **Description** column, what the installed version
   provides in its **Provides** column, and when a later version
-  works here (none past the plugin's `latest` in the list), "New: x.y.z" highlighted
-  next to the version (what changed in its tooltip) and an **Update** button. When that
-  version's `compatible_from` is later than the installed one (it can't read the
-  settings the installed version saved), "New: x.y.z" is in the warning color and its
-  tooltip and Update's say so.
+  works here (none past the plugin's `latest` in the list), an icon next to the version
+  (an up arrow in a disc; the new version and what changed in it in its tooltip): a click
+  downloads that version in place of the installed one (used from the next start). When
+  that version's `compatible_from` is later than the installed one (it can't read the
+  settings the installed version saved), the icon is in the warning color and its tooltip
+  says so.
 - **Plugin settings in projects**: an effect or generator of a plugin installed from a
   repository saves that plugin's id and version with its settings. Install and Update
   record the version's `compatible_from` in `source.json`. When a project is opened,
   settings saved by a version older than the installed one's `compatible_from` are
   reported in one message listing their layers, since they may now be read differently;
   every saved version is then set to the installed one, so the project no longer warns
-  once saved. Update downloads and checks the new file like Install, in the
+  once saved. Updating downloads and checks the new file like Install, in the
   folder of the old one, which is replaced (set aside as `.<name>.old` beside it, never
   loaded: a library in use can't be deleted on Windows); the new file is allowed, keeps
-  the old one's enabled or disabled state, and is used from the next start (the row says
-  "Updated to x.y.z" and the window offers the restart).
+  the old one's enabled or disabled state, and is used from the next start (the row shows a
+  check mark, "Updated to x.y.z" in its tooltip, and the window offers the restart).
+- **At startup**, the app also looks for a newer version of itself: the latest release's version,
+  which the project's web page publishes in
+  https://bzhmaddog.github.io/artwork-creator-app/version.json with the download page. If
+  it is newer, a toast says so; its **Download** button opens the download page
+  (https://bzhmaddog.github.io/artwork-creator-app/download.html). Nothing is said when the
+  file can't be read. The Microsoft Store package doesn't look: the Store updates it.
 - **At startup**, if plugins are installed, the app downloads the repositories' lists in
   the background (one that can't be read is skipped, without a message). If new versions
-  are found, once the window is open and the other startup questions answered it asks
-  whether to review them: **Review** opens the plugin manager on its Installed tab, the
-  new versions highlighted; **Not now** (or Esc) asks again at the next start. When the
+  are found, a toast at the bottom right of the window says so (it goes away after a few
+  seconds, unless the pointer is over it): its **Review** button opens the plugin manager
+  on its Installed tab, the new versions highlighted; otherwise it tells again at the
+  next start. When the
   plugin manager is already open (plugins waiting to be allowed), it just shows them.
 - **Packages a Python plugin needs** (numpy...) are listed in a block at the top of its
   file, the standard one of Python's inline script metadata (PEP 723):
@@ -1037,7 +1062,7 @@ changes; picking another color, or clicking the linked color variable again in t
 A text layer's text is linked to a text variable with the link button at the top right of
 its text box: it then shows the variable's text and follows when it changes, so one
 variable can fill several layers. Typing in the text, in the panel or on the canvas,
-unlinks it, with a warning in the status bar (undo links it again); **Unlink, keeping the
+unlinks it, with a toast saying so (undo links it again); **Unlink, keeping the
 value** unlinks it too.
 
 ### Colors in use

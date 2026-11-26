@@ -336,7 +336,16 @@ const ORIGIN_LEN: usize = 16;
 /// address, the name of the folder of the user's plugins folder they go in. A plugin's
 /// effects and generators from there have ids made of it and theirs, `<origin>/<id>`:
 /// the same plugin from two repositories is two plugins.
+///
+/// The official repository's is that of its former address: its plugins, installed before
+/// it moved, stay in their folder, and the effects saved in documents keep their ids.
 pub fn origin(url: &str) -> String {
+    use super::repository::{OFFICIAL, OFFICIAL_BEFORE};
+    let url = if url == OFFICIAL {
+        OFFICIAL_BEFORE
+    } else {
+        url
+    };
     hash(url.as_bytes())[..ORIGIN_LEN].to_owned()
 }
 
@@ -446,13 +455,25 @@ impl Settings {
         self.saved.disabled.remove(&key(path));
     }
 
-    /// The plugin repositories, in the order added: the official one until removed.
+    /// The plugin repositories, in the order added: the official one until removed. A
+    /// former address is read as the current one (see [`repository::current`]).
+    ///
+    /// [`repository::current`]: super::repository::current
     pub fn repositories(&self) -> Vec<String> {
-        let official = || vec![super::repository::OFFICIAL.to_owned()];
-        self.saved.repositories.clone().unwrap_or_else(official)
+        let Some(saved) = &self.saved.repositories else {
+            return vec![super::repository::OFFICIAL.to_owned()];
+        };
+        let mut list: Vec<String> = Vec::new();
+        for url in saved.iter().map(|u| super::repository::current(u)) {
+            if !list.iter().any(|r| r == url) {
+                list.push(url.to_owned());
+            }
+        }
+        list
     }
 
     pub fn add_repository(&mut self, url: &str) {
+        let url = super::repository::current(url);
         let mut list = self.repositories();
         if !list.iter().any(|r| r == url) {
             list.push(url.to_owned());
@@ -461,6 +482,7 @@ impl Settings {
     }
 
     pub fn remove_repository(&mut self, url: &str) {
+        let url = super::repository::current(url);
         let mut list = self.repositories();
         list.retain(|r| r != url);
         self.saved.repositories = Some(list);
@@ -1332,6 +1354,34 @@ mod tests {
         .unwrap();
         let groups: Vec<_> = specs.iter().map(|s| s.group.as_deref()).collect();
         assert_eq!(groups, [Some("Grain"), None, None]);
+    }
+
+    #[test]
+    fn the_official_repository_s_former_address_is_read_as_its_current_one() {
+        use super::super::repository::{OFFICIAL, OFFICIAL_BEFORE};
+        // Its plugins stay in their folder, under their ids.
+        assert_eq!(origin(OFFICIAL), origin(OFFICIAL_BEFORE));
+        assert_ne!(origin(OFFICIAL), origin("https://example.com/plugins.json"));
+        let dir = std::env::temp_dir().join(format!("artwork-moved-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let saved = dir.join("plugins.json");
+        let other = "https://example.com/plugins.json";
+        let both = [OFFICIAL_BEFORE, other, OFFICIAL];
+        std::fs::write(
+            &saved,
+            serde_json::json!({ "repositories": both }).to_string(),
+        )
+        .unwrap();
+        let mut settings = Settings::read_from(Some(saved.clone()));
+        assert_eq!(settings.repositories(), [OFFICIAL, other]);
+        settings.add_repository(OFFICIAL_BEFORE);
+        assert_eq!(settings.repositories(), [OFFICIAL, other]);
+        settings.save();
+        let mut settings = Settings::read_from(Some(saved.clone()));
+        assert_eq!(settings.repositories(), [OFFICIAL, other]);
+        settings.remove_repository(OFFICIAL_BEFORE);
+        assert_eq!(settings.repositories(), [other]);
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

@@ -34,8 +34,24 @@ use artwork_plugin_sdk::abi;
 use semver::VersionReq;
 use serde::Deserialize;
 
-/// The repository of the app's own plugins, always listed.
-pub const OFFICIAL: &str = "https://raw.githubusercontent.com/bzhmaddog/artwork-creator-plugins/refs/heads/main/plugins.json";
+/// The repository of the app's own plugins, always listed: its list as the plugins
+/// repository publishes it on GitHub Pages.
+pub const OFFICIAL: &str = "https://bzhmaddog.github.io/artwork-creator-plugins/plugins.json";
+
+/// The official repository's former address, the list in the plugins repository's main
+/// branch, still there for the app versions up to 0.19.0 that read it there. Saved
+/// settings naming it are read as [`OFFICIAL`] (see [`current`]), and the plugins
+/// installed from it keep their origin (see [`origin`](super::plugin::origin)).
+pub const OFFICIAL_BEFORE: &str = "https://raw.githubusercontent.com/bzhmaddog/artwork-creator-plugins/refs/heads/main/plugins.json";
+
+/// The address of the repository at `url` now: [`OFFICIAL`] for its former address.
+pub fn current(url: &str) -> &str {
+    if url == OFFICIAL_BEFORE {
+        OFFICIAL
+    } else {
+        url
+    }
+}
 
 /// The format of the list this app reads.
 const FORMAT: u32 = 1;

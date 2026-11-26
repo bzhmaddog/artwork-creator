@@ -455,7 +455,9 @@ impl Manager {
 
     /// Adds the repository typed in, once its list is read.
     fn add_repository(&mut self) {
-        let url = self.new_repo.trim().to_owned();
+        // The official repository's former address is read as its current one, so that it
+        // can't be listed twice.
+        let url = repository::current(self.new_repo.trim()).to_owned();
         self.add_error = None;
         if url.is_empty() {
             return;
@@ -1116,9 +1118,10 @@ fn provides(ui: &mut Ui, effects: &[String], generators: &[String]) {
 /// The version shown for an installed plugin: the one it gives itself once loaded, else the
 /// one recorded when installed from a repository, else "?".
 ///
-/// TEMPORARY (see TODO.md): the recorded one also replaces a loaded version that isn't
-/// X.Y.Z, as the Python plugins released before the plugin repository checked it give
-/// "1.0" for 1.0.0 and 1.0.1.
+/// The recorded one also replaces a loaded version that isn't X.Y.Z: the Python plugins
+/// released before the official repository checked it (film-grain 1.0.0 and 1.0.1,
+/// posterize 1.0.0 and 1.0.1, swap-channels 1.0.0) give "1.0", and copies of them stay
+/// installed for as long as their users keep them.
 fn shown_version<'a>(loaded: Option<&'a str>, recorded: Option<&'a str>) -> &'a str {
     let loaded = loaded.filter(|v| !v.is_empty());
     let valid = loaded.filter(|v| semver::Version::parse(v).is_ok());
@@ -2165,7 +2168,7 @@ mod tests {
     #[test]
     fn shown_version_prefers_a_valid_one() {
         assert_eq!(shown_version(Some("1.2.0"), Some("1.0.0")), "1.2.0");
-        // Not X.Y.Z (a Python plugin's "1.0"): the recorded one, if any (temporary, TODO.md).
+        // Not X.Y.Z (a Python plugin's "1.0"): the recorded one, if any.
         assert_eq!(shown_version(Some("1.0"), Some("1.0.1")), "1.0.1");
         assert_eq!(shown_version(Some("1.0"), None), "1.0");
         assert_eq!(shown_version(Some(""), Some("1.0.1")), "1.0.1");

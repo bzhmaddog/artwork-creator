@@ -25,6 +25,10 @@
 //! it has a file for this system; a library's `abi` must be one this app loads. Lists
 //! written before `engines` give `min_app` and `sdk` instead, read as `>=` that version;
 //! `min_app` is still written for the apps that read only it. Other fields are ignored.
+//!
+//! A plugin or a version this app can't read (a kind it doesn't know, a field it reads
+//! differently, a bad file entry...) is left out of the list, with the rest kept: a list
+//! made for newer apps still gives this one the versions it can use.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -32,7 +36,8 @@ use std::time::Duration;
 
 use artwork_plugin_sdk::abi;
 use semver::VersionReq;
-use serde::Deserialize;
+use serde::de::DeserializeOwned;
+use serde::{Deserialize, Deserializer};
 
 /// The repository of the app's own plugins, always listed: its list as the plugins
 /// repository publishes it on GitHub Pages.
@@ -63,7 +68,19 @@ const MAX_LIST: u64 = 4 << 20;
 pub struct Repository {
     pub format: u32,
     pub name: String,
+    #[serde(deserialize_with = "readable")]
     pub plugins: Vec<Entry>,
+}
+
+/// The items of a list that read as `T`, the others left out (logged).
+fn readable<'de, D: Deserializer<'de>, T: DeserializeOwned>(d: D) -> Result<Vec<T>, D::Error> {
+    let items = Vec::<serde_json::Value>::deserialize(d)?;
+    let read = |v: serde_json::Value| {
+        serde_json::from_value(v)
+            .map_err(|e| log::warn!("plugin list: left out, unreadable: {e}"))
+            .ok()
+    };
+    Ok(items.into_iter().filter_map(read).collect())
 }
 
 /// A plugin of a repository.
@@ -79,6 +96,7 @@ pub struct Entry {
     /// The newest version released: none later is offered.
     #[serde(default)]
     pub latest: Option<String>,
+    #[serde(deserialize_with = "readable")]
     pub versions: Vec<Version>,
 }
 
@@ -412,9 +430,11 @@ pub fn hashes<'a>(paths: impl IntoIterator<Item = &'a Path>) -> Vec<(PathBuf, St
         .collect()
 }
 
-/// Reads a repository's list, checking it: what is wrong with it, otherwise.
+/// Reads a repository's list, checking it: what is wrong with it, otherwise. A plugin or
+/// a version that is wrong, or that this app can't read, is left out (logged); a plugin
+/// left without versions too.
 pub fn parse(json: &str) -> Result<Repository, String> {
-    let repo: Repository = serde_json::from_str(json).map_err(|e| e.to_string())?;
+    let mut repo: Repository = serde_json::from_str(json).map_err(|e| e.to_string())?;
     if repo.format != FORMAT {
         return Err(format!(
             "format {} not supported (this app reads format {FORMAT})",
@@ -425,43 +445,56 @@ pub fn parse(json: &str) -> Result<Repository, String> {
         return Err("the repository has no name".into());
     }
     let mut ids = std::collections::BTreeSet::new();
-    for p in &repo.plugins {
-        let what = format!("plugin \"{}\"", p.id);
-        if p.id.trim().is_empty() || p.name.trim().is_empty() {
-            return Err("a plugin has no id or no name".into());
-        }
-        if !ids.insert(&p.id) {
-            return Err(format!("{what} is listed twice"));
-        }
-        if p.latest
-            .as_deref()
-            .is_some_and(|l| version_parts(l).is_none())
-        {
-            return Err(format!("{what}: latest is not a version number"));
-        }
-        if p.versions.is_empty() {
-            return Err(format!("{what} has no versions"));
-        }
-        for v in &p.versions {
-            let what = format!("{what} {}", v.version);
-            let compatible = v.compatible_from.as_deref();
-            if version_parts(&v.version).is_none()
-                || compatible.is_some_and(|c| version_parts(c).is_none())
-            {
-                return Err(format!("{what}: not a version number"));
-            }
-            if let Err(e) = v.app_req().and(v.sdk_req()) {
-                return Err(format!("{what}: not a version requirement: {e}"));
-            }
-            if v.files.is_empty() {
-                return Err(format!("{what} has no files"));
-            }
-            for d in v.files.values() {
-                check_download(d, p.kind).map_err(|e| format!("{what}: {e}"))?;
-            }
-        }
-    }
+    repo.plugins.retain_mut(|p| {
+        let r = check_entry(p).and_then(|()| {
+            (ids.insert(p.id.clone()))
+                .then_some(())
+                .ok_or_else(|| "listed twice".to_owned())
+        });
+        r.map_err(|e| log::warn!("plugin list: plugin \"{}\" left out: {e}", p.id))
+            .is_ok()
+    });
     Ok(repo)
+}
+
+/// Checks a plugin of a list, leaving out its versions that are wrong (logged); an error
+/// if it is wrong itself, or has no version left.
+fn check_entry(p: &mut Entry) -> Result<(), String> {
+    if p.id.trim().is_empty() || p.name.trim().is_empty() {
+        return Err("no id or no name".into());
+    }
+    if p.latest
+        .as_deref()
+        .is_some_and(|l| version_parts(l).is_none())
+    {
+        return Err("latest is not a version number".into());
+    }
+    let (id, kind) = (p.id.clone(), p.kind);
+    p.versions.retain(|v| {
+        (check_version(v, kind))
+            .map_err(|e| log::warn!("plugin list: {id} {} left out: {e}", v.version))
+            .is_ok()
+    });
+    if p.versions.is_empty() {
+        return Err("no version this app can read".into());
+    }
+    Ok(())
+}
+
+/// What is wrong with a version of a plugin of `kind`, if anything.
+fn check_version(v: &Version, kind: Kind) -> Result<(), String> {
+    let compatible = v.compatible_from.as_deref();
+    if version_parts(&v.version).is_none() || compatible.is_some_and(|c| version_parts(c).is_none())
+    {
+        return Err("not a version number".into());
+    }
+    if let Err(e) = v.app_req().and(v.sdk_req()) {
+        return Err(format!("not a version requirement: {e}"));
+    }
+    if v.files.is_empty() {
+        return Err("no files".into());
+    }
+    v.files.values().try_for_each(|d| check_download(d, kind))
 }
 
 /// Whether `url` may be read: https:// only, plus http:// in debug builds (to test
@@ -809,31 +842,60 @@ mod tests {
     fn a_bad_list_says_what_is_wrong() {
         let bad = |from: &str, to: &str| parse(&SAMPLE.replacen(from, to, 1)).unwrap_err();
         assert!(bad("\"format\": 1", "\"format\": 2").contains("format 2"));
-        assert!(bad("\"kind\": \"library\"", "\"kind\": \"wasm\"").contains("unknown variant"));
-        assert!(bad("https://github.com", "ftp://github.com").contains("https://"));
-        assert_eq!(
-            parse(&SAMPLE.replacen("https://github.com", "http://github.com", 1)).is_ok(),
-            cfg!(debug_assertions)
-        );
-        assert!(bad("824c18", "zz4c18").contains("sha256"));
-        assert!(bad("libhalftone.so", "..").contains("file name"));
-        assert!(bad("halftone.dll", "halftone.exe").contains("file name"));
-        assert!(bad("\"version\": \"1.0.0\"", "\"version\": \"one\"").contains("version"));
-        assert!(bad("\"name\": \"Halftone\"", "\"name\": \"\"").contains("no id"));
-        assert!(
-            bad(
-                "\"id\": \"halftone\",",
-                "\"id\": \"halftone\", \"latest\": \"new\","
-            )
-            .contains("latest")
-        );
-        assert!(bad("\"min_app\": \"0.16.0\"", "\"min_app\": \"soon\"").contains("version"));
-        assert!(bad("\"sdk\": \"0.3.0\"", "\"sdk\": \"new\"").contains("version"));
-        let engines = r#""engines": {"app": "soon"}"#;
-        assert!(bad("\"sdk\": \"0.3.0\"", engines).contains("requirement"));
-        assert!(bad("\"id\": \"posterize\"", "\"id\": \"halftone\"").contains("twice"));
         assert!(parse("not json").is_err());
         assert!(parse("{\"format\": 1, \"name\": \"\", \"plugins\": []}").is_err());
+    }
+
+    #[test]
+    fn what_this_app_cannot_read_is_left_out_with_the_rest_kept() {
+        let ids = |from: &str, to: &str| -> Vec<String> {
+            let repo = parse(&SAMPLE.replacen(from, to, 1)).unwrap();
+            repo.plugins.into_iter().map(|p| p.id).collect()
+        };
+        // Halftone's only version, or Halftone itself: only Posterize is left.
+        for (from, to) in [
+            ("\"kind\": \"library\"", "\"kind\": \"wasm\""),
+            ("https://github.com", "ftp://github.com"),
+            ("824c18", "zz4c18"),
+            ("libhalftone.so", ".."),
+            ("halftone.dll", "halftone.exe"),
+            ("\"version\": \"0.1.0\"", "\"version\": \"one\""),
+            ("\"version\": \"0.1.0\"", "\"version\": 1"),
+            ("\"abi\": 2", "\"abi\": \"two\""),
+            ("\"name\": \"Halftone\"", "\"name\": \"\""),
+            (
+                "\"id\": \"halftone\",",
+                "\"id\": \"halftone\", \"latest\": \"new\",",
+            ),
+            ("\"min_app\": \"0.16.0\"", "\"min_app\": \"soon\""),
+        ] {
+            assert_eq!(ids(from, to), ["posterize"], "{to}");
+        }
+        assert_eq!(
+            ids("https://github.com", "http://github.com"),
+            if cfg!(debug_assertions) {
+                &["halftone", "posterize"][..]
+            } else {
+                &["posterize"][..]
+            }
+        );
+        // Posterize's.
+        assert_eq!(ids("\"sdk\": \"0.3.0\"", "\"sdk\": \"new\""), ["halftone"]);
+        let engines = r#""engines": {"app": "soon"}"#;
+        assert_eq!(ids("\"sdk\": \"0.3.0\"", engines), ["halftone"]);
+        // Listed twice: the first kept.
+        let twice =
+            parse(&SAMPLE.replacen("\"id\": \"posterize\"", "\"id\": \"halftone\"", 1)).unwrap();
+        assert_eq!(twice.plugins.len(), 1);
+        assert_eq!(twice.plugins[0].kind, Kind::Library);
+        // A version left out, the plugin's others kept.
+        let newer = r#""versions": [{"version": "2.0.0", "abi": 2, "files": {"linux-x86_64": 1}},"#;
+        let both = SAMPLE.replacen(r#""versions": ["#, newer, 1);
+        let repo = parse(&both).unwrap();
+        let versions: Vec<&str> = (repo.plugins[0].versions.iter())
+            .map(|v| v.version.as_str())
+            .collect();
+        assert_eq!(versions, ["0.1.0"]);
     }
 
     /// Reads the official repository and downloads its plugins for this system, over the

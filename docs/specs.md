@@ -907,7 +907,9 @@ look there, so `make run` finds the `plugins` folder of the repository.
   the new one, and the plugins installed from it stay where they are, under the same ids.
   **Add repository** adds another by the address of its list, which
   is downloaded and checked first (a list that can't be read or is not valid is not
-  added, and the window says why). **Remove** takes a repository out, the official one
+  added, and the window says why). A plugin or a version of a list that this app can't
+  read or that is not valid (one made for later apps, say) is left out, and the rest of
+  the list is shown. **Remove** takes a repository out, the official one
   too (add its address again to get it back); the plugins installed from it stay
   installed. The repositories are kept in `plugins.json`; their lists are downloaded
   each time the plugin manager opens.

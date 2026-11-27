@@ -71,7 +71,7 @@ DIST    := dist
 # depends must match. 2.28: Debian 10, Ubuntu 18.10, RHEL 8.
 GLIBC   := 2.28
 
-# The app's version (Cargo.toml), in the name of the Windows .zip.
+# The app's version (Cargo.toml), in the names of the .zip and the .tar.gz.
 VERSION := $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
 
 LINUX_BIN   := target/$(LINUX)/release/$(APP)
@@ -209,7 +209,8 @@ dist-linux: linux-portable python-linux
 	# For desktop menus: see "Building" in README.md.
 	cp assets/icon/png/$(APP)-256.png $(DIST)/$(APP)-linux/$(APP).png
 	cp assets/$(APP).desktop $(DIST)/$(APP)-linux/
-	tar -czf $(DIST)/$(APP)-linux.tar.gz -C $(DIST) $(APP)-linux
+	rm -f $(DIST)/$(APP)-linux.tar.gz $(DIST)/$(APP)-*-linux.tar.gz
+	tar -czf $(DIST)/$(APP)-$(VERSION)-linux.tar.gz -C $(DIST) $(APP)-linux
 
 # The packages ship a Python of their own, for the Python plugins: python.org's
 # embeddable Python on Windows, python-build-standalone's on Linux.

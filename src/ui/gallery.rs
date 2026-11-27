@@ -214,7 +214,12 @@ fn widget_gallery() {
                 let _ = layers::tool_icon(ui, layers::Tool::Add, true, "Add");
                 let _ = layers::tool_icon(ui, layers::Tool::Delete, true, "Delete");
                 let _ = layers::tool_icon(ui, layers::Tool::Delete, false, "Disabled");
-                if let Some(g) = crate::render::effects::registry().generator("builtin.noise") {
+                // A generator with a seed, from a plugin.
+                let reg = crate::render::effects::registry();
+                let seeded = reg
+                    .generators()
+                    .find(|g| g.params().iter().any(|p| p.seed_range().is_some()));
+                if let Some(g) = seeded {
                     let mut inst = crate::render::effects::EffectInstance::generator(g);
                     crate::ui::effects::regenerate_button(ui, &mut inst);
                 }

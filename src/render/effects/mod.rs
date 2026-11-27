@@ -12,7 +12,7 @@
 //!
 //! A [`Generator`] makes pixels instead of changing them: a shape's fill (see
 //! `shape`), such as noise or stripes. Generators share effects' parameters, their
-//! registry and their plugins; the built-in ones live in [`generators`].
+//! registry and their plugins; all come from plugins (see [`generators`]).
 
 pub mod builtin;
 pub mod cache;
@@ -20,6 +20,7 @@ pub mod generators;
 pub mod plugin;
 pub mod python;
 pub mod repository;
+pub mod texts;
 
 use std::collections::BTreeMap;
 use std::hash::{Hash, Hasher};
@@ -65,7 +66,7 @@ pub trait Effect: Send + Sync {
 
 /// Draws a shape's fill.
 pub trait Generator: Send + Sync {
-    /// Unique, stable id saved in projects, e.g. `"builtin.noise"`; no effect has it.
+    /// Unique, stable id saved in projects, e.g. `"halftone.grid"`; no effect has it.
     fn id(&self) -> &str;
     /// Shown in a fill's Generated menu.
     fn name(&self) -> &str;
@@ -272,10 +273,6 @@ impl ParamSpec {
         }
     }
 }
-
-/// The largest seed of the built-in generators, the same as the SDK's seed helpers': a
-/// seed takes any value from 0 to it.
-pub const SEED_MAX: i32 = artwork_plugin_sdk::SEED_MAX;
 
 /// A random seed in `min..=max`, different from `old` when there is room for another.
 pub fn random_seed(min: i32, max: i32, old: Option<i32>) -> i32 {
@@ -1126,11 +1123,11 @@ mod tests {
         }
         assert_eq!(random_seed(5, 5, Some(5)), 5);
         // A new fill starts with a seed of its own; other settings at their defaults.
-        let noise = registry().generator("builtin.noise").unwrap();
+        let noise = registry().generator("test.grains").unwrap();
         let a = EffectInstance::generator(noise).with_random_seeds();
         let b = EffectInstance::generator(noise).with_random_seeds();
         let seed = |i: &EffectInstance| i.params["seed"].as_i64().unwrap();
-        assert!((0..=SEED_MAX as i64).contains(&seed(&a)));
+        assert!((0..=artwork_plugin_sdk::SEED_MAX as i64).contains(&seed(&a)));
         assert_ne!(seed(&a), seed(&b));
         let defaults = EffectInstance::generator(noise);
         assert_eq!(a.params["color1"], defaults.params["color1"]);

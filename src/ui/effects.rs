@@ -612,6 +612,12 @@ fn regenerate(
 /// changed.
 pub fn generator_params(ui: &mut Ui, key: u64, inst: &mut EffectInstance) -> bool {
     let Some(g) = registry().generator(&inst.effect) else {
+        // Its plugin's Install button, as a missing effect's.
+        if let Some(entry) = &inst.plugin
+            && let Some((tone, text)) = crate::ui::plugins::install_missing(ui, &inst.effect, entry)
+        {
+            crate::ui::callout::callout_small(ui, tone, &text);
+        }
         return false;
     };
     params_grid(

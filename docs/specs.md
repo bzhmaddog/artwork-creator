@@ -682,21 +682,18 @@ that folds them away.
 - It is made again at the export resolution, so it stays sharp at any size; resizing the
   shape shows more or less of it. PDF and SVG exports get it as an image under the
   outline.
-
-| Generator | Settings |
-|---|---|
-| Noise | grain, color 1, color 2 |
-| Clouds | size, detail (1 to 8), color 1, color 2 |
-| Checkerboard | square size, color 1, color 2, angle |
-| Stripes | width, color 1, color 2, angle |
-
-- The magic wand button next to the generator menu (Noise, Clouds, and a plugin's
-  generator with a seed setting) draws another random picture with the same
-  settings. A new generated fill, or one switched to another generator, starts with a
-  random picture too. The picture is saved with the project.
-- More generators come from [plugins](#plugins), listed under the plugin's name. A project
-  using one whose plugin is not installed still opens: it shows as "Missing generator",
-  is not drawn, and is saved unchanged.
+- Generators come from [plugins](#plugins), listed under the plugin's name: the
+  official repository has Noise, Clouds, Checkerboard and Stripes (part of the app up
+  to 0.20), Dot grid (Halftone) and Bands (Posterize). With none installed, Generated is
+  grayed out, its tooltip pointing to the plugin manager.
+- A project using a generator whose plugin is not installed still opens: it shows as
+  "Missing generator", with an Install button when one of the user's repositories has
+  the plugin, is not drawn, and is saved unchanged. One of the generators that came with
+  the app is read as the official repository's plugin of the same name.
+- The magic wand button next to the generator menu (for a generator with a seed
+  setting) draws another random picture with the same settings. A new generated fill,
+  or one switched to another generator, starts with a random picture too. The picture
+  is saved with the project.
 - Its colors can be linked to color variables, as effects' are.
 
 ## Transforming layers
@@ -1008,7 +1005,11 @@ look there, so `make run` finds the `plugins` folder of the repository.
   installs it as the plugin manager does (a spinner meanwhile; the effect shows again once
   loaded, or the box asks for a restart). Effects added before this, or from plugins put
   in a plugins folder by hand, have no such button.
-- Effects and generators from plugins show their own names, untranslated.
+- Effects and generators from plugins show their names, descriptions and settings in the
+  language of the interface when the plugin translates them (the app asks it for each of
+  its languages when loading it), in the texts of its code otherwise; changing the
+  language changes them too, without a restart. Plugin names are not translated. A
+  missing generator has the same Install button, below its menu.
 
 Writing a plugin: see "Plugins" in [README.md](../README.md#plugins).
 

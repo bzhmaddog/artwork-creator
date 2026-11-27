@@ -2131,7 +2131,7 @@ mod tests {
     fn a_generated_fill_fills_the_outline() {
         let mut l = layer(ShapeKind::Ellipse);
         let g = crate::render::effects::registry()
-            .generator("builtin.stripes")
+            .generator("test.bands")
             .unwrap();
         let s = l.shape.as_mut().unwrap();
         s.stroke = false;

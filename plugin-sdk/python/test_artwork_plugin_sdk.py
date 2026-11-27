@@ -97,6 +97,23 @@ class SdkTest(unittest.TestCase):
                          [("test.fill", True), ("test.shrink", False)])
         self.assertEqual(answer["generators"][0]["id"], "test.dot")
 
+    def test_describe_in_a_language(self):
+        fr = {"Fill": "Remplir", "Color": "Couleur", "No": "Non", "Dot": "Point"}
+        plugin = ap.Plugin("Test", "2.0", effects=[Fill()], generators=[Dot()],
+                           translations={"fr-FR": fr})
+        [(answer, _)] = exchange(plugin, ({"op": "describe", "language": "fr_CA"}, b""))
+        fill = answer["effects"][0]
+        self.assertEqual(fill["name"], "Remplir")
+        self.assertEqual([p["label"] for p in fill["params"]], ["Couleur", "Fail"])
+        self.assertEqual([o["label"] for o in fill["params"][1]["options"]], ["Non", "Yes"])
+        self.assertEqual(fill["params"][1]["options"][0]["id"], "no")
+        self.assertEqual(answer["generators"][0]["name"], "Point")
+        # A language it has none for: English.
+        [(answer, _)] = exchange(plugin, ({"op": "describe", "language": "de-DE"}, b""))
+        self.assertEqual(answer["effects"][0]["name"], "Fill")
+        self.assertEqual(plugin.untranslated("fr-FR"), ["Fail", "Yes"])
+        self.assertEqual(plugin.untranslated("de-DE"), ["Fill", "Color", "Fail", "No", "Yes", "Dot"])
+
     def test_calls(self):
         values = {"color": "#0a141eff", "fail": "no"}
         answers = exchange(

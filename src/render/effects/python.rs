@@ -17,6 +17,7 @@ use image::RgbaImage;
 use serde_json::{Value, json};
 
 use super::plugin::{PluginInfo, check};
+use super::texts::{self, Texts};
 use super::{Effect, Generator, ParamSpec, Params};
 
 /// The SDK module, run with `python -c`; it then runs the plugin file given after it.
@@ -396,6 +397,21 @@ pub type Contents = (PluginInfo, Vec<Box<dyn Effect>>, Vec<Box<dyn Generator>>);
 
 /// Starts the plugin file `path` with `python` and reads what it provides.
 pub fn load_script(path: &Path, python: &'static Python) -> Result<Contents, String> {
+    let (info, effects, generators) = load_parts(path, python)?;
+    let effects = (effects.into_iter())
+        .map(|e| Box::new(e) as Box<dyn Effect>)
+        .collect();
+    let generators = (generators.into_iter())
+        .map(|g| Box::new(g) as Box<dyn Generator>)
+        .collect();
+    Ok((info, effects, generators))
+}
+
+/// [`load_script`], as they are.
+fn load_parts(
+    path: &Path,
+    python: &'static Python,
+) -> Result<(PluginInfo, Vec<PythonEffect>, Vec<PythonGenerator>), String> {
     let script = Arc::new(Script {
         path: path.to_owned(),
         python,
@@ -432,29 +448,44 @@ pub fn load_script(path: &Path, python: &'static Python) -> Result<Contents, Str
         ids.push(d.id.clone());
         Ok::<_, String>(Part {
             id: d.id,
-            name: d.name,
-            description: d.description,
-            params: d.params,
+            texts: Texts::new(d.shown),
             plugin: name.clone(),
             script: script.clone(),
         })
     };
-    let mut effects: Vec<Box<dyn Effect>> = Vec::new();
+    let mut effects = Vec::new();
     for e in list("effects") {
-        effects.push(Box::new(PythonEffect {
+        effects.push(PythonEffect {
             part: describe("effect", &e)?,
             padding: e.get("padding") == Some(&Value::Bool(true)),
-        }));
+        });
     }
-    let mut generators: Vec<Box<dyn Generator>> = Vec::new();
+    let mut generators = Vec::new();
     for g in list("generators") {
-        generators.push(Box::new(PythonGenerator(describe("generator", &g)?)));
+        generators.push(PythonGenerator(describe("generator", &g)?));
+    }
+    // Its texts in each language of the app; an SDK before 0.6.0 gives those of the
+    // code again.
+    for (language, code) in texts::LANGUAGES {
+        match script.call(&json!({"op": "describe", "language": code}), &[], 0) {
+            Ok((v, _)) => {
+                let e = effects
+                    .iter_mut()
+                    .map(|e| (e.part.id.as_str(), &mut e.part.texts));
+                texts::read(&v, "effects", language, e);
+                let g = generators
+                    .iter_mut()
+                    .map(|g| (g.0.id.as_str(), &mut g.0.texts));
+                texts::read(&v, "generators", language, g);
+            }
+            Err(e) => log::warn!("{name}: texts in {language:?}: {e}"),
+        }
     }
     let info = PluginInfo {
         name: name.clone(),
         version: text(&d, "version"),
-        effects: effects.iter().map(|e| e.id().to_owned()).collect(),
-        generators: generators.iter().map(|g| g.id().to_owned()).collect(),
+        effects: effects.iter().map(|e| e.part.id.clone()).collect(),
+        generators: generators.iter().map(|g| g.0.id.clone()).collect(),
         path: path.to_owned(),
         source: None,
         entry: None,
@@ -465,9 +496,7 @@ pub fn load_script(path: &Path, python: &'static Python) -> Result<Contents, Str
 /// What a Python effect and a Python generator have in common.
 struct Part {
     id: String,
-    name: String,
-    description: String,
-    params: Vec<ParamSpec>,
+    texts: Texts,
     plugin: String,
     script: Arc<Script>,
 }
@@ -508,15 +537,15 @@ impl Effect for PythonEffect {
     }
 
     fn name(&self) -> &str {
-        &self.part.name
+        &self.part.texts.current().name
     }
 
     fn description(&self) -> &str {
-        &self.part.description
+        &self.part.texts.current().description
     }
 
     fn params(&self) -> &[ParamSpec] {
-        &self.part.params
+        &self.part.texts.current().params
     }
 
     fn plugin(&self) -> Option<&str> {
@@ -558,15 +587,15 @@ impl Generator for PythonGenerator {
     }
 
     fn name(&self) -> &str {
-        &self.0.name
+        &self.0.texts.current().name
     }
 
     fn description(&self) -> &str {
-        &self.0.description
+        &self.0.texts.current().description
     }
 
     fn params(&self) -> &[ParamSpec] {
-        &self.0.params
+        &self.0.texts.current().params
     }
 
     fn plugin(&self) -> Option<&str> {
@@ -874,6 +903,38 @@ plugin = Plugin("", "3", effects=[Grow()])
             .apply(&mut img, &Params::new(halve.params(), &inst.params), 1.0)
             .unwrap();
         assert!(reg.files().iter().any(|f| f.path == path));
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn python_plugins_give_their_texts_in_the_app_s_languages() {
+        let Some(py) = python() else {
+            return;
+        };
+        let script = r#"
+from artwork_plugin_sdk import Generator, Plugin, int_param
+
+class Dots(Generator):
+    id = "t.dots"
+    name = "Dots"
+    params = [int_param("n", "Count", 1, 9, 3)]
+
+plugin = Plugin("T", "1.0", generators=[Dots()],
+                translations={"fr-FR": {"Dots": "Points", "Count": "Nombre"}})
+"#;
+        let dir = folder("texts", &[("t.py", script)]);
+        let (_, _, gens) = load_parts(&dir.join("t.py"), py).unwrap();
+        let t = &gens[0].0.texts;
+        let fr = t.get(crate::i18n::Language::French);
+        assert_eq!(
+            (fr.name.as_str(), fr.params[0].label.as_str()),
+            ("Points", "Nombre")
+        );
+        let gb = t.get(crate::i18n::Language::BritishEnglish);
+        assert_eq!(
+            (gb.name.as_str(), gb.params[0].label.as_str()),
+            ("Dots", "Count")
+        );
         let _ = std::fs::remove_dir_all(dir);
     }
 

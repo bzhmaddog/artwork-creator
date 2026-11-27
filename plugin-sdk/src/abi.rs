@@ -9,13 +9,16 @@
 //! Version 2 added generators: `generator_count` and `generators` at the end of the
 //! plugin table. A version 1 table ends before them (see [`PluginTableV1`]).
 //!
+//! Version 3 added the plugin's texts in other languages: `texts_data` and `texts` at
+//! the end. A version 2 table ends before them (see [`PluginTableV2`]).
+//!
 //! Strings are UTF-8 and NUL-terminated. Parameter lists and values are JSON (see
 //! [`crate::Param`] and [`crate::Values`]).
 
 use std::ffi::{c_char, c_void};
 
 /// Version of the layout below.
-pub const ABI_VERSION: u32 = 2;
+pub const ABI_VERSION: u32 = 3;
 
 /// Oldest version still loaded: its table is a [`PluginTableV1`].
 pub const OLDEST_ABI_VERSION: u32 = 1;
@@ -43,6 +46,35 @@ pub struct PluginTable {
     /// Since version 2.
     pub generator_count: u32,
     /// `generator_count` generators; since version 2.
+    pub generators: *const GeneratorTable,
+    /// Passed back to `texts`; since version 3.
+    pub texts_data: *const c_void,
+    /// The texts in another language; null if the plugin has only those above. Since
+    /// version 3.
+    pub texts: Option<TextsFn>,
+}
+
+/// `const char *texts(const void *texts_data, const char *language)`.
+///
+/// The plugin's texts in `language`, a code such as `"fr-FR"` or `"en-GB"`: JSON
+/// `{"effects": [...], "generators": [...]}`, each entry with the `id` of one of the
+/// table's effects or generators and its `name`, `description` and `params` (the same
+/// parameters, with their labels, groups and choice labels in that language). Null when
+/// it has none for that language: the app shows the table's. The string stays valid
+/// while the library is loaded.
+pub type TextsFn =
+    unsafe extern "C" fn(texts_data: *const c_void, language: *const c_char) -> *const c_char;
+
+/// A version 2 plugin table: no texts in other languages.
+#[repr(C)]
+#[derive(Debug)]
+pub struct PluginTableV2 {
+    pub abi_version: u32,
+    pub effect_count: u32,
+    pub name: *const c_char,
+    pub version: *const c_char,
+    pub effects: *const EffectTable,
+    pub generator_count: u32,
     pub generators: *const GeneratorTable,
 }
 

@@ -517,7 +517,7 @@ mod tests {
 
     #[test]
     fn archive_keeps_the_template() {
-        let dir = std::env::temp_dir().join(format!("artwork-tpl-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("artwork-archive-tpl-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let installed = crate::template::tests::fixture();
         let copy = crate::document::TemplateCopy::of(&installed).unwrap();

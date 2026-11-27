@@ -377,7 +377,8 @@ mod tests {
         running.write(&doc, &export, &info("running")).unwrap();
         // A crashed run: its lock let go, its copy left.
         let crashed = Session::start(&root).unwrap();
-        crashed.write(&doc, &export, &info("crashed")).unwrap();
+        let crashed_info = info("crashed");
+        crashed.write(&doc, &export, &crashed_info).unwrap();
         drop(crashed.lock);
         // A run that crashed before its first copy: nothing to recover.
         let empty = Session::start(&root).unwrap();
@@ -386,7 +387,7 @@ mod tests {
 
         let found = orphans(&root);
         assert_eq!(found.len(), 1);
-        assert_eq!(found[0].info, info("crashed"));
+        assert_eq!(found[0].info, crashed_info);
         let (doc2, _) = project::load(&found[0].copy_path()).unwrap();
         assert_eq!(doc2.layers.len(), doc.layers.len());
         // Found, it is locked: another run starting now doesn't offer it too.

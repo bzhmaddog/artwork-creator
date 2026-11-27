@@ -6,7 +6,7 @@
 #
 #   sh scripts/windows-setup.sh <artwork-creator.exe>
 #
-# Writes dist/artwork-creator-windows-setup.exe. The image is pinned by digest, so a
+# Writes dist/artwork-creator-X.Y.Z-windows-setup.exe (the version in Cargo.toml). The image is pinned by digest, so a
 # newly pushed (possibly compromised) one is never pulled on its own; change it on purpose.
 set -eu
 
@@ -29,4 +29,4 @@ mkdir -p dist
 # Wine's complaints about having no display, which the compiler doesn't need.
 "$container" run --rm -i $userns -e WINEDEBUG=-all -v "$PWD":/work:z "$IMAGE" \
     /Q "/DAppVersion=$version" "/DExe=$exe_rel" installer/artwork-creator.iss
-echo "dist/artwork-creator-windows-setup.exe"
+echo "dist/artwork-creator-$version-windows-setup.exe"

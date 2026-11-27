@@ -78,7 +78,9 @@ jobs:
           cp -r templates "dist/$dir/"
           cp -r target/python-linux "dist/$dir/python"
           rm "dist/$dir/python/.version"
-          tar -czf "dist/$dir.tar.gz" -C dist "$dir"
+          # The version in its name, as the Windows .zip.
+          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+          tar -czf "dist/$APP-$version-linux.tar.gz" -C dist "$dir"
       - name: Installers (Linux)
         if: matrix.name == 'linux'
         run: |
@@ -100,7 +102,9 @@ jobs:
           Copy-Item -Recurse templates "dist/$dir/"
           Copy-Item -Recurse target/python-embed "dist/$dir/python"
           Remove-Item "dist/$dir/python/.version"
-          Compress-Archive -Path "dist/$dir" -DestinationPath "dist/$dir.zip"
+          # The files at the root of the .zip (dir/* rather than dir), its name with the version.
+          $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.*)"' | Select-Object -First 1).Matches.Groups[1].Value
+          Compress-Archive -Path "dist/$dir/*" -DestinationPath "dist/$env:APP-$version-windows.zip"
       # Inno Setup at a pinned version, checked against its SHA-256; raise it on purpose.
       - name: Installer (Windows)
         if: matrix.name == 'windows'

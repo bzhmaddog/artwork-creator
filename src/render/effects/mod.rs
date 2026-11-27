@@ -985,17 +985,32 @@ const MAX_PADDING: f32 = 4096.0;
 /// Transparent margins (left, top, right, bottom) the stack needs around an image of
 /// `scale`, in its pixels: what all enabled effects ask for, added up.
 pub fn padding(stack: &[EffectInstance], scale: f32) -> [u32; 4] {
-    let reg = registry();
-    let mut pad = [0.0f32; 4];
-    for inst in stack.iter().filter(|e| e.enabled) {
-        if let Some(effect) = reg.get(&inst.effect) {
-            let p = effect.padding(&Params::new(effect.params(), &inst.params));
-            for (a, b) in pad.iter_mut().zip(p) {
-                *a += b.max(0.0);
-            }
-        }
+    let mut pad = [0; 4];
+    for (effect, params) in steps(stack) {
+        pad = add_padding(pad, effect_padding(effect, &params, scale));
     }
-    pad.map(|v| (v * scale).ceil().clamp(0.0, MAX_PADDING) as u32)
+    pad
+}
+
+/// The enabled effects of the stack that are available, in order, with their parameters.
+fn steps(stack: &[EffectInstance]) -> impl Iterator<Item = (&'static dyn Effect, Params<'_>)> {
+    let reg = registry();
+    stack.iter().filter(|e| e.enabled).filter_map(move |inst| {
+        let effect = reg.get(&inst.effect)?;
+        Some((effect, Params::new(effect.params(), &inst.params)))
+    })
+}
+
+/// The margins one effect asks for around an image of `scale`, in its pixels.
+fn effect_padding(effect: &dyn Effect, params: &Params, scale: f32) -> [u32; 4] {
+    effect
+        .padding(params)
+        .map(|v| (v.max(0.0) * scale).ceil().clamp(0.0, MAX_PADDING) as u32)
+}
+
+/// `more` added to `pad`, each side kept within `MAX_PADDING`.
+fn add_padding(pad: [u32; 4], more: [u32; 4]) -> [u32; 4] {
+    std::array::from_fn(|i| (pad[i] + more[i]).min(MAX_PADDING as u32))
 }
 
 /// What applying a stack did.
@@ -1007,38 +1022,47 @@ pub struct Applied {
     pub errors: Vec<String>,
 }
 
-/// Applies the enabled effects in order, after adding the margins they need. Unknown
-/// effects are skipped.
-pub fn apply(img: &mut RgbaImage, stack: &[EffectInstance], scale: f32) -> Applied {
-    let pad = padding(stack, scale);
-    if pad != [0; 4] {
-        let [l, t, r, b] = pad;
-        let (w, bw) = (img.width() as usize * 4, (img.width() + l + r) as usize * 4);
-        let mut big = RgbaImage::new(img.width() + l + r, img.height() + t + b);
-        let src = img.as_raw();
-        par_rows(&mut big, bw, |y0, chunk| {
-            for (j, row) in chunk.chunks_exact_mut(bw).enumerate() {
-                let y = (y0 + j) as i64 - t as i64;
-                if (0..img.height() as i64).contains(&y) {
-                    let from = &src[y as usize * w..][..w];
-                    row[l as usize * 4..][..w].copy_from_slice(from);
-                }
-            }
-        });
-        *img = big;
+/// Adds transparent margins (left, top, right, bottom) around `img`.
+fn grow(img: &mut RgbaImage, [l, t, r, b]: [u32; 4]) {
+    if [l, t, r, b] == [0; 4] {
+        return;
     }
-    let reg = registry();
-    let mut errors = Vec::new();
-    for inst in stack.iter().filter(|e| e.enabled) {
-        let Some(effect) = reg.get(&inst.effect) else {
-            continue;
-        };
-        let params = Params::new(effect.params(), &inst.params);
+    let (w, bw) = (img.width() as usize * 4, (img.width() + l + r) as usize * 4);
+    let mut big = RgbaImage::new(img.width() + l + r, img.height() + t + b);
+    let src = img.as_raw();
+    par_rows(&mut big, bw, |y0, chunk| {
+        for (j, row) in chunk.chunks_exact_mut(bw).enumerate() {
+            let y = (y0 + j) as i64 - t as i64;
+            if (0..img.height() as i64).contains(&y) {
+                let from = &src[y as usize * w..][..w];
+                row[l as usize * 4..][..w].copy_from_slice(from);
+            }
+        }
+    });
+    *img = big;
+}
+
+/// Applies the enabled effects in order, each to what the one before it gave, with the
+/// margins it needs added just before it. Unknown effects are skipped.
+pub fn apply(img: &mut RgbaImage, stack: &[EffectInstance], scale: f32) -> Applied {
+    run(img, steps(stack), scale)
+}
+
+fn run<'a>(
+    img: &mut RgbaImage,
+    steps: impl Iterator<Item = (&'static dyn Effect, Params<'a>)>,
+    scale: f32,
+) -> Applied {
+    let mut done = Applied::default();
+    for (effect, params) in steps {
+        let total = add_padding(done.pad, effect_padding(effect, &params, scale));
+        grow(img, std::array::from_fn(|i| total[i] - done.pad[i]));
+        done.pad = total;
         if let Err(e) = effect.apply(img, &params, scale) {
-            errors.push(format!("{}: {e}", effect.name()));
+            done.errors.push(format!("{}: {e}", effect.name()));
         }
     }
-    Applied { pad, errors }
+    done
 }
 
 /// Applies the stack to premultiplied pixels, for export, and returns the margins added
@@ -1320,6 +1344,56 @@ mod tests {
         assert!(apply(&mut img, &stack, 1.0).errors.is_empty());
         assert_eq!(img.get_pixel(0, 0).0, [200, 100, 50, 255]);
         assert!(!is_active(&stack[1..]));
+    }
+
+    /// Paints every pixel of the image it gets, and asks for `pad` around it.
+    struct Fill {
+        pad: f32,
+        color: [u8; 4],
+    }
+
+    impl Effect for Fill {
+        fn id(&self) -> &str {
+            "test.fill"
+        }
+        fn name(&self) -> &str {
+            "Fill"
+        }
+        fn params(&self) -> &[ParamSpec] {
+            &[]
+        }
+        fn padding(&self, _: &Params) -> [f32; 4] {
+            [self.pad; 4]
+        }
+        fn apply(&self, img: &mut RgbaImage, _: &Params, _: f32) -> Result<(), String> {
+            img.pixels_mut().for_each(|p| p.0 = self.color);
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn each_effect_gets_what_the_one_before_gave() {
+        let values = ParamValues::new();
+        let fill: &'static dyn Effect = Box::leak(Box::new(Fill {
+            pad: 0.0,
+            color: [255, 0, 0, 255],
+        }));
+        let margin: &'static dyn Effect = Box::leak(Box::new(Fill {
+            pad: 2.0,
+            color: [0, 0, 255, 255],
+        }));
+        // The margins the later effect needs are not there yet for the first one.
+        let mut img = RgbaImage::new(2, 2);
+        let fill_then_pad = [fill, margin].map(|e| (e, Params::new(&[], &values)));
+        let done = run(&mut img, fill_then_pad.into_iter(), 1.0);
+        assert_eq!((done.pad, img.dimensions()), ([2; 4], (6, 6)));
+        // Each one painted the whole image it got: the last one over all of it.
+        assert_eq!(img.get_pixel(0, 0).0, [0, 0, 255, 255]);
+        // The margins come before the effect that asked for them.
+        let mut img = RgbaImage::new(2, 2);
+        let pad_then_fill = [margin, fill].map(|e| (e, Params::new(&[], &values)));
+        run(&mut img, pad_then_fill.into_iter(), 1.0);
+        assert_eq!(img.get_pixel(0, 0).0, [255, 0, 0, 255]);
     }
 
     #[test]

@@ -812,7 +812,8 @@ mod tests {
     fn the_reference_is_saved_with_the_template_and_opens_where_it_was() {
         let source = crate::template::tests::fixture();
         let mut doc = open(&source, source.config.clone()).unwrap();
-        let dir = std::env::temp_dir().join(format!("artwork-reference-{}", std::process::id()));
+        let dir =
+            std::env::temp_dir().join(format!("artwork-edit-reference-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let file = dir.join("plan.svg");
         std::fs::write(

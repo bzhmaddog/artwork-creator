@@ -51,6 +51,15 @@ class Helpers(unittest.TestCase):
         self.assertEqual(labels, ["Installer", "Portable .zip", "AppImage", "Debian / Ubuntu .deb", "Archive .tar.gz"])
         self.assertEqual(dp.files({}), [])
 
+    def test_files_with_or_without_the_version(self):
+        # Up to 0.20.0 the Windows files had no version in their name.
+        for names in (
+            ["artwork-creator-windows-setup.exe", "artwork-creator-windows.zip"],
+            ["artwork-creator-0.20.1-windows-setup.exe", "artwork-creator-0.20.1-windows.zip"],
+        ):
+            labels = [label for _, _, label, _ in dp.files(release("v1", "2026-01-01", names))]
+            self.assertEqual(labels, ["Installer", "Portable .zip"], names)
+
     def test_date(self):
         self.assertEqual(dp.date(release("v1", "2026-03-04", [])), "2026-03-04")
         self.assertEqual(dp.date({"published_at": None}), "")

@@ -68,7 +68,7 @@ older SDK. It asks before committing, and makes no tag and pushes nothing. See
 5. Publishing runs the **Pages** workflow (a pre-release as well as a release), which
    updates the download page and the version files the app reads (`version.json`, stable
    releases only; `version-dev.json`, every release), and puts the Windows installer at
-   `https://bzhmaddog.github.io/artwork-creator-app/download/vX.Y.Z/artwork-creator-windows-setup.exe`:
+   `https://bzhmaddog.github.io/artwork-creator-app/download/vX.Y.Z/artwork-creator-X.Y.Z-windows-setup.exe`:
    the link for the download page. It is the only time the site is deployed (besides a run
    by hand, Actions > Pages > Run workflow): a change to `pages/` goes live with the next
    release. The Microsoft Store gets the MSIX package instead:

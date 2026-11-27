@@ -8,7 +8,12 @@
 #   make              release builds for Linux and Windows
 #   make linux        release build for Linux
 #   make windows      release build for Windows (.exe)
-#   make debug        debug builds for both
+#   make debug        remove the previous debug executables (the app's and the test
+#                     binaries in target/debug), then build and run the app in debug
+#                     (WAYLAND_DISPLAY unset, so it uses X11, and Mesa's d3d12 driver, for
+#                     WSLg); compiled dependencies and incremental caches stay
+#   make debug-linux, debug-windows
+#                     debug build for Linux or for Windows
 #   make run          run the Linux debug build
 #   make run-windows  run the Windows debug build (from WSL)
 #   make dev-setup    install what the quality checks need (rustfmt, clippy, the Windows
@@ -66,6 +71,9 @@ DIST    := dist
 # depends must match. 2.28: Debian 10, Ubuntu 18.10, RHEL 8.
 GLIBC   := 2.28
 
+# The app's version (Cargo.toml), in the name of the Windows .zip.
+VERSION := $(shell sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -n 1)
+
 LINUX_BIN   := target/$(LINUX)/release/$(APP)
 WINDOWS_BIN := target/$(WINDOWS)/release/$(APP).exe
 
@@ -94,9 +102,15 @@ linux-portable:
 	$(CARGO) zigbuild --release --target $(LINUX).$(GLIBC)
 
 windows:
-	$(CARGO) build --release --target $(WINDOWS)
+	$(CARGO) build --quiet --release --target $(WINDOWS)
 
-debug: debug-linux debug-windows
+# WSLg: X11 instead of Wayland, rendered by Mesa's d3d12 driver (the GPU through DirectX).
+# Only executables: deps/ files without an extension (the app and test binaries; libraries
+# end in .rlib, .rmeta, .so or .d). Cargo then just relinks the app from its caches.
+debug:
+	rm -f target/debug/$(APP)
+	[ ! -d target/debug/deps ] || find target/debug/deps -maxdepth 1 -type f -executable ! -name '*.*' -delete
+	WAYLAND_DISPLAY= GALLIUM_DRIVER=d3d12 $(CARGO) run -- $(ARGS)
 
 debug-linux:
 	$(CARGO) build --target $(LINUX)
@@ -200,11 +214,14 @@ dist-linux: linux-portable python-linux
 # The packages ship a Python of their own, for the Python plugins: python.org's
 # embeddable Python on Windows, python-build-standalone's on Linux.
 python-embed:
-	sh scripts/python-embed.sh
+	sh scripts/python-embed.sh >/dev/null
 
 python-linux:
 	sh scripts/python-linux.sh
 
+# The .zip has the files at its root, not in a folder, and the version in its name.
+# Silent: only warnings and errors show (on stderr; cargo --quiet keeps its warnings).
+.SILENT: dist-windows windows python-embed
 dist-windows: windows python-embed
 	rm -rf $(DIST)/$(APP)-windows
 	mkdir -p $(DIST)/$(APP)-windows
@@ -212,9 +229,10 @@ dist-windows: windows python-embed
 	cp -r templates $(DIST)/$(APP)-windows/
 	cp -r target/python-embed $(DIST)/$(APP)-windows/python
 	rm $(DIST)/$(APP)-windows/python/.version
-	cd $(DIST) && rm -f $(APP)-windows.zip && \
-		if command -v zip >/dev/null; then zip -qr $(APP)-windows.zip $(APP)-windows; \
-		else echo "zip not installed; skipping $(APP)-windows.zip (folder is in $(DIST)/)"; fi
+	rm -f $(DIST)/$(APP)-windows.zip $(DIST)/$(APP)-*-windows.zip
+	if command -v zip >/dev/null; then \
+		cd $(DIST)/$(APP)-windows && zip -qr ../$(APP)-$(VERSION)-windows.zip .; \
+	else echo "zip not installed; skipping $(APP)-$(VERSION)-windows.zip (folder is in $(DIST)/)"; fi
 
 # Installers: the app finds its templates in ../share/artwork-creator/ from the executable.
 deb: linux-portable python-linux

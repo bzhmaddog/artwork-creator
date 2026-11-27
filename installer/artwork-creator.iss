@@ -9,7 +9,7 @@
 ;
 ; The Release workflow compiles it after the release build, from the repository root:
 ;   iscc /DAppVersion=X.Y.Z installer\artwork-creator.iss
-; which writes dist\artwork-creator-windows-setup.exe. /DExe=... names another
+; which writes dist\artwork-creator-X.Y.Z-windows-setup.exe. /DExe=... names another
 ; executable, relative to this folder; `make windows-setup` passes the MinGW build
 ; (scripts/windows-setup.sh, Inno Setup in a container).
 
@@ -43,7 +43,7 @@ SetupIconFile=..\assets\icon\artwork-creator.ico
 UninstallDisplayIcon={app}\artwork-creator.exe
 ChangesAssociations=yes
 OutputDir=..\dist
-OutputBaseFilename=artwork-creator-windows-setup
+OutputBaseFilename=artwork-creator-{#AppVersion}-windows-setup
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern

@@ -46,12 +46,13 @@ jobs:
           cp assets/icon/artwork-creator.svg _site/icon.svg
           cp docs/capture.png _site/capture.png
       # Each deployment replaces the whole site, so every release's installer is added again.
+      # Its name has the version from 0.20.1 on (artwork-creator-X.Y.Z-windows-setup.exe).
       - name: Add the Windows installers
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           for tag in $(gh release list --exclude-drafts --limit 1000 --json tagName -q '.[].tagName'); do
-            gh release download "$tag" -p artwork-creator-windows-setup.exe -D "_site/download/$tag" \
+            gh release download "$tag" -p 'artwork-creator-*windows-setup.exe' -D "_site/download/$tag" \
               || echo "$tag has no Windows installer"
           done
       - name: Fill in the download page

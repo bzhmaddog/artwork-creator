@@ -1,9 +1,7 @@
 # Publishes the project's web page (the pages/ folder) to GitHub Pages.
 #
 # The app icon and the screenshot are copied in from assets/ and docs/ so they are kept
-# in one place. The Windows installer of every published release is added under
-# download/vX.Y.Z/, a direct link without redirects (unlike release assets) for the
-# Microsoft Store. The download page (pages/download.html) is filled in with the latest
+# in one place. The download page (pages/download.html) is filled in with the latest
 # release's files and the older releases (scripts/download-page.py); version.json with the
 # latest stable release's version and version-dev.json with the latest release's, pre-release
 # or not, which the app reads to tell about a new version (its stable and dev update
@@ -45,16 +43,6 @@ jobs:
           cp -r pages/. _site/
           cp assets/icon/artwork-creator.svg _site/icon.svg
           cp docs/capture.png _site/capture.png
-      # Each deployment replaces the whole site, so every release's installer is added again.
-      # Its name has the version from 0.20.1 on (artwork-creator-X.Y.Z-windows-setup.exe).
-      - name: Add the Windows installers
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          for tag in $(gh release list --exclude-drafts --limit 1000 --json tagName -q '.[].tagName'); do
-            gh release download "$tag" -p 'artwork-creator-*windows-setup.exe' -D "_site/download/$tag" \
-              || echo "$tag has no Windows installer"
-          done
       - name: Fill in the download page
         env:
           GH_TOKEN: ${{ github.token }}

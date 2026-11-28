@@ -1715,6 +1715,10 @@ fn key(layer: &Layer, ppu: f32) -> u64 {
     layer.shape_state.layout_key.hash(&mut h);
     layer.size_px.hash(&mut h);
     ppu.to_bits().hash(&mut h);
+    // What the fill's generator drew: made again once its plugin is installed, say.
+    (layer.shape_state.generated.as_ref())
+        .map(|(k, made)| (*k, made.is_some()))
+        .hash(&mut h);
     // Paint that doesn't stretch is drawn again as the shape is resized.
     if let Some(m) = paint_map(layer) {
         for v in [m.a, m.b, m.c, m.d, m.e, m.f] {
@@ -2125,6 +2129,17 @@ mod tests {
         assert!(!json.contains("points"), "only for lines and polygons");
         let back: Layer = serde_json::from_str(&json).unwrap();
         assert_eq!(back.shape, l.shape);
+    }
+
+    #[test]
+    fn a_fill_drawn_again_by_its_generator_redraws_the_shape() {
+        // Its plugin installed: the generation changes the generated fill's key.
+        let mut l = layer(ShapeKind::Ellipse);
+        layout(&mut l, true);
+        l.shape_state.generated = Some((1, None));
+        let missing = key(&l, 1.0);
+        l.shape_state.generated = Some((2, None));
+        assert_ne!(key(&l, 1.0), missing);
     }
 
     #[test]

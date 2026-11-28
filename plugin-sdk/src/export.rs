@@ -3,7 +3,8 @@
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 
-use crate::abi::{ABI_VERSION, EffectTable, GeneratorTable, PluginTable};
+use crate::abi::{self, ABI_VERSION, EffectTable, GeneratorTable, PluginTable};
+use crate::translate::{self, Texts};
 use crate::{Effect, Generator, Values};
 
 /// An image handed to [`Effect::apply`]: `height` rows of `width` straight RGBA pixels,
@@ -108,12 +109,40 @@ pub fn build_table(
     version: &str,
     contents: impl FnOnce() -> Contents,
 ) -> Option<&'static PluginTable> {
-    catch_unwind(AssertUnwindSafe(|| {
-        let (effects, generators) = contents();
+    build_translated_table(name, version, &[], contents)
+}
+
+/// [`build_table`], with the plugin's texts in other languages: for each language code
+/// (`"fr-FR"`), a catalog of the English texts to that language's (see
+/// [`crate::untranslated`]). A catalog that is not a JSON object of strings is left out,
+/// with a warning on stderr: that language shows the code's texts.
+pub fn build_translated_table(
+    name: &str,
+    version: &str,
+    translations: &[(&str, &str)],
+    contents: impl FnOnce() -> Contents,
+) -> Option<&'static PluginTable> {
+    let r = catch_unwind(AssertUnwindSafe(|| {
+        let contents = contents();
+        let (effect_texts, generator_texts) = translate::texts(&contents);
+        let (effects, generators) = contents;
+        let languages = translations
+            .iter()
+            .filter_map(|(language, json)| {
+                let catalog = (translate::parse(language, json))
+                    .inspect_err(|e| eprintln!("{name}: {e}"))
+                    .ok()?;
+                let texts = translate::describe(&effect_texts, &generator_texts, &catalog);
+                Some(((*language).to_owned(), leak(&texts)))
+            })
+            .collect();
+        let languages: &'static Languages = Box::leak(Box::new(Languages(languages)));
+        let params_of = |t: &Texts| serde_json::to_string(&t.params).expect("params serialize");
         let effects: Vec<EffectTable> = effects
             .into_iter()
-            .map(|e| {
-                let params = serde_json::to_string(&e.params()).expect("params serialize");
+            .zip(&effect_texts)
+            .map(|(e, t)| {
+                let params = params_of(t);
                 let table = EffectTable {
                     id: leak(e.id()),
                     name: leak(e.name()),
@@ -129,8 +158,9 @@ pub fn build_table(
             .collect();
         let generators: Vec<GeneratorTable> = generators
             .into_iter()
-            .map(|g| {
-                let params = serde_json::to_string(&g.params()).expect("params serialize");
+            .zip(&generator_texts)
+            .map(|(g, t)| {
+                let params = params_of(t);
                 let table = GeneratorTable {
                     id: leak(g.id()),
                     name: leak(g.name()),
@@ -153,9 +183,33 @@ pub fn build_table(
             effects: effects.as_ptr(),
             generator_count: generators.len() as u32,
             generators: generators.as_ptr(),
+            texts_data: (languages as *const Languages).cast(),
+            texts: (!languages.0.is_empty()).then_some(texts as abi::TextsFn),
         }))
-    }))
-    .ok()
+    }));
+    r.ok()
+}
+
+/// A plugin's texts in each language it has, as the `texts` function gives them.
+struct Languages(Vec<(String, *const c_char)>);
+
+// SAFETY: only read, and the strings are never freed.
+unsafe impl Send for Languages {}
+unsafe impl Sync for Languages {}
+
+/// The ABI's `texts`: the texts of the closest language there is, or null.
+///
+/// # Safety
+/// `data` comes from `build_translated_table`; `language` is null or NUL-terminated.
+unsafe extern "C" fn texts(data: *const c_void, language: *const c_char) -> *const c_char {
+    if data.is_null() || language.is_null() {
+        return std::ptr::null();
+    }
+    let languages = unsafe { &*(data as *const Languages) };
+    let Ok(language) = unsafe { CStr::from_ptr(language) }.to_str() else {
+        return std::ptr::null();
+    };
+    translate::pick(&languages.0, language).map_or(std::ptr::null(), |t| *t)
 }
 
 /// The effect behind `user_data`.

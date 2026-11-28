@@ -628,10 +628,12 @@ impl Manager {
                     .picked(url, p, &p.compatible())
                     .into_iter()
                     .flat_map(|(v, _)| v.effects.iter().chain(&v.generators).map(String::as_str));
+                let translated = [p.tr(&p.name), p.tr(&p.description)];
+                let provides = provides.map(|t| p.tr(t)).collect::<Vec<_>>();
                 [&p.id, &p.name, &p.description, &p.author]
                     .into_iter()
-                    .map(String::as_str)
-                    .chain(provides)
+                    .chain(&translated)
+                    .chain(&provides)
                     .any(|t| t.to_lowercase().contains(&filter))
             })
             .collect();
@@ -665,7 +667,7 @@ impl Manager {
                         for p in &shown {
                             let compatible = p.compatible();
                             let best = self.picked(url, p, &compatible);
-                            let name = ui.label(&p.name);
+                            let name = ui.label(p.tr(&p.name));
                             if !p.author.is_empty() {
                                 name.on_hover_text(&p.author);
                             }
@@ -676,7 +678,12 @@ impl Manager {
                                 Kind::Library => tr!("PLUGIN_KIND_LIBRARY"),
                             });
                             match best {
-                                Some((v, _)) => provides(ui, &v.effects, &v.generators),
+                                Some((v, _)) => {
+                                    let tr = |names: &[String]| {
+                                        names.iter().map(|n| p.tr(n)).collect::<Vec<_>>()
+                                    };
+                                    provides(ui, &tr(&v.effects), &tr(&v.generators));
+                                }
                                 None => provides(ui, &[], &[]),
                             }
                             let row = egui::vec2(
@@ -690,9 +697,10 @@ impl Manager {
                                 ui.with_layout(
                                     egui::Layout::left_to_right(egui::Align::Center),
                                     |ui| {
-                                        let text = egui::RichText::new(&p.description).weak();
+                                        let description = p.tr(&p.description);
+                                        let text = egui::RichText::new(&description).weak();
                                         let r = ui.add(egui::Label::new(text).truncate());
-                                        r.on_hover_text(&p.description);
+                                        r.on_hover_text(description);
                                     },
                                 );
                             });
@@ -1313,6 +1321,60 @@ struct Missing {
     installs: Vec<((String, String), MissingInstall)>,
 }
 
+/// The user's repositories and their lists of [`Missing::repos`], downloaded the first
+/// time they're asked for; repaints while one is still loading.
+fn missing_lists<'a>(repos: &'a mut Option<Vec<Repo>>, ctx: &egui::Context) -> &'a mut Vec<Repo> {
+    let repos = repos.get_or_insert_with(|| {
+        let urls = Settings::read().repositories();
+        (urls.into_iter())
+            .map(|url| Repo {
+                list: Fetch::start(&url),
+                url,
+            })
+            .collect()
+    });
+    for r in repos.iter_mut() {
+        r.list.update();
+    }
+    if repos.iter().any(|r| matches!(r.list, Fetch::Loading(_))) {
+        ctx.request_repaint_after(std::time::Duration::from_millis(200));
+    }
+    repos
+}
+
+/// What the missing effect or generator `inst` is called: its repository's name and its
+/// own, `Official plugins / Damier`, in the language of the interface where the
+/// repository's list translates it. Its own is the name saved with it, else its id. Its
+/// repository is the user's one of its origin, else the one its plugins folder names, else
+/// unknown; one not from a repository (put in a plugins folder by hand) has its name alone.
+pub fn missing_name(ctx: &egui::Context, inst: &crate::render::effects::EffectInstance) -> String {
+    let id = inst.effect.as_str();
+    let name = (inst.name.as_deref()).unwrap_or_else(|| id.rsplit('/').next().unwrap_or(id));
+    let Some(origin) = (id.split_once('/').map(|(o, _)| o)).filter(|o| plugin::is_origin(o)) else {
+        return name.to_owned();
+    };
+    let mut guard = MISSING.lock().unwrap_or_else(|e| e.into_inner());
+    let repos = missing_lists(&mut guard.get_or_insert_with(Missing::default).repos, ctx);
+    let list = repos.iter().find_map(|r| match &r.list {
+        Fetch::Ready(l) if plugin::origin(&r.url) == origin => Some(l),
+        _ => None,
+    });
+    let repo = (list.map(|l| l.name.clone()))
+        .or_else(|| plugin::source(origin).map(|s| s.name))
+        .filter(|n| !n.is_empty());
+    let entry =
+        (list.zip(inst.plugin.as_ref())).and_then(|(l, p)| l.plugins.iter().find(|e| e.id == p.id));
+    missing_label(name, repo.as_deref(), entry)
+}
+
+/// `name` after its repository's name `repo` ("Unknown repository" if `None`), translated
+/// as its plugin `entry` of that repository's list says.
+fn missing_label(name: &str, repo: Option<&str>, entry: Option<&Entry>) -> String {
+    let repo = repo.unwrap_or_else(|| tr!("UNKNOWN_REPOSITORY"));
+    let name = entry.map_or_else(|| name.to_owned(), |e| e.tr(name));
+    format!("{repo} / {name}")
+}
+
 enum MissingInstall {
     Running(JoinHandle<Result<PathBuf, String>>),
     /// Installed: loaded, or not until the next start.
@@ -1354,22 +1416,7 @@ pub fn install_missing(ui: &mut Ui, effect: &str, entry: &PluginRef) -> Option<(
     let origin = (effect.split_once('/').map(|(o, _)| o)).filter(|o| plugin::is_origin(o))?;
     let mut guard = MISSING.lock().unwrap_or_else(|e| e.into_inner());
     let missing = guard.get_or_insert_with(Missing::default);
-    let repos = missing.repos.get_or_insert_with(|| {
-        let urls = Settings::read().repositories();
-        (urls.into_iter())
-            .map(|url| Repo {
-                list: Fetch::start(&url),
-                url,
-            })
-            .collect()
-    });
-    for r in repos.iter_mut() {
-        r.list.update();
-    }
-    if repos.iter().any(|r| matches!(r.list, Fetch::Loading(_))) {
-        ui.ctx()
-            .request_repaint_after(std::time::Duration::from_millis(200));
-    }
+    let repos = missing_lists(&mut missing.repos, ui.ctx());
     let key = (origin.to_owned(), entry.id.clone());
     let mut note = None;
     let install = missing.installs.iter_mut().find(|(k, _)| *k == key);
@@ -1490,6 +1537,27 @@ mod tests {
             file("broken.py", true, Status::Failed("no plugin".into())),
             file("noversion.py", true, loaded("No version", "")),
         ]
+    }
+
+    #[test]
+    fn a_missing_effect_is_named_by_its_repository_and_its_name() {
+        let list = repository::parse(
+            r#"{"format": 1, "name": "R", "plugins": [{"id": "checkerboard",
+              "name": "Checkerboard", "kind": "library", "versions": [{"version": "1.0.0",
+              "generators": ["Checkerboard"], "texts": {"fr-FR": {"Checkerboard": "Damier"}},
+              "files": {"any": {"url": "https://x/c.so", "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "size": 1}}}]}]}"#,
+        )
+        .unwrap();
+        let entry = list.plugins.first();
+        // Saved in French, shown in English (the tests' language).
+        assert_eq!(
+            missing_label("Damier", Some("Official"), entry),
+            "Official / Checkerboard"
+        );
+        assert_eq!(
+            missing_label("Noise", None, None),
+            format!("{} / Noise", tr!("UNKNOWN_REPOSITORY"))
+        );
     }
 
     /// Runs one frame of the window; returns what it gave and where each text is.

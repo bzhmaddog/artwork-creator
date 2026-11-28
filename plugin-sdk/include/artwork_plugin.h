@@ -9,7 +9,9 @@
  * returning a table that stays valid while the library is loaded (the app never unloads
  * it), or NULL if the plugin cannot start. The app reads `abi_version` first and skips
  * the plugin unless it is from 1 to ARTWORK_PLUGIN_ABI_VERSION. Version 2 added
- * generators (the last two fields of ArtworkPlugin); a version 1 table ends before them.
+ * generators (generator_count and generators in ArtworkPlugin); a version 1 table ends
+ * before them. Version 3 added texts in other languages (texts_data and texts); a
+ * version 2 table ends before them.
  *
  * All strings are UTF-8 and NUL-terminated.
  *
@@ -52,7 +54,7 @@
 extern "C" {
 #endif
 
-#define ARTWORK_PLUGIN_ABI_VERSION 2
+#define ARTWORK_PLUGIN_ABI_VERSION 3
 
 #if defined(_WIN32)
 #define ARTWORK_EXPORT __declspec(dllexport)
@@ -113,6 +115,14 @@ typedef struct ArtworkGenerator {
     ArtworkGenerateFn generate;
 } ArtworkGenerator;
 
+/* The plugin's texts in `language`, a code such as "en-US", "en-GB" or "fr-FR": JSON
+ * {"effects": [...], "generators": [...]}, each entry with the "id" of one of the
+ * table's effects or generators and its "name", "description" and "params" (the same
+ * parameters, with their "label", "group" and choice option labels in that language;
+ * the rest is taken from the table). NULL when it has none for that language: the app
+ * shows the table's texts. The string stays valid while the library is loaded. */
+typedef const char *(*ArtworkTextsFn)(const void *texts_data, const char *language);
+
 typedef struct ArtworkPlugin {
     /* ARTWORK_PLUGIN_ABI_VERSION. Must stay the first field. */
     uint32_t abi_version;
@@ -123,6 +133,10 @@ typedef struct ArtworkPlugin {
     /* Since version 2. */
     uint32_t generator_count;
     const ArtworkGenerator *generators;
+    /* Since version 3: passed back to texts. */
+    const void *texts_data;
+    /* Since version 3; NULL if the plugin has only the texts above. */
+    ArtworkTextsFn texts;
 } ArtworkPlugin;
 
 typedef const ArtworkPlugin *(*ArtworkEntryFn)(void);

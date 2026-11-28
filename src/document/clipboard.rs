@@ -105,6 +105,8 @@ impl Clipboard {
         // not have.
         crate::document::colors::adopt_links(&mut doc.variables, &mut node);
         crate::document::text_links::adopt_links(&mut doc.variables, &mut node);
+        // From an older app: in the current form of its effects and generators.
+        node.for_each_layer_mut(&mut crate::document::migrate_layer);
         // Over the copied group itself, the copy goes next to it rather than inside.
         let path = match selected.filter(|&s| Some(s) == self.source) {
             Some(s) => doc.path_of(s).map(|mut p| {
@@ -202,6 +204,33 @@ mod tests {
         assert_eq!(x(&d, 100), 30.0, "in place first");
         clip.paste(&mut d, &mut sel, &text).unwrap();
         assert_eq!(x(&d, 101), 35.0);
+    }
+
+    #[test]
+    fn former_built_in_generators_pasted_from_an_older_app_name_their_plugin() {
+        let mut shape = Layer::new(7, "shape".into(), "".into());
+        let s = crate::document::Shape {
+            fill_generator: Some(crate::render::effects::EffectInstance {
+                effect: "builtin.noise".into(),
+                enabled: true,
+                params: Default::default(),
+                links: Default::default(),
+                plugin: None,
+                name: None,
+            }),
+            ..Default::default()
+        };
+        shape.shape = Some(Box::new(s));
+        let other = doc_with(vec![Node::Layer(Box::new(shape))]);
+        let text = Clipboard::default().copy(&other, Some(7)).unwrap();
+        let mut d = doc_with(vec![]);
+        let mut sel = None;
+        Clipboard::default().paste(&mut d, &mut sel, &text).unwrap();
+        let g = (d.layer(100).unwrap().shape.as_ref())
+            .and_then(|s| s.fill_generator.as_ref())
+            .unwrap();
+        assert_eq!(g.plugin.as_ref().unwrap().id, "noise");
+        assert!(g.effect.ends_with("/noise.noise"), "{}", g.effect);
     }
 
     #[test]

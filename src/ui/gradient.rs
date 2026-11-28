@@ -191,7 +191,11 @@ pub fn inline(ui: &mut Ui, ui_key: impl std::hash::Hash + std::fmt::Debug, f: &m
         .width(90.0)
         .show_ui(ui, |ui| {
             for k in kinds {
-                ui.selectable_value(&mut picked, k, name(k));
+                // Generated, once a plugin brings a generator.
+                let none = k == Kind::Generated && registry().generators().next().is_none();
+                ui.add_enabled_ui(!none, |ui| ui.selectable_value(&mut picked, k, name(k)))
+                    .inner
+                    .on_disabled_hover_text(tr!("NO_GENERATORS_HINT"));
             }
         })
         .response
@@ -846,14 +850,16 @@ mod tests {
         // Generated, in the kind menu: the first generator, with its settings below.
         click_text(&mut h, "Solid");
         click_text(&mut h, "Generated");
-        assert_eq!(generator(&h).effect, "builtin.noise");
+        assert_eq!(generator(&h).effect, "test.grains");
         let (texts, _) = h.frame(vec![]);
         assert!(texts.iter().any(|(t, _)| t == "Grain"), "{texts:?}");
 
         // Another one from the generator menu.
-        click_text(&mut h, "Noise");
-        click_text(&mut h, "Clouds");
-        assert_eq!(generator(&h).effect, "builtin.clouds");
+        click_text(&mut h, "Grains");
+        click_text(&mut h, "Bands");
+        assert_eq!(generator(&h).effect, "test.bands");
+        click_text(&mut h, "Bands");
+        click_text(&mut h, "Grains");
 
         // The magic wand: a new variation each click, the slider gone.
         let (texts, _) = h.frame(vec![]);
@@ -897,9 +903,9 @@ mod tests {
         assert_ne!(seed(&h), after);
 
         // A generator without a variation has no arrow.
-        let checkerboard = registry().generator("builtin.checkerboard").unwrap();
-        h.generator = Some(Some(EffectInstance::generator(checkerboard)));
-        let mut inst = EffectInstance::generator(checkerboard);
+        let bands = registry().generator("test.bands").unwrap();
+        h.generator = Some(Some(EffectInstance::generator(bands)));
+        let mut inst = EffectInstance::generator(bands);
         let ctx = egui::Context::default();
         let mut clicked = true;
         let mut out = ctx.run_ui(egui::RawInput::default(), |ui| {

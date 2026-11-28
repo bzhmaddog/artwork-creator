@@ -8,7 +8,7 @@
 #   make              release builds for Linux and Windows
 #   make linux        release build for Linux
 #   make windows      release build for Windows (.exe)
-#   make debug        remove the previous debug executables (the app's and the test
+#   make run-debug    remove the previous debug executables (the app's and the test
 #                     binaries in target/debug), then build and run the app in debug
 #                     (WAYLAND_DISPLAY unset, so it uses X11, and Mesa's d3d12 driver, for
 #                     WSLg); compiled dependencies and incremental caches stay
@@ -89,7 +89,7 @@ TRIVY_CACHE   ?= $(HOME)/.cache/trivy
 # version-bump-patch, version-bump-minor, version-bump-major (see "Versioning" below).
 VERSION_STEPS := $(foreach p,patch minor major,version-bump-$(p))
 
-.PHONY: all linux linux-portable windows debug debug-linux debug-windows run run-windows \
+.PHONY: all linux linux-portable windows run-debug debug-linux debug-windows run run-windows \
         test coverage dev-setup check check-tools check-dependencies fmt clippy hooks pre-commit dist version-check version-bump $(VERSION_STEPS) dist-linux dist-windows python-embed python-linux deb appimage windows-setup msix store-listing clean
 
 all: linux windows
@@ -107,7 +107,7 @@ windows:
 # WSLg: X11 instead of Wayland, rendered by Mesa's d3d12 driver (the GPU through DirectX).
 # Only executables: deps/ files without an extension (the app and test binaries; libraries
 # end in .rlib, .rmeta, .so or .d). Cargo then just relinks the app from its caches.
-debug:
+run-debug:
 	rm -f target/debug/$(APP)
 	[ ! -d target/debug/deps ] || find target/debug/deps -maxdepth 1 -type f -executable ! -name '*.*' -delete
 	WAYLAND_DISPLAY= GALLIUM_DRIVER=d3d12 $(CARGO) run -- $(ARGS)

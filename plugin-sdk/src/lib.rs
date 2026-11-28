@@ -27,6 +27,15 @@
 //! A plugin with generators lists them after its effects:
 //! `export_plugin!(name: …, version: …, effects: [Fade], generators: [Waves])`.
 //!
+//! Its texts in other languages come last, as catalogs mapping the English texts of the
+//! code (names, descriptions, parameter labels, groups and choice labels) to the
+//! language's, one JSON file per language code:
+//! `export_plugin!(name: …, version: …, effects: [Fade], generators: [], translations:
+//! [("fr-FR", include_str!("../locales/fr-FR.json"))])`. The app shows the texts of its
+//! language, the closest one there is (`fr-FR` for `fr-CA`), else the English ones; for
+//! U.S. English, only an `en-US` catalog, never another English one.
+//! [`untranslated`] tells a plugin's tests what a catalog lacks.
+//!
 //! Build it with `cargo build --release` and copy the library (`.dll` on Windows, `.so`
 //! on Linux) into the `plugins` folder next to the app.
 //!
@@ -36,11 +45,13 @@
 pub mod abi;
 mod export;
 mod params;
+mod translate;
 
-pub use export::{Contents, Image, build_table};
+pub use export::{Contents, Image, build_table, build_translated_table};
 pub use params::{
     ChoiceOption, Param, ParamKind, Role, SEED_MAX, Values, color_from_hex, color_to_hex,
 };
+pub use translate::untranslated;
 
 /// This SDK's version, which the app ships, for Python plugins too
 /// (`artwork_plugin_sdk.__version__`): a repository's plugin version made for a newer one
@@ -65,7 +76,7 @@ pub trait Effect: Send + Sync + 'static {
     fn description(&self) -> &str {
         ""
     }
-    /// Parameters, in display order. Called once, when the plugin loads.
+    /// Parameters, in display order. Called when the plugin loads.
     fn params(&self) -> Vec<Param>;
     /// Room the effect draws into around the image (left, top, right, bottom), in
     /// source pixels: e.g. a shadow falling outside it. The image passed to `apply` has
@@ -93,7 +104,7 @@ pub trait Generator: Send + Sync + 'static {
     fn description(&self) -> &str {
         ""
     }
-    /// Parameters, in display order. Called once, when the plugin loads.
+    /// Parameters, in display order. Called when the plugin loads.
     fn params(&self) -> Vec<Param>;
     /// Draws into `img`, transparent at first. Pixels are straight (not premultiplied)
     /// RGBA.
@@ -109,7 +120,9 @@ pub trait Generator: Send + Sync + 'static {
 /// Exports the plugin's entry point. Use it once, at the root of the plugin crate.
 ///
 /// `name` and `version` are shown to the user; `effects` are values implementing
-/// [`Effect`], and the optional `generators` values implementing [`Generator`].
+/// [`Effect`], the optional `generators` values implementing [`Generator`], and the
+/// optional `translations` `(language code, catalog JSON)` pairs (see the crate's
+/// documentation).
 #[macro_export]
 macro_rules! export_plugin {
     (name: $name:expr, version: $version:expr, effects: [$($effect:expr),* $(,)?] $(,)?) => {
@@ -121,7 +134,8 @@ macro_rules! export_plugin {
         name: $name:expr,
         version: $version:expr,
         effects: [$($effect:expr),* $(,)?],
-        generators: [$($generator:expr),* $(,)?] $(,)?
+        generators: [$($generator:expr),* $(,)?]
+        $(, translations: [$(($language:expr, $catalog:expr)),* $(,)?])? $(,)?
     ) => {
         #[unsafe(no_mangle)]
         pub extern "C" fn artwork_plugin_entry() -> *const $crate::abi::PluginTable {
@@ -129,7 +143,7 @@ macro_rules! export_plugin {
                 ::std::option::Option<&'static $crate::abi::PluginTable>,
             > = ::std::sync::OnceLock::new();
             let table = TABLE.get_or_init(|| {
-                $crate::build_table($name, $version, || {
+                $crate::build_translated_table($name, $version, &[$($(($language, $catalog)),*)?], || {
                     (
                         ::std::vec![$(::std::boxed::Box::new($effect)
                             as ::std::boxed::Box<dyn $crate::Effect>),*],

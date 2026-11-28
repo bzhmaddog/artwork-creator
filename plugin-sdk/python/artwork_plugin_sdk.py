@@ -13,7 +13,14 @@ A Python plugin is one .py file in the app's plugins folder. It defines `plugin`
         def apply(self, image, values, scale):
             ...  # change image.pixels in place
 
-    plugin = Plugin("Example", "1.0", effects=[Invert()])
+    plugin = Plugin("Example", "1.0", effects=[Invert()],
+                    translations={"fr-FR": {"Invert": "Inverser", "Amount": "Quantité"}})
+
+`translations` maps language codes to catalogs of the English texts of the code (names,
+descriptions, parameter labels, groups and choice labels) to that language's; units are
+not translated. The app shows the texts of its language, the closest one there is
+(fr-FR for fr-CA), else the English ones. `plugin.untranslated("fr-FR")` tells a
+plugin's tests what a catalog lacks.
 
 The app runs the file in a Python process of its own, with this module importable as
 `artwork_plugin_sdk`, and keeps that process running: a module-level variable lives as long
@@ -32,8 +39,9 @@ range: a float or int is a number, a bool a bool, a color a "#rrggbbaa" string (
 The protocol, for other languages: the app writes one line of JSON (a request), followed
 by `width * height * 4` bytes of pixels for "apply"; the plugin answers one line of JSON,
 `{"ok": true, ...}` or `{"ok": false, "error": "..."}`, followed by the pixels when
-"apply" or "generate" succeeded. Requests: `{"op": "describe"}`, answered with the name,
-version, effects and generators; `{"op": "padding", "id", "values"}`, answered with
+"apply" or "generate" succeeded. Requests: `{"op": "describe", "language": "fr-FR"}`,
+answered with the name, version, effects and generators, their texts in that language
+(the English ones without "language", or for a language it has none for); `{"op": "padding", "id", "values"}`, answered with
 `"padding": [left, top, right, bottom]`; `{"op": "apply", "id", "values", "width",
 "height", "scale"}`; `{"op": "generate", "id", "values", "width", "height",
 "px_per_mm"}`.
@@ -45,7 +53,7 @@ import runpy
 import sys
 
 # The SDK's version, the same as the artwork-plugin-sdk crate's.
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 
 def _with(param, role=None, group=None):
@@ -163,16 +171,81 @@ class Generator:
 class Plugin:
     """What the plugin file provides, as its `plugin` variable."""
 
-    def __init__(self, name, version, effects=(), generators=()):
+    def __init__(self, name, version, effects=(), generators=(), translations=None):
         self.name = name
         self.version = version
         self.effects = list(effects)
         self.generators = list(generators)
+        self.translations = {}
+        for code, catalog in dict(translations or {}).items():
+            if isinstance(catalog, dict) and all(
+                    isinstance(k, str) and isinstance(v, str) for k, v in catalog.items()):
+                self.translations[code] = catalog
+            else:
+                # Left out: that language shows the code's texts.
+                print(f"{name}: translations for {code}: not a dict of strings",
+                      file=sys.stderr)
 
-    def describe(self):
+    def _catalog(self, language):
+        """The catalog of `language`, the closest one there is (same code, else same
+        language), or {}. U.S. English, the language of the code's texts, takes none
+        but its own: another English one (en-GB) would show its spellings."""
+        if not language:
+            return {}
+
+        def norm(code):
+            return code.replace("_", "-").lower()
+
+        want = norm(language)
+        for code, catalog in self.translations.items():
+            if norm(code) == want:
+                return catalog
+        if want == "en-us":
+            return {}
+        for code, catalog in self.translations.items():
+            if norm(code).split("-")[0] == want.split("-")[0]:
+                return catalog
+        return {}
+
+    def _texts(self, x):
+        """The English texts of an effect or generator, to translate."""
+        yield x.name
+        if x.description:
+            yield x.description
+        for p in x.params:
+            yield p["label"]
+            if p.get("group"):
+                yield p["group"]
+            for o in p.get("options", ()):
+                yield o["label"]
+
+    def untranslated(self, language):
+        """The English texts that the catalog of `language` doesn't translate, each once."""
+        catalog = self._catalog(language)
+        missing = []
+        for x in self.effects + self.generators:
+            for text in self._texts(x):
+                if not catalog.get(text) and text not in missing:
+                    missing.append(text)
+        return missing
+
+    def describe(self, language=None):
+        catalog = self._catalog(language)
+
+        def tr(text):
+            return catalog.get(text) or text
+
+        def param(p):
+            p = dict(p, label=tr(p["label"]))
+            if p.get("group"):
+                p["group"] = tr(p["group"])
+            if "options" in p:
+                p["options"] = [dict(o, label=tr(o["label"])) for o in p["options"]]
+            return p
+
         def entry(x):
-            return {"id": x.id, "name": x.name, "description": x.description,
-                    "params": x.params}
+            return {"id": x.id, "name": tr(x.name), "description": tr(x.description),
+                    "params": [param(p) for p in x.params]}
         return {
             "name": self.name,
             "version": self.version,
@@ -185,7 +258,7 @@ class Plugin:
         """The answer to one request, and the pixels to send after it (or None)."""
         op = request.get("op")
         if op == "describe":
-            return dict(self.describe(), ok=True), None
+            return dict(self.describe(request.get("language")), ok=True), None
         values = request.get("values", {})
         if op in ("padding", "apply"):
             effect = self._find(self.effects, request.get("id"))

@@ -14,6 +14,7 @@ use artwork_plugin_sdk::{self as sdk, abi};
 use image::RgbaImage;
 use libloading::Library;
 
+use super::texts::{self, Shown, Texts};
 use super::{Effect, Generator, ParamKind, ParamSpec, Params, Role, color_from_hex, python};
 
 /// A plugin that loaded.
@@ -133,9 +134,7 @@ impl Source {
 /// An effect of a plugin.
 pub struct NativeEffect {
     id: String,
-    name: String,
-    description: String,
-    params: Vec<ParamSpec>,
+    texts: Texts,
     plugin: String,
     table: abi::EffectTable,
     /// Keeps the code behind `table` loaded; `None` for a table built in this process.
@@ -156,15 +155,15 @@ impl Effect for NativeEffect {
     }
 
     fn name(&self) -> &str {
-        &self.name
+        &self.texts.current().name
     }
 
     fn description(&self) -> &str {
-        &self.description
+        &self.texts.current().description
     }
 
     fn params(&self) -> &[ParamSpec] {
-        &self.params
+        &self.texts.current().params
     }
 
     fn plugin(&self) -> Option<&str> {
@@ -232,9 +231,7 @@ fn outcome(r: i32, error: &mut [c_char]) -> Result<(), String> {
 /// A generator of a plugin.
 pub struct NativeGenerator {
     id: String,
-    name: String,
-    description: String,
-    params: Vec<ParamSpec>,
+    texts: Texts,
     plugin: String,
     table: abi::GeneratorTable,
     /// Keeps the code behind `table` loaded; `None` for a table built in this process.
@@ -251,15 +248,15 @@ impl Generator for NativeGenerator {
     }
 
     fn name(&self) -> &str {
-        &self.name
+        &self.texts.current().name
     }
 
     fn description(&self) -> &str {
-        &self.description
+        &self.texts.current().description
     }
 
     fn params(&self) -> &[ParamSpec] {
-        &self.params
+        &self.texts.current().params
     }
 
     fn plugin(&self) -> Option<&str> {
@@ -368,6 +365,13 @@ pub fn recorded(path: &Path) -> Option<Installed> {
 pub fn source_of(path: &Path) -> Option<Source> {
     let origin = origin_of(path)?;
     Some(Source::read(path.parent()?, origin))
+}
+
+/// The repository the plugins of `origin` were installed from, as its folder's
+/// `source.json` says; `None` if that folder isn't there.
+pub fn source(origin: &str) -> Option<Source> {
+    let dir = user_plugins_dir()?.join(origin);
+    dir.is_dir().then(|| Source::read(&dir, origin))
 }
 
 /// Why the Python plugin `path` doesn't run with this app, if its install recorded an
@@ -883,17 +887,32 @@ pub unsafe fn from_table(
     // SAFETY: every ABI version starts with this field.
     let version = unsafe { std::ptr::addr_of!((*table).abi_version).read() };
     // SAFETY: the version says which layout it is.
-    let (name, plugin_version, effect_tables, generator_tables) = match version {
+    let (name, plugin_version, effect_tables, generator_tables, other_texts) = match version {
         1 => {
             let t = unsafe { &*(table as *const abi::PluginTableV1) };
             let effects = unsafe { slice(t.effects, t.effect_count) };
-            unsafe { (string(t.name), string(t.version), effects, &[][..]) }
+            unsafe { (string(t.name), string(t.version), effects, &[][..], None) }
+        }
+        2 => {
+            let t = unsafe { &*(table as *const abi::PluginTableV2) };
+            let effects = unsafe { slice(t.effects, t.effect_count) };
+            let generators = unsafe { slice(t.generators, t.generator_count) };
+            unsafe { (string(t.name), string(t.version), effects, generators, None) }
         }
         abi::ABI_VERSION => {
             let t = unsafe { &*table };
             let effects = unsafe { slice(t.effects, t.effect_count) };
             let generators = unsafe { slice(t.generators, t.generator_count) };
-            unsafe { (string(t.name), string(t.version), effects, generators) }
+            let other = t.texts.map(|f| (f, t.texts_data));
+            unsafe {
+                (
+                    string(t.name),
+                    string(t.version),
+                    effects,
+                    generators,
+                    other,
+                )
+            }
         }
         _ => {
             return Err(format!(
@@ -919,9 +938,7 @@ pub unsafe fn from_table(
         ids.push(d.id.clone());
         effects.push(NativeEffect {
             id: d.id,
-            name: d.name,
-            description: d.description,
-            params: d.params,
+            texts: Texts::new(d.shown),
             plugin: name.clone(),
             table: *e,
             _library: library.clone(),
@@ -943,13 +960,33 @@ pub unsafe fn from_table(
         ids.push(d.id.clone());
         generators.push(NativeGenerator {
             id: d.id,
-            name: d.name,
-            description: d.description,
-            params: d.params,
+            texts: Texts::new(d.shown),
             plugin: name.clone(),
             table: *g,
             _library: library.clone(),
         });
+    }
+    // Its texts in each language of the app.
+    for (language, code) in texts::LANGUAGES {
+        let Some((f, data)) = other_texts else {
+            break;
+        };
+        let code = CString::new(code).expect("no NUL");
+        // SAFETY: the ABI's texts function, with its data; it returns null or a
+        // NUL-terminated string valid while the library is loaded.
+        let json = unsafe { string(f(data, code.as_ptr())) };
+        if json.is_empty() {
+            continue;
+        }
+        match serde_json::from_str(&json) {
+            Ok(v) => {
+                let e = effects.iter_mut().map(|e| (e.id.as_str(), &mut e.texts));
+                texts::read(&v, "effects", language, e);
+                let g = generators.iter_mut().map(|g| (g.id.as_str(), &mut g.texts));
+                texts::read(&v, "generators", language, g);
+            }
+            Err(e) => log::warn!("{name}: texts in {language:?}: {e}"),
+        }
     }
     let info = PluginInfo {
         name,
@@ -978,9 +1015,8 @@ unsafe fn slice<'a, T>(ptr: *const T, count: u32) -> &'a [T] {
 /// What an effect or a generator of a plugin says about itself, checked.
 pub(super) struct Described {
     pub id: String,
-    pub name: String,
-    pub description: String,
-    pub params: Vec<ParamSpec>,
+    /// In U.S. English.
+    pub shown: Shown,
 }
 
 /// Reads and checks the description of an effect or generator (`what`), whose id must
@@ -1032,10 +1068,12 @@ pub(super) fn check(
     }
     let params = param_specs(params).map_err(err)?;
     Ok(Described {
-        name: if name.is_empty() { id.clone() } else { name },
+        shown: Shown {
+            name: if name.is_empty() { id.clone() } else { name },
+            description,
+            params,
+        },
         id,
-        description,
-        params,
     })
 }
 
@@ -1049,7 +1087,7 @@ unsafe fn string(s: *const c_char) -> String {
 }
 
 /// Parses and checks a plugin's parameter list.
-fn param_specs(json: &str) -> Result<Vec<ParamSpec>, String> {
+pub(super) fn param_specs(json: &str) -> Result<Vec<ParamSpec>, String> {
     let json = if json.trim().is_empty() { "[]" } else { json };
     let params: Vec<sdk::Param> =
         serde_json::from_str(json).map_err(|e| format!("invalid parameter list: {e}"))?;
@@ -1143,6 +1181,7 @@ fn param_specs(json: &str) -> Result<Vec<ParamSpec>, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::i18n::Language;
     use crate::render::effects::{EffectInstance, ParamValues};
     use artwork_plugin_sdk::{Image, Param, Values};
     use serde_json::Value;
@@ -1247,6 +1286,66 @@ mod tests {
     }
 
     #[test]
+    fn plugins_give_their_texts_in_the_app_s_languages() {
+        let fr = r#"{"Fill": "Remplir", "Color": "Couleur", "No": "Non", "Half": "Moitie"}"#;
+        let gb = r#"{"Color": "Colour"}"#;
+        let table =
+            sdk::build_translated_table("Test", "1.0", &[("fr", fr), ("en-GB", gb)], || {
+                (vec![Box::new(Fill)], vec![Box::new(Half)])
+            })
+            .unwrap();
+        let (_, effects, gens) = unsafe { from_table(table, Path::new("t.so"), None) }.unwrap();
+        let fill = &effects[0].texts;
+        let (us, fr, gb) = (
+            fill.get(Language::English),
+            fill.get(Language::French),
+            fill.get(Language::BritishEnglish),
+        );
+        assert_eq!(
+            (us.name.as_str(), fr.name.as_str(), gb.name.as_str()),
+            ("Fill", "Remplir", "Fill")
+        );
+        let labels = |s: &Shown| s.params.iter().map(|p| p.label.clone()).collect::<Vec<_>>();
+        assert_eq!(labels(us), ["Color", "Margin", "Fail"]);
+        assert_eq!(labels(fr), ["Couleur", "Margin", "Fail"]);
+        assert_eq!(labels(gb), ["Colour", "Margin", "Fail"]);
+        assert!(
+            matches!(&fr.params[2].kind, ParamKind::Choice { options, .. } if options[0].1 == "Non")
+        );
+        assert_eq!(gens[0].texts.get(Language::French).name, "Moitie");
+        // A catalog that is not one of strings is left out, not the plugin.
+        let bad = r#"{"Fill": 3}"#;
+        let table = sdk::build_translated_table(
+            "Test",
+            "1.0",
+            &[("fr", bad), ("en-GB", r#"{"Color": "Colour"}"#)],
+            || (vec![Box::new(Fill)], vec![]),
+        )
+        .unwrap();
+        let (_, effects, _) = unsafe { from_table(table, Path::new("t.so"), None) }.unwrap();
+        let texts = &effects[0].texts;
+        assert_eq!(texts.get(Language::French).name, "Fill");
+        assert_eq!(labels(texts.get(Language::BritishEnglish))[0], "Colour");
+        // A version 2 table has none: English.
+        let (_, effects, _) = unsafe { from_table(v2(table), Path::new("t.so"), None) }.unwrap();
+        assert_eq!(effects[0].texts.get(Language::French).name, "Fill");
+    }
+
+    /// The version 2 table of `t`, leaked.
+    fn v2(t: &abi::PluginTable) -> *const abi::PluginTable {
+        let v2 = Box::leak(Box::new(abi::PluginTableV2 {
+            abi_version: 2,
+            effect_count: t.effect_count,
+            name: t.name,
+            version: t.version,
+            effects: t.effects,
+            generator_count: t.generator_count,
+            generators: t.generators,
+        }));
+        v2 as *const abi::PluginTableV2 as *const abi::PluginTable
+    }
+
+    #[test]
     fn version_1_plugins_still_load() {
         let t = table();
         let v1 = abi::PluginTableV1 {
@@ -1303,6 +1402,8 @@ mod tests {
             effects: std::ptr::null(),
             generator_count: 0,
             generators: std::ptr::null(),
+            texts_data: std::ptr::null(),
+            texts: None,
         };
         let Err(e) = (unsafe { from_table(&table, path, None) }) else {
             panic!("accepted");

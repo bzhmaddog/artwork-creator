@@ -12,6 +12,7 @@ use crate::render::effects::{
     random_seed, registry,
 };
 use crate::ui::layers::{self, Tool};
+use crate::ui::plugins::missing_name;
 
 /// Drag-and-drop payload: the index of the dragged effect in the layer's stack.
 struct DraggedEffect {
@@ -180,8 +181,7 @@ fn stack_ui(
                 layer: layer_id,
                 index: i,
             });
-            let name =
-                effect.map_or_else(|| missing_name(inst).to_owned(), |e| e.name().to_owned());
+            let name = effect.map_or_else(|| missing_name(ui.ctx(), inst), |e| e.name().to_owned());
             if handle.dragged()
                 && let Some(p) = ui.ctx().pointer_interact_pos()
             {
@@ -213,7 +213,7 @@ fn stack_ui(
                                 (t, e.description().to_owned())
                             }
                             None => (
-                                RichText::new(missing_name(inst))
+                                RichText::new(missing_name(ui.ctx(), inst))
                                     .color(ui.visuals().error_fg_color),
                                 String::new(),
                             ),
@@ -320,7 +320,7 @@ fn stack_ui(
             Some(inst) => {
                 let name = registry()
                     .get(&inst.effect)
-                    .map_or_else(|| missing_name(inst).to_owned(), |e| e.name().to_owned());
+                    .map_or_else(|| missing_name(ui.ctx(), inst), |e| e.name().to_owned());
                 let (ok, cancel, close) = confirm_remove_dialog(ui.ctx(), &name);
                 if ok || cancel || close {
                     ui.data_mut(|d| d.remove::<(usize, String)>(confirm_id));
@@ -528,8 +528,10 @@ pub fn generator_menu(ui: &mut Ui, key: u64, inst: &mut EffectInstance) -> bool 
             }
         });
     if current.is_none() {
-        r.response
-            .on_hover_text(tr!("MISSING_GENERATOR_HINT", id = inst.effect));
+        r.response.on_hover_text(tr!(
+            "MISSING_GENERATOR_HINT",
+            name = missing_name(ui.ctx(), inst)
+        ));
     }
     match picked {
         Some(g) => {
@@ -971,13 +973,6 @@ fn entry_tip(description: &str, plugin: Option<&PluginInfo>) -> String {
         .filter(|l| !l.trim().is_empty())
         .collect();
     lines.join("\n").trim_end().to_owned()
-}
-
-/// The name a missing effect is shown by: the one saved with it, else its id without
-/// the origin of its plugin.
-fn missing_name(inst: &EffectInstance) -> &str {
-    let id = inst.effect.as_str();
-    (inst.name.as_deref()).unwrap_or_else(|| id.rsplit('/').next().unwrap_or(id))
 }
 
 #[cfg(test)]

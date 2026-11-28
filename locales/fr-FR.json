@@ -405,7 +405,7 @@
   "MENU_VIEW": "Affichage",
   "MISSING_EFFECT": "Cet effet est manquant.",
   "MISSING_GENERATOR": "Générateur manquant",
-  "MISSING_GENERATOR_HINT": "\"{id}\" n'est pas disponible : son extension n'est peut-être pas installée.\nIl est conservé dans le projet mais n'est pas dessiné.",
+  "MISSING_GENERATOR_HINT": "\"{name}\" n'est pas disponible : son extension n'est peut-être pas installée.\nIl est conservé dans le projet mais n'est pas dessiné.",
   "MOVE_LAYER_DOWN": "Descendre",
   "MOVE_LAYER_TO_BOTTOM": "Placer en bas de son groupe",
   "MOVE_LAYER_TO_TOP": "Placer en haut de son groupe",

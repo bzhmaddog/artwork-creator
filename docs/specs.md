@@ -687,7 +687,8 @@ that folds them away.
   to 0.20), Dot grid (Halftone) and Bands (Posterize). With none installed, Generated is
   grayed out, its tooltip pointing to the plugin manager.
 - A project using a generator whose plugin is not installed still opens: it shows as
-  "Missing generator", with an Install button when one of the user's repositories has
+  "Missing generator" (its repository and name in the tooltip, as a missing effect is
+  named), with an Install button when one of the user's repositories has
   the plugin, is not drawn, and is saved unchanged. One of the generators that came with
   the app is read as the official repository's plugin of the same name.
 - The magic wand button next to the generator menu (for a generator with a seed
@@ -997,7 +998,11 @@ look there, so `make run` finds the `plugins` folder of the repository.
   autosave copy is then offered back). A Python plugin has your rights too, though a
   crash in it doesn't close the app.
 - A project that uses an effect whose plugin is not installed still opens: the effect is
-  shown by its name in red (saved with it; its id for one saved before), unchecked, with
+  shown in red by its repository's name and its own, "Official plugins / Halftone" (its
+  own saved with it, its id for one saved before; translated when the repository's list
+  translates it; the repository is the one of the user's repositories it was installed
+  from, else the one its plugins folder names, else "Unknown repository"; none for a
+  plugin put in a plugins folder by hand), unchecked, with
   an error box saying it is missing; it is not applied, and is saved unchanged. An effect saves the repository plugin it came from and
   its version (recorded in the repository folder's `source.json` when the plugin is
   installed or updated): when the same repository, among yours, lists that plugin at the
@@ -1008,8 +1013,11 @@ look there, so `make run` finds the `plugins` folder of the repository.
 - Effects and generators from plugins show their names, descriptions and settings in the
   language of the interface when the plugin translates them (the app asks it for each of
   its languages when loading it), in the texts of its code otherwise; changing the
-  language changes them too, without a restart. Plugin names are not translated. A
-  missing generator has the same Install button, below its menu.
+  language changes them too, without a restart. The plugin manager shows a repository's
+  plugins' names, descriptions and effect and generator names in the language of the
+  interface where its list translates them (each version's `texts`). A missing
+  generator's tooltip names it as a missing effect is named, and it has the same Install
+  button, below its menu.
 
 Writing a plugin: see "Plugins" in [README.md](../README.md#plugins).
 

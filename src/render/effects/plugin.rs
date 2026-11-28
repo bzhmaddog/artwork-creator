@@ -367,6 +367,13 @@ pub fn source_of(path: &Path) -> Option<Source> {
     Some(Source::read(path.parent()?, origin))
 }
 
+/// The repository the plugins of `origin` were installed from, as its folder's
+/// `source.json` says; `None` if that folder isn't there.
+pub fn source(origin: &str) -> Option<Source> {
+    let dir = user_plugins_dir()?.join(origin);
+    dir.is_dir().then(|| Source::read(&dir, origin))
+}
+
 /// Why the Python plugin `path` doesn't run with this app, if its install recorded an
 /// SDK older than the oldest this app runs (see [`artwork_plugin_sdk::OLDEST_VERSION`]).
 fn sdk_no_longer_run(path: &Path) -> Option<String> {

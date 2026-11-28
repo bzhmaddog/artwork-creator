@@ -405,7 +405,7 @@
   "MENU_VIEW": "View",
   "MISSING_EFFECT": "This effect is missing.",
   "MISSING_GENERATOR": "Missing generator",
-  "MISSING_GENERATOR_HINT": "\"{id}\" is not available: its plugin may not be installed.\nIt is kept in the project but not drawn.",
+  "MISSING_GENERATOR_HINT": "\"{name}\" is not available: its plugin may not be installed.\nIt is kept in the project but not drawn.",
   "MOVE_LAYER_DOWN": "Move down",
   "MOVE_LAYER_TO_BOTTOM": "Send to the bottom of its group",
   "MOVE_LAYER_TO_TOP": "Bring to the top of its group",

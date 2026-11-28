@@ -13,6 +13,7 @@
 //!         "engines": {"app": ">=0.16.0", "sdk": ">=0.4.0"},
 //!         "compatible_from": "0.1.0",
 //!         "effects": ["Halftone"], "generators": ["Dot grid"],
+//!         "texts": {"fr-FR": {"Halftone": "Similigravure", "Dot grid": "Grille de points"}},
 //!         "files": {"linux-x86_64": {"url": "https://...", "sha256": "...", "size": 1234}}}]
 //! }]}
 //! ```
@@ -24,7 +25,11 @@
 //! plugin, its SDK meet the version requirements of its `engines` (Cargo's syntax), and if
 //! it has a file for this system; a library's `abi` must be one this app loads. Lists
 //! written before `engines` give `min_app` and `sdk` instead, read as `>=` that version;
-//! `min_app` is still written for the apps that read only it. Other fields are ignored.
+//! `min_app` is still written for the apps that read only it. A version's `texts` give,
+//! for each language code, a catalog of its English texts (the plugin's name and
+//! description, its effects' and generators' names) to that language's, as the plugins'
+//! own catalogs do (see [`translate`]); one that can't be read is left out. Other fields
+//! are ignored.
 //!
 //! A plugin or a version this app can't read (a kind it doesn't know, a field it reads
 //! differently, a bad file entry...) is left out of the list, with the rest kept: a list
@@ -83,6 +88,57 @@ fn readable<'de, D: Deserializer<'de>, T: DeserializeOwned>(d: D) -> Result<Vec<
     Ok(items.into_iter().filter_map(read).collect())
 }
 
+/// A value that reads as `T`, else `T`'s default (logged): a version whose texts can't
+/// be read is still offered.
+fn lenient<'de, D: Deserializer<'de>, T: DeserializeOwned + Default>(d: D) -> Result<T, D::Error> {
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(v)
+        .map_err(|e| log::warn!("plugin list: texts left out, unreadable: {e}"))
+        .unwrap_or_default())
+}
+
+/// A version's texts in other languages: for each language code (`"fr-FR"`), a catalog
+/// of the English texts to that language's.
+pub type Texts = BTreeMap<String, BTreeMap<String, String>>;
+
+/// `text`, a plugin's name or description or one of its effects' or generators' names, in
+/// the language of the interface, as `texts` translate it; itself where they don't. A
+/// text in another of their languages (a name saved by the app in French) is read too.
+pub fn translate(texts: &Texts, text: &str) -> String {
+    let code = (super::texts::LANGUAGES.iter())
+        .find(|(l, _)| *l == crate::i18n::current())
+        .map_or("en-US", |(_, c)| c);
+    translate_in(texts, text, code)
+}
+
+/// [`translate`] in the language `code`: the catalog of that code, else one of the same
+/// language (`fr` for `fr-FR`); U.S. English, the language of the texts, takes none but
+/// its own.
+fn translate_in(texts: &Texts, text: &str, code: &str) -> String {
+    let norm = |s: &str| s.replace('_', "-").to_ascii_lowercase();
+    let base = |s: &str| norm(s).split('-').next().unwrap_or_default().to_owned();
+    let want = norm(code);
+    let catalog = (texts.iter().find(|(c, _)| norm(c) == want))
+        .or_else(|| {
+            (want != "en-us")
+                .then(|| texts.iter().find(|(c, _)| base(c) == base(&want)))
+                .flatten()
+        })
+        .map(|(_, t)| t);
+    // The English text, if `text` is one of its translations.
+    let english = if texts.values().any(|t| t.contains_key(text)) {
+        text
+    } else {
+        (texts.values())
+            .find_map(|t| t.iter().find(|(_, v)| *v == text).map(|(k, _)| k.as_str()))
+            .unwrap_or(text)
+    };
+    (catalog.and_then(|t| t.get(english)))
+        .filter(|t| !t.is_empty())
+        .map_or(english, String::as_str)
+        .to_owned()
+}
+
 /// A plugin of a repository.
 #[derive(Clone, Debug, Deserialize)]
 pub struct Entry {
@@ -138,6 +194,9 @@ pub struct Version {
     /// The names of the generators it adds.
     #[serde(default)]
     pub generators: Vec<String>,
+    /// Its texts in other languages (see [`translate`]).
+    #[serde(default, deserialize_with = "lenient")]
+    pub texts: Texts,
     /// By system (`linux-x86_64`...), `any` for a Python plugin.
     pub files: BTreeMap<String, Download>,
 }
@@ -245,6 +304,18 @@ pub fn version_parts(v: &str) -> Option<Vec<u64>> {
 }
 
 impl Entry {
+    /// `text` (its name or description, or one of its effects' or generators' names) in the
+    /// language of the interface, as its newest version translating it says (see
+    /// [`translate`]).
+    pub fn tr(&self, text: &str) -> String {
+        let mut versions: Vec<&Version> = self.versions.iter().collect();
+        versions.sort_by_key(|v| std::cmp::Reverse(version_parts(&v.version)));
+        (versions.into_iter())
+            .map(|v| translate(&v.texts, text))
+            .find(|t| t != text)
+            .unwrap_or_else(|| text.to_owned())
+    }
+
     /// The latest version that works with this app on this system, and its file.
     pub fn best(&self) -> Option<(&Version, &Download)> {
         self.compatible().into_iter().next()
@@ -411,7 +482,7 @@ pub fn known<'a>(
             path.clone(),
             Known {
                 id: p.id.clone(),
-                description: p.description.clone(),
+                description: p.tr(&p.description),
                 version,
                 effects: v.map(|v| v.effects.clone()).unwrap_or_default(),
                 generators: v.map(|v| v.generators.clone()).unwrap_or_default(),
@@ -732,6 +803,39 @@ mod tests {
         let short = Download { size: 3, ..d };
         assert!(download(&short, &dir).is_err());
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn texts_are_read_in_the_language_asked() {
+        let list = parse(
+            r#"{"format": 1, "name": "R", "plugins": [{"id": "checkerboard",
+              "name": "Checkerboard", "description": "Squares", "kind": "library",
+              "versions": [
+                {"version": "1.0.0", "generators": ["Checkerboard"],
+                 "texts": {"fr-FR": {"Checkerboard": "Damier"}, "en-GB": {}},
+                 "files": {"any": {"url": "https://x/c.so", "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "size": 1}}},
+                {"version": "1.1.0", "generators": ["Checkerboard"],
+                 "texts": {"fr-FR": {"Squares": "Cases"}, "de": {"Squares": 3}},
+                 "files": {"any": {"url": "https://x/c.so", "sha256": "0000000000000000000000000000000000000000000000000000000000000000", "size": 1}}}
+              ]}]}"#,
+        )
+        .unwrap();
+        let p = &list.plugins[0];
+        // Unreadable texts are left out, not the version.
+        assert_eq!(p.versions.len(), 2);
+        assert!(p.versions[1].texts.is_empty());
+        let (old, new) = (&p.versions[0].texts, &p.versions[1].texts);
+        assert_eq!(translate_in(old, "Checkerboard", "fr-FR"), "Damier");
+        assert_eq!(translate_in(old, "Checkerboard", "fr_CA"), "Damier");
+        assert_eq!(translate_in(old, "Checkerboard", "en-GB"), "Checkerboard");
+        assert_eq!(translate_in(new, "Squares", "fr-FR"), "Squares");
+        // A name saved in French, shown in English.
+        assert_eq!(translate_in(old, "Damier", "en-US"), "Checkerboard");
+        assert_eq!(translate_in(old, "Damier", "fr-FR"), "Damier");
+        assert_eq!(translate_in(old, "Other", "fr-FR"), "Other");
+        let en_gb: Texts = [("en-GB".into(), [("Color".into(), "Colour".into())].into())].into();
+        assert_eq!(translate_in(&en_gb, "Color", "en-US"), "Color");
+        assert_eq!(translate_in(&en_gb, "Color", "en-AU"), "Colour");
     }
 
     #[test]

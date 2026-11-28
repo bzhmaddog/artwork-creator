@@ -423,7 +423,7 @@ fn panel_adds_and_removes_effects() {
     assert_eq!(effects(&h).len(), 1);
     let labels = h.frame(vec![]);
     assert!(
-        !labels.iter().any(|(t, _)| t == "Sepia"),
+        !labels.iter().any(|(t, _)| t == "Grayscale"),
         "menu closed after picking"
     );
     assert_eq!(effects(&h)[0].effect, "builtin.invert");

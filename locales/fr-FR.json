@@ -203,8 +203,6 @@
   "EFFECT_OUTLINE_HINT": "Une ligne le long du bord de la forme de l'image : ses pixels visibles",
   "EFFECT_POSTERIZE": "Postériser",
   "EFFECT_POSTERIZE_HINT": "Réduire chaque canal à quelques niveaux",
-  "EFFECT_SEPIA": "Sépia",
-  "EFFECT_SEPIA_HINT": "Tons de photographie ancienne",
   "EFFECT_SHARPEN": "Netteté",
   "EFFECT_SHARPEN_HINT": "Masque flou : renforcer les contours",
   "EFFECT_THRESHOLD": "Seuil",

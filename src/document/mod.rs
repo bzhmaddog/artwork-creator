@@ -1384,14 +1384,22 @@ impl Document {
         doc.for_each_layer_mut(|l| {
             if let Some(s) = l.shape.as_deref_mut() {
                 s.canvas |= !s.strokes.is_empty();
-                // The built-in generators of older apps come from plugins now.
-                if let Some(g) = s.fill_generator.as_mut() {
-                    crate::render::effects::generators::migrate(g);
-                }
             }
+            migrate_layer(l);
         });
         Ok(doc)
     }
+}
+
+/// Gives the effects and generated fill of a layer saved by an older app their current
+/// form: its built-in generators come from plugins now, and Sepia is a Tint.
+pub(crate) fn migrate_layer(l: &mut Layer) {
+    if let Some(g) = (l.shape.as_deref_mut()).and_then(|s| s.fill_generator.as_mut()) {
+        crate::render::effects::generators::migrate(g);
+    }
+    l.effects
+        .iter_mut()
+        .for_each(crate::render::effects::builtin::migrate);
 }
 
 #[cfg(test)]

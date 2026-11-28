@@ -8,6 +8,22 @@ use crate::i18n::{tr_noop, translate};
 type ApplyFn = fn(&mut RgbaImage, &Params, f32) -> Result<(), String>;
 type PaddingFn = fn(&Params) -> [f32; 4];
 
+/// The color of old photographs: Tint's, in colorize mode, for the Sepia effect of apps up
+/// to 0.20 (the tone the sepia matrix gives a mid gray).
+pub const SEPIA: [u8; 4] = [172, 153, 119, 255];
+
+/// Gives an effect of an older app its current form: Sepia (`builtin.sepia`) is Tint in
+/// colorize mode with the [`SEPIA`] color, at the same amount. Others are left as they are.
+pub fn migrate(inst: &mut super::EffectInstance) {
+    if inst.effect != "builtin.sepia" {
+        return;
+    }
+    inst.effect = "builtin.tint".into();
+    let color = super::color_to_hex(SEPIA);
+    inst.params.insert("color".into(), color.into());
+    inst.params.insert("mode".into(), "colorize".into());
+}
+
 /// An effect made of a function and its parameter list.
 struct Builtin {
     id: &'static str,
@@ -113,19 +129,6 @@ pub fn all() -> Vec<Box<dyn Effect>> {
                 100.0,
             )],
             grayscale,
-        ),
-        effect(
-            "builtin.sepia",
-            tr_noop!("EFFECT_SEPIA"),
-            tr_noop!("EFFECT_SEPIA_HINT"),
-            vec![percent(
-                "amount",
-                tr_noop!("PARAM_AMOUNT"),
-                0.0,
-                100.0,
-                100.0,
-            )],
-            sepia,
         ),
         effect(
             "builtin.tint",
@@ -403,20 +406,6 @@ fn grayscale(img: &mut RgbaImage, p: &Params, _: f32) -> Result<(), String> {
     par_pixels(img, |px| {
         let y = luma(px);
         mix(px, [y; 3], t);
-    });
-    Ok(())
-}
-
-fn sepia(img: &mut RgbaImage, p: &Params, _: f32) -> Result<(), String> {
-    let t = p.f32("amount") / 100.0;
-    par_pixels(img, |px| {
-        let [r, g, b] = [px[0], px[1], px[2]].map(f32::from);
-        let to = [
-            0.393 * r + 0.769 * g + 0.189 * b,
-            0.349 * r + 0.686 * g + 0.168 * b,
-            0.272 * r + 0.534 * g + 0.131 * b,
-        ];
-        mix(px, to, t);
     });
     Ok(())
 }
@@ -1323,6 +1312,31 @@ mod tests {
             inst.params.insert((*k).into(), v.clone());
         }
         assert!(apply(img, &[inst], scale).errors.is_empty());
+    }
+
+    #[test]
+    fn sepia_of_older_apps_is_a_tint() {
+        let mut inst = super::super::EffectInstance {
+            effect: "builtin.sepia".into(),
+            enabled: false,
+            params: [("amount".into(), 40.into())].into(),
+            links: Default::default(),
+            plugin: None,
+            name: None,
+        };
+        migrate(&mut inst);
+        assert_eq!(inst.effect, "builtin.tint");
+        let p = &inst.params;
+        assert_eq!(
+            (p["amount"].clone(), p["mode"].clone()),
+            (40.into(), "colorize".into())
+        );
+        assert_eq!(p["color"], "#ac9977ff");
+        assert!(!inst.enabled, "kept off");
+        let mut other = EffectInstance::new(registry().get("builtin.invert").unwrap());
+        let kept = other.clone();
+        migrate(&mut other);
+        assert_eq!(other, kept);
     }
 
     #[test]

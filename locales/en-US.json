@@ -203,8 +203,6 @@
   "EFFECT_OUTLINE_HINT": "A line along the edge of the image's shape: its visible pixels",
   "EFFECT_POSTERIZE": "Posterize",
   "EFFECT_POSTERIZE_HINT": "Reduce each channel to a few levels",
-  "EFFECT_SEPIA": "Sepia",
-  "EFFECT_SEPIA_HINT": "Old photograph tones",
   "EFFECT_SHARPEN": "Sharpen",
   "EFFECT_SHARPEN_HINT": "Unsharp mask: strengthen edges",
   "EFFECT_THRESHOLD": "Threshold",

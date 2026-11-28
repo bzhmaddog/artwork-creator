@@ -105,12 +105,8 @@ impl Clipboard {
         // not have.
         crate::document::colors::adopt_links(&mut doc.variables, &mut node);
         crate::document::text_links::adopt_links(&mut doc.variables, &mut node);
-        // From an older app, its built-in generators come from plugins now.
-        node.for_each_layer_mut(&mut |l| {
-            if let Some(g) = (l.shape.as_deref_mut()).and_then(|s| s.fill_generator.as_mut()) {
-                crate::render::effects::generators::migrate(g);
-            }
-        });
+        // From an older app: in the current form of its effects and generators.
+        node.for_each_layer_mut(&mut crate::document::migrate_layer);
         // Over the copied group itself, the copy goes next to it rather than inside.
         let path = match selected.filter(|&s| Some(s) == self.source) {
             Some(s) => doc.path_of(s).map(|mut p| {

@@ -684,7 +684,7 @@ that folds them away.
   outline.
 - Generators come from [plugins](#plugins), listed under the plugin's name: the
   official repository has Noise, Clouds, Checkerboard and Stripes (part of the app up
-  to 0.20), Dot grid (Halftone) and Bands (Posterize). With none installed, Generated is
+  to 0.20) and Dot grid (Halftone). With none installed, Generated is
   grayed out, its tooltip pointing to the plugin manager.
 - A project using a generator whose plugin is not installed still opens: it shows as
   "Missing generator" (its repository and name in the tooltip, as a missing effect is
@@ -804,7 +804,6 @@ page (a text's follow the font size).
 | Brightness / Contrast | brightness, contrast (-100 to 100%) |
 | Hue / Saturation | hue (-180° to 180°), saturation, lightness |
 | Grayscale | amount |
-| Sepia | amount |
 | Tint | color, mode (colorize, multiply, screen), amount |
 | Invert | |
 | Posterize | levels (2 to 64) |
@@ -816,6 +815,8 @@ page (a text's follow the font size).
 | Fade (linear) | toward (right, left, top, bottom), fade start, fully transparent at, curve |
 | Fade (radial) | center x / y, fade start, fully transparent at, curve, transparent center |
 
+- Sepia, an effect of the app up to 0.20, is a Tint now: one saved in a project opens
+  (or is pasted) as Tint in colorize mode with a sepia color, at the same amount.
 - The fades work along the layer's visible pixels, so margins added by a shadow or outline
   do not count. Their **curve** is an easing curve as in animation tools: Linear, Ease in,
   Ease out, Ease in-out, or your own by dragging the two handles of its graph.

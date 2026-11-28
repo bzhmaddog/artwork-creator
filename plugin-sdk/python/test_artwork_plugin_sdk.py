@@ -1,5 +1,6 @@
 """Tests of the Python plugin SDK (python3 -m unittest discover -s plugin-sdk/python)."""
 
+import contextlib
 import io
 import json
 import os
@@ -118,6 +119,14 @@ class SdkTest(unittest.TestCase):
         self.assertEqual(answer["effects"][0]["params"][0]["label"], "Color")
         [(answer, _)] = exchange(gb, ({"op": "describe", "language": "en-AU"}, b""))
         self.assertEqual(answer["effects"][0]["params"][0]["label"], "Colour")
+        # A catalog that is not one of strings is left out, with a warning.
+        with contextlib.redirect_stderr(io.StringIO()) as err:
+            bad = ap.Plugin("Test", "2.0", effects=[Fill()],
+                            translations={"fr-FR": {"Fill": 3}, "de-DE": "Füllen"})
+        self.assertEqual(bad.translations, {})
+        self.assertIn("fr-FR", err.getvalue())
+        [(answer, _)] = exchange(bad, ({"op": "describe", "language": "fr-FR"}, b""))
+        self.assertEqual(answer["effects"][0]["name"], "Fill")
         self.assertEqual(plugin.untranslated("de-DE"), ["Fill", "Color", "Fail", "No", "Yes", "Dot"])
 
     def test_calls(self):

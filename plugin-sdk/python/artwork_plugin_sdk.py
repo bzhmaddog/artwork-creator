@@ -176,7 +176,15 @@ class Plugin:
         self.version = version
         self.effects = list(effects)
         self.generators = list(generators)
-        self.translations = dict(translations or {})
+        self.translations = {}
+        for code, catalog in dict(translations or {}).items():
+            if isinstance(catalog, dict) and all(
+                    isinstance(k, str) and isinstance(v, str) for k, v in catalog.items()):
+                self.translations[code] = catalog
+            else:
+                # Left out: that language shows the code's texts.
+                print(f"{name}: translations for {code}: not a dict of strings",
+                      file=sys.stderr)
 
     def _catalog(self, language):
         """The catalog of `language`, the closest one there is (same code, else same

@@ -1306,6 +1306,19 @@ mod tests {
             matches!(&fr.params[2].kind, ParamKind::Choice { options, .. } if options[0].1 == "Non")
         );
         assert_eq!(gens[0].texts.get(Language::French).name, "Moitie");
+        // A catalog that is not one of strings is left out, not the plugin.
+        let bad = r#"{"Fill": 3}"#;
+        let table = sdk::build_translated_table(
+            "Test",
+            "1.0",
+            &[("fr", bad), ("en-GB", r#"{"Color": "Colour"}"#)],
+            || (vec![Box::new(Fill)], vec![]),
+        )
+        .unwrap();
+        let (_, effects, _) = unsafe { from_table(table, Path::new("t.so"), None) }.unwrap();
+        let texts = &effects[0].texts;
+        assert_eq!(texts.get(Language::French).name, "Fill");
+        assert_eq!(labels(texts.get(Language::BritishEnglish))[0], "Colour");
         // A version 2 table has none: English.
         let (_, effects, _) = unsafe { from_table(v2(table), Path::new("t.so"), None) }.unwrap();
         assert_eq!(effects[0].texts.get(Language::French).name, "Fill");

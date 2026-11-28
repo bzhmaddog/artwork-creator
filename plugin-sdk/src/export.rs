@@ -114,7 +114,8 @@ pub fn build_table(
 
 /// [`build_table`], with the plugin's texts in other languages: for each language code
 /// (`"fr-FR"`), a catalog of the English texts to that language's (see
-/// [`crate::untranslated`]). `None` too if a catalog is not a JSON object of strings.
+/// [`crate::untranslated`]). A catalog that is not a JSON object of strings is left out,
+/// with a warning on stderr: that language shows the code's texts.
 pub fn build_translated_table(
     name: &str,
     version: &str,
@@ -127,12 +128,14 @@ pub fn build_translated_table(
         let (effects, generators) = contents;
         let languages = translations
             .iter()
-            .map(|(language, json)| {
-                let catalog = translate::parse(language, json)?;
+            .filter_map(|(language, json)| {
+                let catalog = (translate::parse(language, json))
+                    .inspect_err(|e| eprintln!("{name}: {e}"))
+                    .ok()?;
                 let texts = translate::describe(&effect_texts, &generator_texts, &catalog);
-                Ok(((*language).to_owned(), leak(&texts)))
+                Some(((*language).to_owned(), leak(&texts)))
             })
-            .collect::<Result<Vec<_>, String>>()?;
+            .collect();
         let languages: &'static Languages = Box::leak(Box::new(Languages(languages)));
         let params_of = |t: &Texts| serde_json::to_string(&t.params).expect("params serialize");
         let effects: Vec<EffectTable> = effects
@@ -172,7 +175,7 @@ pub fn build_translated_table(
             .collect();
         let effects = Box::leak(effects.into_boxed_slice());
         let generators = Box::leak(generators.into_boxed_slice());
-        Ok::<_, String>(&*Box::leak(Box::new(PluginTable {
+        &*Box::leak(Box::new(PluginTable {
             abi_version: ABI_VERSION,
             effect_count: effects.len() as u32,
             name: leak(name),
@@ -182,16 +185,9 @@ pub fn build_translated_table(
             generators: generators.as_ptr(),
             texts_data: (languages as *const Languages).cast(),
             texts: (!languages.0.is_empty()).then_some(texts as abi::TextsFn),
-        })))
+        }))
     }));
-    match r {
-        Ok(Ok(table)) => Some(table),
-        Ok(Err(e)) => {
-            eprintln!("{name}: {e}");
-            None
-        }
-        Err(_) => None,
-    }
+    r.ok()
 }
 
 /// A plugin's texts in each language it has, as the `texts` function gives them.

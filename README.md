@@ -223,7 +223,8 @@ descriptions, parameter labels, groups and choice labels; not units) to the lang
 ...])` in Rust, `Plugin(..., translations={"en-US": {...}, ...})` in Python;
 `untranslated` (Rust) and `plugin.untranslated("fr-FR")` (Python) tell a plugin's tests
 what a catalog lacks. A catalog for `fr` or `fr-FR` is used for every French; U.S.
-English takes only an `en-US` catalog, never `en-GB`.
+English takes only an `en-US` catalog, never `en-GB`. A catalog that is not one of
+strings is left out, with a warning on stderr; that language shows the code's texts.
 Translations need plugin SDK 0.6.0: plugin interface version 3 for a library, which older
 apps don't load, and `engines.sdk` `>=0.6.0` for a Python plugin.
 

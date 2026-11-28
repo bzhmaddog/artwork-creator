@@ -32,7 +32,8 @@
 //! language's, one JSON file per language code:
 //! `export_plugin!(name: …, version: …, effects: [Fade], generators: [], translations:
 //! [("fr-FR", include_str!("../locales/fr-FR.json"))])`. The app shows the texts of its
-//! language, the closest one there is (`fr-FR` for `fr-CA`), else the English ones.
+//! language, the closest one there is (`fr-FR` for `fr-CA`), else the English ones; for
+//! U.S. English, only an `en-US` catalog, never another English one.
 //! [`untranslated`] tells a plugin's tests what a catalog lacks.
 //!
 //! Build it with `cargo build --release` and copy the library (`.dll` on Windows, `.so`

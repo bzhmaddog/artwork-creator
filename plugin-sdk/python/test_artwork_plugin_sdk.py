@@ -112,6 +112,12 @@ class SdkTest(unittest.TestCase):
         [(answer, _)] = exchange(plugin, ({"op": "describe", "language": "de-DE"}, b""))
         self.assertEqual(answer["effects"][0]["name"], "Fill")
         self.assertEqual(plugin.untranslated("fr-FR"), ["Fail", "Yes"])
+        # U.S. English is the code's: never another English.
+        gb = ap.Plugin("Test", "2.0", effects=[Fill()], translations={"en-GB": {"Color": "Colour"}})
+        [(answer, _)] = exchange(gb, ({"op": "describe", "language": "en-US"}, b""))
+        self.assertEqual(answer["effects"][0]["params"][0]["label"], "Color")
+        [(answer, _)] = exchange(gb, ({"op": "describe", "language": "en-AU"}, b""))
+        self.assertEqual(answer["effects"][0]["params"][0]["label"], "Colour")
         self.assertEqual(plugin.untranslated("de-DE"), ["Fill", "Color", "Fail", "No", "Yes", "Dot"])
 
     def test_calls(self):

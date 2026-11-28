@@ -180,7 +180,8 @@ class Plugin:
 
     def _catalog(self, language):
         """The catalog of `language`, the closest one there is (same code, else same
-        language), or {}."""
+        language), or {}. U.S. English, the language of the code's texts, takes none
+        but its own: another English one (en-GB) would show its spellings."""
         if not language:
             return {}
 
@@ -191,6 +192,8 @@ class Plugin:
         for code, catalog in self.translations.items():
             if norm(code) == want:
                 return catalog
+        if want == "en-us":
+            return {}
         for code, catalog in self.translations.items():
             if norm(code).split("-")[0] == want.split("-")[0]:
                 return catalog

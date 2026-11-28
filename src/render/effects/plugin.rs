@@ -1299,6 +1299,7 @@ mod tests {
             ("Fill", "Remplir", "Fill")
         );
         let labels = |s: &Shown| s.params.iter().map(|p| p.label.clone()).collect::<Vec<_>>();
+        assert_eq!(labels(us), ["Color", "Margin", "Fail"]);
         assert_eq!(labels(fr), ["Couleur", "Margin", "Fail"]);
         assert_eq!(labels(gb), ["Colour", "Margin", "Fail"]);
         assert!(

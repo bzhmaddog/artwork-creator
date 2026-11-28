@@ -20,13 +20,19 @@ pub(crate) fn parse(language: &str, json: &str) -> Result<Catalog, String> {
 }
 
 /// The catalog of `language` in `list` (by code): the same code, else one of the same
-/// language (`fr` or `fr-FR` for `fr-CA`), ignoring case and `_` for `-`.
+/// language (`fr` or `fr-FR` for `fr-CA`), ignoring case and `_` for `-`. U.S. English,
+/// the language of the code's texts, takes none but its own: another English one
+/// (`en-GB`) would show its spellings.
 pub(crate) fn pick<'a, T>(list: &'a [(String, T)], language: &str) -> Option<&'a T> {
     let norm = |s: &str| s.replace('_', "-").to_ascii_lowercase();
     let want = norm(language);
     let base = |s: &str| s.split('-').next().unwrap_or_default().to_owned();
     (list.iter().find(|(l, _)| norm(l) == want))
-        .or_else(|| list.iter().find(|(l, _)| base(&norm(l)) == base(&want)))
+        .or_else(|| {
+            (want != "en-us")
+                .then(|| list.iter().find(|(l, _)| base(&norm(l)) == base(&want)))
+                .flatten()
+        })
         .map(|(_, t)| t)
 }
 
@@ -156,8 +162,9 @@ mod tests {
         assert_eq!(pick(&list, "fr_CA"), Some(&1));
         assert_eq!(pick(&list, "EN-gb"), Some(&2));
         assert_eq!(pick(&list, "de-AT"), Some(&3));
-        // en-GB is not U.S. English, but the closest there is.
-        assert_eq!(pick(&list, "en-US"), Some(&2));
+        // U.S. English is the code's: never another English.
+        assert_eq!(pick(&list, "en-US"), None);
+        assert_eq!(pick(&list, "en-AU"), Some(&2));
         assert_eq!(pick(&list, "it-IT"), None);
     }
 
